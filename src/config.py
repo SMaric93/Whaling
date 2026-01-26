@@ -47,6 +47,60 @@ ARCHIVE_ORG_URLS = {
     "register_ocr": "https://archive.org/stream/registerofwhalin1843mutu/registerofwhalin1843mutu_djvu.txt",
 }
 
+# Online Voyage Augmentation Pack - New Sources
+ONLINE_SOURCE_URLS = {
+    # Starbuck (1878) - History of American Whale Fishery
+    "starbuck_pdf": "https://archive.org/download/historyofamerica00star/historyofamerica00star.pdf",
+    "starbuck_ocr": "https://archive.org/stream/historyofamerica00star/historyofamerica00star_djvu.txt",
+    # Logbook datasets from WhalingHistory.org
+    "maury_logbooks": "https://whalinghistory.org/maury/MauryLogbookData.zip",
+    "townsend_logbooks": "https://whalinghistory.org/townsend/TownsendLogbookData.zip",
+    "coml_logbooks": "https://whalinghistory.org/coml/CoMLLogbookData.zip",
+    # Whalemen's Shipping List project page (for PDF enumeration)
+    "wsl_project_page": "https://nmdl.org/projects/wsl/",
+}
+
+# Raw data subdirectories for new sources
+RAW_WSL = RAW_DIR / "wsl_pdfs"
+RAW_STARBUCK = RAW_DIR / "starbuck"
+RAW_MAURY = RAW_DIR / "maury"
+RAW_CONSOLIDATED = RAW_DIR / "consolidated_logbooks"
+RAW_ICOADS = RAW_DIR / "icoads"
+
+# =============================================================================
+# WSL EVENT CONFIGURATION
+# =============================================================================
+
+WSL_EVENT_TYPES = [
+    "DEPARTURE",
+    "ARRIVAL",
+    "SPOKEN_WITH",
+    "REPORTED_AT",
+    "WRECK",
+    "LOSS",
+    "CAPTURED",
+    "DAMAGED",
+    "RETURNED_HOME",
+    "OTHER",
+]
+
+# Match confidence thresholds for crosswalks
+MATCH_CONFIDENCE_THRESHOLDS = {
+    "high": 0.9,
+    "medium": 0.7,
+    "low": 0.5,
+}
+
+# License notes for new sources
+LICENSE_NOTES_ONLINE = {
+    "starbuck": "Public Domain - Starbuck (1878) via Archive.org",
+    "maury": "CC BY 4.0 - WhalingHistory.org Maury Logbook Data",
+    "townsend": "CC BY 4.0 - WhalingHistory.org Townsend Logbook Data",
+    "coml": "CC BY 4.0 - WhalingHistory.org Census of Marine Life Data",
+    "wsl": "Public Domain - Whalemen's Shipping List via NMDL",
+    "icoads": "Public Domain - NOAA ICOADS",
+}
+
 # =============================================================================
 # DATE AND TIME CONVENTIONS
 # =============================================================================

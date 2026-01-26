@@ -130,6 +130,54 @@ def expand_abbreviations(text: Optional[str]) -> Optional[str]:
     return " ".join(tokens)
 
 
+def normalize_port_name(name: Optional[str]) -> Optional[str]:
+    """
+    Normalize a port name.
+    
+    Similar to vessel name normalization with additional handling
+    for common port name abbreviations and formatting.
+    
+    Args:
+        name: Raw port name string
+        
+    Returns:
+        Normalized port name, or None if input is None/empty
+    """
+    if name is None or not str(name).strip():
+        return None
+    
+    # Convert to string and title case for ports
+    text = str(name).strip()
+    
+    # Uppercase for matching, but we'll store in title case
+    text_upper = text.upper()
+    
+    # Strip punctuation
+    text_upper = re.sub(r"[^A-Z\s]", " ", text_upper)
+    
+    # Collapse whitespace
+    text_upper = re.sub(r"\s+", " ", text_upper).strip()
+    
+    # Common port abbreviations
+    port_abbrevs = {
+        "NB": "NEW BEDFORD",
+        "N B": "NEW BEDFORD",
+        "N BEDFORD": "NEW BEDFORD",
+        "NANTKT": "NANTUCKET",
+        "N LONDON": "NEW LONDON",
+        "S HARBOR": "SAG HARBOR",
+        "GREENPT": "GREENPORT",
+        "P TOWN": "PROVINCETOWN",
+        "PROV TOWN": "PROVINCETOWN",
+    }
+    
+    # Check for exact abbreviation match
+    if text_upper in port_abbrevs:
+        return port_abbrevs[text_upper]
+    
+    return text_upper if text_upper else None
+
+
 def extract_suffix(name: str) -> tuple:
     """
     Extract suffix (JR, SR, etc.) from a name.
