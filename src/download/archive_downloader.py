@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import Optional, List
 import logging
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import ARCHIVE_ORG_URLS, RAW_INSURANCE
-from download.manifest import ManifestManager
+from ..config import ARCHIVE_ORG_URLS, RAW_INSURANCE
+from .manifest import ManifestManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

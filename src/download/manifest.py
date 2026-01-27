@@ -17,9 +17,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import MANIFEST_FILE, MANIFEST_FIELDS, LICENSE_NOTES
+from ..config import MANIFEST_FILE, MANIFEST_FIELDS, LICENSE_NOTES
 
 
 @dataclass

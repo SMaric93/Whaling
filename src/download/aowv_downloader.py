@@ -14,10 +14,8 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 import logging
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import AOWV_URLS, RAW_AOWV, RAW_CREWLIST, RAW_LOGBOOKS, LICENSE_NOTES
-from download.manifest import ManifestManager
+from ..config import AOWV_URLS, RAW_AOWV, RAW_CREWLIST, RAW_LOGBOOKS, LICENSE_NOTES
+from .manifest import ManifestManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

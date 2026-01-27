@@ -35,39 +35,14 @@ from .config import (
     FIGURES_DIR,
     SampleConfig,
     DEFAULT_SAMPLE,
+    TFPConfig,
+    DEFAULT_TFP_CONFIG,
 )
 from .connected_set import find_leave_one_out_connected_set
 from .data_loader import prepare_analysis_sample
+from ..utils.regression import cluster_robust_se, build_fe_design_matrix
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-
-
-# =============================================================================
-# TFP Configuration
-# =============================================================================
-
-@dataclass
-class TFPConfig:
-    """Configuration for TFP analysis."""
-    
-    # Regime cutoff
-    regime_cutoff_year: int = 1870
-    alternative_cutoffs: List[int] = field(default_factory=lambda: [1865, 1875])
-    
-    # Winsorization
-    winsorize_tfp_pct: float = 1.0  # Winsorize at 1st/99th percentile
-    
-    # Analysis options
-    run_chow_test: bool = True
-    use_common_support: bool = False  # Restrict to overlapping tonnage range
-    use_regime_specific_beta: bool = True  # If False, use pooled beta
-    
-    # Clustering
-    primary_cluster: str = "agent_id"
-    secondary_cluster: str = "captain_id"
-
-
-DEFAULT_TFP_CONFIG = TFPConfig()
 
 
 # =============================================================================
@@ -192,50 +167,7 @@ def prepare_tfp_sample(
 # =============================================================================
 # W2: Tonnage Elasticity Estimation
 # =============================================================================
-
-def build_fe_design_matrix(
-    df: pd.DataFrame,
-    fe_cols: List[str],
-) -> Tuple[sp.csr_matrix, Dict]:
-    """
-    Build sparse design matrix for fixed effects.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Data with FE group columns.
-    fe_cols : List[str]
-        Column names for fixed effect groups.
-        
-    Returns
-    -------
-    Tuple[sp.csr_matrix, Dict]
-        (design_matrix, index_maps)
-    """
-    n = len(df)
-    matrices = []
-    index_maps = {}
-    
-    for col in fe_cols:
-        ids = df[col].unique()
-        id_map = {v: i for i, v in enumerate(ids)}
-        idx = df[col].map(id_map).values
-        
-        X_full = sp.csr_matrix(
-            (np.ones(n), (np.arange(n), idx)),
-            shape=(n, len(ids))
-        )
-        # Drop first for identification (except first FE)
-        if len(matrices) > 0:
-            X = X_full[:, 1:]
-        else:
-            X = X_full
-        
-        matrices.append(X)
-        index_maps[col] = {"ids": ids, "map": id_map, "n": len(ids)}
-    
-    X = sp.hstack(matrices)
-    return X, index_maps
+# Note: build_fe_design_matrix is imported from ..utils.regression
 
 
 def estimate_tonnage_elasticity(
@@ -294,7 +226,7 @@ def estimate_tonnage_elasticity(
     r2_pooled = 1 - np.var(resid_pooled) / np.var(y)
     
     # Cluster-robust SE (primary cluster)
-    se_pooled = _cluster_robust_se(
+    se_pooled = cluster_robust_se(
         X_pooled[:, 0].toarray().flatten(), resid_pooled, 
         df[config.primary_cluster].values, coef_idx=0
     )
@@ -334,11 +266,11 @@ def estimate_tonnage_elasticity(
     r2_regime = 1 - np.var(resid_regime) / np.var(y)
     
     # Cluster-robust SEs
-    se_pre = _cluster_robust_se(
+    se_pre = cluster_robust_se(
         X_regime[:, 0].toarray().flatten(), resid_regime,
         df[config.primary_cluster].values, coef_idx=0
     )
-    se_post = _cluster_robust_se(
+    se_post = cluster_robust_se(
         X_regime[:, 1].toarray().flatten(), resid_regime,
         df[config.primary_cluster].values, coef_idx=0
     )
@@ -417,50 +349,7 @@ def estimate_tonnage_elasticity(
     return results
 
 
-def _cluster_robust_se(
-    x: np.ndarray,
-    residuals: np.ndarray,
-    clusters: np.ndarray,
-    coef_idx: int = 0,
-) -> float:
-    """
-    Compute cluster-robust standard error for a single coefficient.
-    
-    Parameters
-    ----------
-    x : np.ndarray
-        Regressor values (n,).
-    residuals : np.ndarray
-        Regression residuals.
-    clusters : np.ndarray
-        Cluster identifiers.
-        
-    Returns
-    -------
-    float
-        Cluster-robust standard error.
-    """
-    unique_clusters = np.unique(clusters)
-    G = len(unique_clusters)
-    n = len(x)
-    
-    # Cluster sums of x * residual
-    cluster_sums = np.zeros(G)
-    for g, c in enumerate(unique_clusters):
-        mask = clusters == c
-        cluster_sums[g] = np.sum(x[mask] * residuals[mask])
-    
-    # Meat of sandwich
-    meat = np.sum(cluster_sums**2)
-    
-    # Bread
-    bread = np.sum(x**2)
-    
-    # Cluster-robust variance with small-sample correction
-    correction = (G / (G - 1)) * ((n - 1) / (n - 1))  # Simplified
-    var_beta = correction * meat / (bread**2)
-    
-    return np.sqrt(max(0, var_beta))
+# Note: cluster_robust_se is imported from ..utils.regression
 
 
 # =============================================================================

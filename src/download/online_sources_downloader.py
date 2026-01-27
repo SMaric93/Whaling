@@ -15,13 +15,11 @@ from pathlib import Path
 from typing import Optional, List, Dict
 import logging
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import (
+from ..config import (
     ONLINE_SOURCE_URLS, RAW_STARBUCK, RAW_MAURY, RAW_CONSOLIDATED,
     LICENSE_NOTES_ONLINE,
 )
-from download.manifest import ManifestManager
+from .manifest import ManifestManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

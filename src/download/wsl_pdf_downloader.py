@@ -9,7 +9,12 @@ Target: Years overlapping with AOWV data (approx. 1784-1928)
 """
 
 import requests
-from bs4 import BeautifulSoup
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+    BeautifulSoup = None  # type: ignore
 import re
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
@@ -19,12 +24,10 @@ import hashlib
 import json
 import pandas as pd
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import (
+from ..config import (
     ONLINE_SOURCE_URLS, RAW_WSL, STAGING_DIR, LICENSE_NOTES_ONLINE,
 )
-from download.manifest import ManifestManager
+from .manifest import ManifestManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +54,12 @@ def scrape_wsl_pdf_links(
     """
     if project_url is None:
         project_url = ONLINE_SOURCE_URLS["wsl_project_page"]
+    
+    if not HAS_BS4:
+        raise ImportError(
+            "BeautifulSoup (bs4) is required for WSL PDF scraping. "
+            "Install with: pip install beautifulsoup4"
+        )
     
     logger.info(f"Fetching WSL project page: {project_url}")
     

@@ -5,6 +5,7 @@ from .string_normalizer import (
     normalize_vessel_name,
     expand_abbreviations,
     parse_date,
+    jaro_winkler_similarity,
 )
 from .voyage_parser import VoyageParser
 from .crew_parser import CrewParser
@@ -15,7 +16,9 @@ __all__ = [
     "normalize_vessel_name", 
     "expand_abbreviations",
     "parse_date",
+    "jaro_winkler_similarity",
     "VoyageParser",
     "CrewParser",
     "LogbookParser",
 ]
+
