@@ -60,12 +60,30 @@ ONLINE_SOURCE_URLS = {
     "wsl_project_page": "https://nmdl.org/projects/wsl/",
 }
 
+# Weather and climate index URLs
+WEATHER_DATA_URLS = {
+    # Atlantic Oscillation
+    "nao_index": "https://climatedataguide.ucar.edu/sites/default/files/2022-03/nao_station_annual.txt",
+    "hurdat2": "https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt",
+    # Pacific climate indices
+    "pdo_index": "https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.pdo.dat",
+    "enso_nino34": "https://psl.noaa.gov/data/correlation/nina34.anom.data",
+}
+
+# Economic data URLs
+ECONOMIC_DATA_URLS = {
+    # EIA historical petroleum prices (interactive, may need hardcoded fallback)
+    "eia_crude_oil": "https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=pet&s=f000000__3&f=a",
+}
+
 # Raw data subdirectories for new sources
 RAW_WSL = RAW_DIR / "wsl_pdfs"
 RAW_STARBUCK = RAW_DIR / "starbuck"
 RAW_MAURY = RAW_DIR / "maury"
 RAW_CONSOLIDATED = RAW_DIR / "consolidated_logbooks"
 RAW_ICOADS = RAW_DIR / "icoads"
+RAW_WEATHER = RAW_DIR / "weather"
+RAW_ECONOMIC = RAW_DIR / "economic"
 
 # =============================================================================
 # WSL EVENT CONFIGURATION

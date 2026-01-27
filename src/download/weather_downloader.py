@@ -33,6 +33,11 @@ WEATHER_FINAL_DIR = DATA_DIR  # Merge into final data directory
 NAO_URL = "https://climatedataguide.ucar.edu/sites/default/files/2022-03/nao_station_annual.txt"
 HURDAT_URL = "https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt"
 
+# Pacific climate indices for Pacific whaling ground analysis
+PDO_URL = "https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.pdo.dat"
+# Use HadISST-based Niño 3.4 from NOAA PSL (1870-present, more reliable)
+NINO34_URL = "https://psl.noaa.gov/data/correlation/nina34.anom.data"
+
 # Atlantic hurricane corridor relevant to New England whaling routes
 # Bounding box for "Cape Horn to New Bedford" corridor exposure
 ATLANTIC_CORRIDOR = {
@@ -105,6 +110,160 @@ def categorize_nao(nao_value: float) -> str:
         return "strong_negative"
     elif nao_value <= -0.5:
         return "negative"
+    else:
+        return "neutral"
+
+
+# =============================================================================
+# PDO Index Download and Parse
+# =============================================================================
+
+def download_pdo_index() -> pd.DataFrame:
+    """
+    Download and parse the Pacific Decadal Oscillation Index.
+    
+    The PDO affects multi-decadal Pacific climate patterns:
+    - Positive (warm) PDO: Warmer eastern Pacific, affects whale prey distribution
+    - Negative (cool) PDO: Cooler eastern Pacific, different migration patterns
+    
+    Returns
+    -------
+    pd.DataFrame
+        Columns: [year, pdo_annual, pdo_phase]
+    """
+    print("Downloading PDO Index...")
+    
+    try:
+        response = requests.get(PDO_URL, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"  Warning: Could not download PDO data: {e}")
+        return pd.DataFrame(columns=["year", "pdo_annual", "pdo_phase"])
+    
+    # Parse the fixed-width text data
+    # Format: YEAR JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC
+    lines = response.text.strip().split("\n")
+    records = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("Year") or line.startswith("#"):
+            continue
+        
+        parts = line.split()
+        if len(parts) >= 13:
+            try:
+                year = int(parts[0])
+                # Parse monthly values, handling missing data (-99.99)
+                monthly_vals = []
+                for val in parts[1:13]:
+                    v = float(val)
+                    if v > -90:  # Valid value
+                        monthly_vals.append(v)
+                
+                if monthly_vals:
+                    annual_mean = sum(monthly_vals) / len(monthly_vals)
+                    records.append({
+                        "year": year,
+                        "pdo_annual": round(annual_mean, 3),
+                    })
+            except ValueError:
+                continue
+    
+    df = pd.DataFrame(records)
+    
+    if len(df) > 0:
+        df["pdo_phase"] = df["pdo_annual"].apply(categorize_pdo)
+        print(f"  Downloaded PDO index: {df['year'].min()}-{df['year'].max()} ({len(df)} years)")
+    
+    return df
+
+
+def categorize_pdo(pdo_value: float) -> str:
+    """Categorize PDO into phases for easier interpretation."""
+    if pdo_value >= 0.5:
+        return "warm"
+    elif pdo_value <= -0.5:
+        return "cool"
+    else:
+        return "neutral"
+
+
+# =============================================================================
+# ENSO / Niño 3.4 Index Download and Parse
+# =============================================================================
+
+def download_enso_index() -> pd.DataFrame:
+    """
+    Download and parse the Niño 3.4 SST anomaly index (proxy for ENSO).
+    
+    ENSO affects inter-annual Pacific climate:
+    - El Niño (positive): Warmer eastern Pacific, altered whale distribution
+    - La Niña (negative): Cooler eastern Pacific, different migration patterns
+    
+    Returns
+    -------
+    pd.DataFrame
+        Columns: [year, enso_annual, enso_phase]
+    """
+    print("Downloading ENSO (Niño 3.4) Index...")
+    
+    try:
+        response = requests.get(NINO34_URL, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"  Warning: Could not download ENSO data: {e}")
+        return pd.DataFrame(columns=["year", "enso_annual", "enso_phase"])
+    
+    # Parse the data - format similar to PDO
+    # YEAR JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC
+    lines = response.text.strip().split("\n")
+    records = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line or not line[0].isdigit():
+            continue
+        
+        parts = line.split()
+        if len(parts) >= 13:
+            try:
+                year = int(parts[0])
+                # Skip header/footer years outside range
+                if year < 1800 or year > 2100:
+                    continue
+                    
+                # Parse monthly values, handling missing data (-99.99)
+                monthly_vals = []
+                for val in parts[1:13]:
+                    v = float(val)
+                    if v > -90:  # Valid value
+                        monthly_vals.append(v)
+                
+                if monthly_vals:
+                    annual_mean = sum(monthly_vals) / len(monthly_vals)
+                    records.append({
+                        "year": year,
+                        "enso_annual": round(annual_mean, 3),
+                    })
+            except ValueError:
+                continue
+    
+    df = pd.DataFrame(records)
+    
+    if len(df) > 0:
+        df["enso_phase"] = df["enso_annual"].apply(categorize_enso)
+        print(f"  Downloaded ENSO index: {df['year'].min()}-{df['year'].max()} ({len(df)} years)")
+    
+    return df
+
+
+def categorize_enso(enso_value: float) -> str:
+    """Categorize ENSO into phases for easier interpretation."""
+    if enso_value >= 0.5:
+        return "el_nino"
+    elif enso_value <= -0.5:
+        return "la_nina"
     else:
         return "neutral"
 
@@ -426,12 +585,23 @@ def download_and_integrate_weather(
     nao_df = download_nao_index()
     nao_df["nao_phase"] = nao_df["nao_index"].apply(categorize_nao)
     
+    # Download Pacific climate indices (PDO and ENSO)
+    pdo_df = download_pdo_index()
+    enso_df = download_enso_index()
+    
     # Download and process HURDAT2
     storms = download_hurdat2()
     hurricane_annual = compute_annual_hurricane_metrics(storms)
     
     # Merge annual data
     annual_weather = nao_df.merge(hurricane_annual, on="year", how="outer")
+    
+    # Add Pacific indices
+    if len(pdo_df) > 0:
+        annual_weather = annual_weather.merge(pdo_df, on="year", how="outer")
+    if len(enso_df) > 0:
+        annual_weather = annual_weather.merge(enso_df, on="year", how="outer")
+    
     annual_weather = annual_weather.sort_values("year").reset_index(drop=True)
     
     # Filter to whaling era (1800-1920)
@@ -442,6 +612,8 @@ def download_and_integrate_weather(
     print(f"\nAnnual weather data: {len(annual_weather)} years")
     print(f"  NAO coverage: {annual_weather['nao_index'].notna().sum()} years")
     print(f"  Hurricane coverage: {annual_weather['n_storms'].notna().sum()} years")
+    print(f"  PDO coverage: {annual_weather['pdo_annual'].notna().sum() if 'pdo_annual' in annual_weather.columns else 0} years")
+    print(f"  ENSO coverage: {annual_weather['enso_annual'].notna().sum() if 'enso_annual' in annual_weather.columns else 0} years")
     
     # Voyage-level integration
     if voyages_path is None:
@@ -455,11 +627,19 @@ def download_and_integrate_weather(
         # Compute voyage-level hurricane exposure
         voyage_exposure = compute_voyage_hurricane_exposure(voyages, storms)
         
+        # Build list of annual columns to merge (only those that exist)
+        annual_cols = ["year", "nao_index", "nao_phase", "n_storms", 
+                       "n_hurricanes", "ace_approx", "corridor_storms"]
+        # Add Pacific indices if available
+        if "pdo_annual" in annual_weather.columns:
+            annual_cols.extend(["pdo_annual", "pdo_phase"])
+        if "enso_annual" in annual_weather.columns:
+            annual_cols.extend(["enso_annual", "enso_phase"])
+        
         # Merge annual weather by year_out
         voyage_weather = voyages[["voyage_id", "year_out"]].copy()
         voyage_weather = voyage_weather.merge(
-            annual_weather[["year", "nao_index", "nao_phase", "n_storms", 
-                           "n_hurricanes", "ace_approx", "corridor_storms"]],
+            annual_weather[[c for c in annual_cols if c in annual_weather.columns]],
             left_on="year_out",
             right_on="year",
             how="left"
@@ -480,11 +660,19 @@ def download_and_integrate_weather(
         print(f"  Total voyages: {len(voyage_weather):,}")
         print(f"  With NAO data: {voyage_weather['nao_index'].notna().sum():,}")
         print(f"  With hurricane data: {voyage_weather['annual_storms'].notna().sum():,}")
+        if "pdo_annual" in voyage_weather.columns:
+            print(f"  With PDO data: {voyage_weather['pdo_annual'].notna().sum():,}")
+        if "enso_annual" in voyage_weather.columns:
+            print(f"  With ENSO data: {voyage_weather['enso_annual'].notna().sum():,}")
     
     # Save raw data
     if save_raw:
         nao_df.to_csv(WEATHER_RAW_DIR / "nao_annual.csv", index=False)
         hurricane_annual.to_csv(WEATHER_RAW_DIR / "hurricane_annual.csv", index=False)
+        if len(pdo_df) > 0:
+            pdo_df.to_csv(WEATHER_RAW_DIR / "pdo_annual.csv", index=False)
+        if len(enso_df) > 0:
+            enso_df.to_csv(WEATHER_RAW_DIR / "enso_annual.csv", index=False)
         annual_weather.to_csv(WEATHER_RAW_DIR / "weather_annual_combined.csv", index=False)
         
         if len(voyage_weather) > 0:

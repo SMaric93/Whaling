@@ -160,7 +160,164 @@ After running analyses, find results in:
 
 ---
 
-## Pipeline Architecture
+## Weather and Climate Data
+
+The pipeline integrates historical climate data to control for environmental conditions and enable instrumental variable designs.
+
+### Climate Data Sources
+
+| Source | File | Coverage | Variables |
+|--------|------|----------|-----------|
+| **NAO** | `nao_annual.csv` | 1865–1920 (21%) | North Atlantic Oscillation index |
+| **PDO** | `pdo_annual.csv` | 1854–1930 (34%) | Pacific Decadal Oscillation |
+| **AMO** | `amo_annual.csv` | 1856–1930 (31%) | Atlantic Multidecadal Oscillation |
+| **HURDAT** | `hurricane_annual.csv` | 1851–1920 (39%) | Atlantic hurricane counts, ACE |
+| **NSIDC** | `sea_ice/*.csv` | 1850–1920 (40%) | NH ice extent, regional ice |
+| **SILSO** | `sunspot_annual.csv` | 1700–1930 (99%) | Sunspot numbers |
+| **Volcanic** | `volcanic_forcing_annual.csv` | 1750–1930 (98%) | Eruption forcing index |
+| **HadCRUT5** | `global_temp_hadcrut.csv` | 1850–1930 (40%) | Global temperature anomaly |
+
+### Key Climate Variables
+
+```python
+# Ice extent (regional)
+'nh_ice_extent_mean'   # Northern Hemisphere mean ice extent
+'bering_ice_mean'      # Bering Sea ice (most relevant for Arctic routes)
+'chukchi_ice_mean'     # Chukchi Sea ice
+'beaufort_ice_mean'    # Beaufort Sea ice
+
+# Hurricane activity
+'n_hurricanes'         # Count of Atlantic hurricanes per year
+'ace_zscore'           # Accumulated Cyclone Energy (standardized)
+'corridor_hurricane_days'  # Days with hurricanes in shipping corridors
+
+# Ocean oscillations
+'nao_index'            # North Atlantic Oscillation (-3 to +3)
+'pdo_index'            # Pacific Decadal Oscillation
+'amo_index'            # Atlantic Multidecadal Oscillation
+
+# Other
+'sunspot_number'       # Solar cycle indicator
+'volcanic_forcing'     # Radiative forcing from major eruptions
+'global_temp_anomaly'  # Global temperature anomaly (°C)
+```
+
+### Main Climate Effects
+
+| Variable | β (standardized) | Interpretation |
+|----------|------------------|----------------|
+| **Bering Ice** | +0.30*** | More ice → higher output (whale concentration) |
+| **ACE Hurricanes** | -0.17*** | Storm energy hurts voyage success |
+| **AMO** | +0.23*** | Warm Atlantic → higher output |
+| NAO | -0.03 | Not significant |
+| PDO | -0.00 | Not significant |
+| Sunspots | +0.003*** | Weak positive |
+
+### Climate × Skill Interactions
+
+| Interaction | β | Interpretation |
+|-------------|---|----------------|
+| Ice × Captain θ | +0.16** | High-skill captains exploit ice better |
+| Ice × Agent ψ | -0.32*** | High-ψ agents suffer in high-ice years |
+
+### Instrumental Variable Designs
+
+The weather data enables several IV specifications:
+
+#### 1. Shift-Share (Bartik) Exposure
+
+```
+Z_{a,t} = Σ_g (s_{a,g}^{pre} × Weather_{g,t})
+```
+
+- Agent's predetermined route mix × year-specific weather
+- Instruments exploration intensity (F-stat ≈ 8.4)
+
+#### 2. Ice Threshold Instrument
+
+- High ice years → changes Arctic route feasibility
+- First stage: Ice → Pr(Arctic) (t = 4.75***)
+
+#### 3. Lagged Hurricane Exposure
+
+- Last year's hurricanes → predicts agent switching
+- First stage: Lag Hurr → Switch (t = -6.43***)
+
+### Climate Output Files
+
+| File | Contents |
+|------|----------|
+| `output/weather/weather_regressions.json` | Main climate regression results |
+| `output/climate/comprehensive_climate_analysis.json` | Full climate analysis |
+| `output/iv/iv_analysis_results.json` | IV estimation results |
+| `output/weather/ice_vs_output_binned_scatter.png` | Visualization of ice effects |
+
+### Running Weather Analyses
+
+```bash
+# Download weather data
+python -c "from src.download.weather_downloader import download_all_weather; download_all_weather()"
+
+# Run climate regressions
+python -c "
+from pathlib import Path
+import pandas as pd
+
+df = pd.read_parquet('data/final/analysis_voyage_with_climate.parquet')
+print(f'Voyages with ice data: {df[\"bering_ice_mean\"].notna().sum():,}')
+"
+```
+
+---
+
+## Economic Data
+
+The pipeline integrates historical economic data to control for demand-side factors affecting whaling productivity.
+
+### Economic Data Sources
+
+| Source | File | Coverage | Variables |
+|--------|------|----------|-----------|
+| **EIA Petroleum** | `petroleum_prices.csv` | 1860–1920 | US crude oil prices |
+| **WSL Market Prices** | `wsl_price_quotes.parquet` | 1843–1914 | Whale oil, bone prices |
+
+### Petroleum Prices
+
+The 1859 Drake Well discovery marks the beginning of petroleum as a whale oil competitor. The `economic_downloader.py` module provides:
+
+```python
+# Key variables
+'crude_oil_price_usd'  # Nominal $/barrel
+'log_oil_price'        # For regression interpretation 
+'oil_price_change'     # YoY percentage change
+'oil_price_rel_1860'   # Relative to 1860 peak ($9.59)
+'petroleum_era'        # Boolean: year >= 1860
+```
+
+**Key Story:** Oil crashed from $9.59/bbl (1860) to $0.49 (1861) after initial overproduction. By 1880s, oil was <$1/bbl—whale oil couldn't compete on price.
+
+### WSL Market Prices
+
+The `wsl_market_parser.py` module extracts commodity prices from Whalemen's Shipping List PDFs:
+
+```python
+from src.parsing.wsl_market_parser import extract_prices_from_issue
+from src.parsing.wsl_pdf_parser import parse_wsl_issue
+
+issue = parse_wsl_issue(Path("data/raw/wsl_pdfs/18651017.pdf"))
+prices = extract_prices_from_issue(issue)
+# Returns: sperm_oil, whale_oil, whalebone prices
+```
+
+### Running Economic Downloads
+
+```bash
+# Download petroleum prices
+python src/download/economic_downloader.py
+
+# Parse WSL market prices (requires PDFs)
+python src/parsing/wsl_market_parser.py
+```
 
 The pipeline consists of 16 sequential stages organized into three major phases:
 
