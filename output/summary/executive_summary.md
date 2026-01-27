@@ -1,102 +1,38 @@
 # Whaling Empirical Analysis: Executive Summary
 
-## Overview
+## Key Findings
 
-Analysis of **9,229 voyages** (1780–1930) from the LOO-connected sample, with **2,311 captains** and **777 agents**. Model achieves **R² = 0.96**.
+### 1. Variance Decomposition (R1)
 
----
+- **Labor market components** (captain + agent) variance is large relative to outcome variance
+- This reflects negative covariance with vessel×period and route×time FEs
 
-## 1. Variance Decomposition (R1): Who Creates Value?
+**Within captain+agent variance** (KSS-corrected):
+  - **Captain skill (α)**: 11.6%
+  - **Agent capability (γ)**: 94.1%
+  - **Sorting (2×Cov)**: -5.6%
+- Model R² = 0.960
+- Corr(α, γ) = -0.085 (negative = substitutes)
 
-| Component | Share (within α+γ) | Interpretation |
-|-----------|-------------------|----------------|
-| **Agent capability (γ)** | **95.4%** | Agents are the dominant driver of labor market variance |
-| **Captain skill (α)** | **14.2%** | Captain skill matters, but is secondary |
-| **Sorting (2×Cov)** | **-9.7%** | Negative sorting dampens total variance |
+### 2. Portability Validation (R2)
 
-**Interpretation**: Agent capability dominates the labor market component. Agents were the venture capitalists — they selected crews, provisioned vessels, chose routes, and bore financial risk. The **negative sorting** (Corr = -0.131) suggests **substitute matching**: high-skill captains paired with lower-capability agents.
+- OOS prediction coefficient b = 0.149
+- Spearman rank correlation = 0.039
 
----
+### 3. Resilience Under Adversity (R6)
 
-## 2. Skill Portability (R2): Does Captain Skill Transfer?
+- Interaction coefficient φ = 0.0000
+- No evidence of resilience advantage
 
-| Metric | Value | Interpretation |
-|--------|-------|----------------|
-| OOS coefficient (b) | **0.143** | Partial portability |
-| Spearman ρ | -0.011 | Noisy rank preservation |
+### 4. Labor Market Sorting (R13)
 
-**Interpretation**: Captain skill is **real and portable** across time. ~14% of in-sample skill variation persists out-of-sample.
+- Sorting coefficient = 0.1047
+- Raw correlation(α̂, γ̂) = -0.0536
+- Diagonal share = 18.4% (random = 20%)
 
----
+## Sample Information
 
-## 3. Event Study (R3): What Happens When Captains Switch Agents?
-
-| Finding | Value |
-|---------|-------|
-| Pre-switch trend | Stable/declining |
-| Post-switch trajectory | **-0.3 log points by t+5** |
-
-**Interpretation**: Captains who switch agents experience **sustained productivity decline**. Relationship-specific capital is lost upon separation.
-
----
-
-## 4. Resilience (R6): Do Good Agents Buffer Shocks?
-
-| Metric | Value |
-|--------|-------|
-| φ (Z × HighCap interaction) | **0.000** |
-
-**Interpretation**: No evidence that high-capability agents attenuate output losses under adversity.
-
----
-
-## 5. Labor Market Sorting (R13): Do Good Captains Match with Good Agents?
-
-| Metric | Value | Interpretation |
-|--------|-------|----------------|
-| Sorting coefficient (b) | **0.120** | Positive coefficient |
-| Raw correlation (α̂, γ̂) | **-0.074** | Slight negative matching |
-| Diagonal share | **18.6%** | Near random (20%) |
-
-**Interpretation**: The labor market shows **weak negative assortative matching**. High-skill captains do not systematically match with high-capability agents.
-
----
-
-## 6. Switching Hazard (R14): Who Switches and Why?
-
-| Coefficient | Value | Interpretation |
-|-------------|-------|----------------|
-| α̂ → Switch | **-0.015** | High-skill captains are **retained** |
-| γ̂ → Switch | **+0.014** | High-capability agents have **higher turnover** |
-
-**Interpretation**: Skilled captains are less likely to switch — agents want to keep them. High-capability agents have higher captain turnover, suggesting they are more selective.
-
----
-
-## 7. Talent Acquisition (R15): Do Better Agents Hire Better Captains?
-
-| Metric | Value |
-|--------|-------|
-| γ̂ → Hire Quality | **-0.031** |
-
-**Interpretation**: No evidence of acquisition advantage. Captain talent is observable in the market.
-
----
-
-## Summary
-
-| Question | Finding |
-|----------|---------|
-| **Who creates value?** | Agents dominate (95.4%), captains contribute (14.2%) |
-| **Is skill real?** | Yes — partially portable out-of-sample (b = 0.14) |
-| **Do relationships matter?** | Yes — agent switches cause sustained productivity decline |
-| **Is matching efficient?** | No — weak/negative sorting, near-random matching |
-| **Who gets retained?** | High-skill captains stay; high-capability agents have turnover |
-| **Do good agents buffer shocks?** | No evidence of resilience advantage |
-
-### Bottom Line
-
-The whaling labor market was characterized by **agent dominance** in value creation, **sticky relationships** (switching is costly), and **inefficient matching**. Captain skill is real and portable, but agents appear to have been the key value-creating asset — acting as the **"venture capitalists of the sea."**
+- Analysis sample: 9,229 voyages
 
 ---
 *Generated by Whaling Analyses Module*

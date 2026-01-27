@@ -23,6 +23,7 @@ def build_sparse_design_matrix(
     df: pd.DataFrame,
     include_vessel_period: bool = True,
     include_route_time: bool = True,
+    include_port_time: bool = True,
 ) -> Tuple[sp.csr_matrix, Dict]:
     """
     Build sparse design matrix for AKM estimation.
@@ -35,6 +36,8 @@ def build_sparse_design_matrix(
         Whether to include vessel×period FEs.
     include_route_time : bool
         Whether to include route×time FEs.
+    include_port_time : bool
+        Whether to include port×time FEs (home port × decade).
         
     Returns
     -------
@@ -94,6 +97,19 @@ def build_sparse_design_matrix(
         matrices.append(X_rt)
         index_maps["route_time"] = {"ids": rt_ids, "map": rt_map, "n": len(rt_ids)}
     
+    # Port×time FEs (drop first) - home port × decade
+    if include_port_time and "port_time" in df.columns:
+        pt_ids = df["port_time"].unique()
+        pt_map = {p: i for i, p in enumerate(pt_ids)}
+        pt_idx = df["port_time"].map(pt_map).values
+        X_pt_full = sp.csr_matrix(
+            (np.ones(n), (np.arange(n), pt_idx)),
+            shape=(n, len(pt_ids))
+        )
+        X_pt = X_pt_full[:, 1:]
+        matrices.append(X_pt)
+        index_maps["port_time"] = {"ids": pt_ids, "map": pt_map, "n": len(pt_ids)}
+    
     # Continuous controls
     controls = []
     control_names = []
@@ -112,6 +128,7 @@ def build_sparse_design_matrix(
     X = sp.hstack(matrices)
     
     return X, index_maps
+
 
 
 def estimate_r1(
@@ -165,6 +182,8 @@ def estimate_r1(
         print(f"  Vessel×period FEs: {index_maps['vessel_period']['n']} (−1 normalized)")
     if "route_time" in index_maps:
         print(f"  Route×time FEs: {index_maps['route_time']['n']} (−1 normalized)")
+    if "port_time" in index_maps:
+        print(f"  Port×time FEs: {index_maps['port_time']['n']} (−1 normalized)")
     if "controls" in index_maps:
         print(f"  Controls: {index_maps['controls']['names']}")
     
