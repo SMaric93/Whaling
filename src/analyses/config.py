@@ -59,6 +59,30 @@ class SampleConfig:
 DEFAULT_SAMPLE = SampleConfig()
 
 
+@dataclass
+class TFPConfig:
+    """Configuration for TFP analysis."""
+    
+    # Regime cutoff
+    regime_cutoff_year: int = 1870
+    alternative_cutoffs: List[int] = field(default_factory=lambda: [1865, 1875])
+    
+    # Winsorization
+    winsorize_tfp_pct: float = 1.0  # Winsorize at 1st/99th percentile
+    
+    # Analysis options
+    run_chow_test: bool = True
+    use_common_support: bool = False  # Restrict to overlapping tonnage range
+    use_regime_specific_beta: bool = True  # If False, use pooled beta
+    
+    # Clustering
+    primary_cluster: str = "agent_id"
+    secondary_cluster: str = "captain_id"
+
+
+DEFAULT_TFP_CONFIG = TFPConfig()
+
+
 # =============================================================================
 # Fixed Effect Structures
 # =============================================================================

@@ -69,6 +69,79 @@ python -m src.analyses.run_all           # Run all R1-R17 regressions
 python -m src.analyses.run_all --quick   # Run main text regressions only
 ```
 
+### Exploratory & ML Analyses
+
+The project includes additional exploratory analyses beyond the core regression suite:
+
+```bash
+# Quick analysis scripts (run from project root with venv activated)
+source venv/bin/activate
+
+# Load and explore data interactively
+python -c "
+import pandas as pd
+df = pd.read_parquet('data/final/analysis_voyage_with_climate.parquet')
+print(df.info())
+print(df.describe())
+"
+
+# Captain fixed effects analysis
+python -c "
+import pandas as pd
+fe = pd.read_csv('output/tables/r1_captain_effects.csv')
+print(f'Captains: {len(fe)}')
+print(fe['alpha_hat'].describe())
+"
+
+# Agent fixed effects analysis
+python -c "
+import pandas as pd
+fe = pd.read_csv('output/tables/r1_agent_effects.csv')
+print(f'Agents: {len(fe)}')
+print(fe['gamma_hat'].describe())
+"
+```
+
+### Key Data Files for Analysis
+
+| File | Location | Description |
+|------|----------|-------------|
+| Main voyage data | `data/final/analysis_voyage_with_climate.parquet` | 11,622 voyages with outcomes |
+| Captain FE | `output/tables/r1_captain_effects.csv` | α̂ estimates for 2,311 captains |
+| Agent FE | `output/tables/r1_agent_effects.csv` | γ̂ estimates for 777 agents |
+| Variance decomp | `output/tables/table_variance_decomposition.csv` | KSS-corrected shares |
+| Concentration | `output/tables/agent_concentration_by_decade.csv` | HHI by decade |
+
+### Analysis Summaries
+
+After running analyses, find results in:
+
+| File | Contents |
+|------|----------|
+| `output/summary/executive_summary.md` | Core R1-R17 findings |
+| `output/summary/management_science_summary.md` | Paper-ready summary |
+| `output/summary/complete_analysis_findings.md` | All 35+ exploratory analyses |
+| `output/summary/extended_analyses_summary.md` | ML and pattern discovery |
+
+### Key Columns for Analysis
+
+```python
+# Voyage-level
+'voyage_id'         # Unique identifier
+'captain_id'        # Captain entity ID
+'agent_id'          # Agent entity ID
+'sail_year'         # Departure year (derived from date_out)
+'q_total_index'     # Production (barrels equivalent)
+'tonnage'           # Vessel tonnage
+'ground_or_route'   # Whaling ground/route
+'home_port'         # Departure port
+'rig'               # Vessel type (Ship, Bark, Brig, etc.)
+
+# Fixed effects (after merge)
+'alpha_hat'         # Captain skill estimate
+'gamma_hat'         # Agent capability estimate
+```
+
 ---
 
 ## Data Sources

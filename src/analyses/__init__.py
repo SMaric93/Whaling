@@ -20,3 +20,4 @@ from . import strategy
 from . import labor_market
 from . import extensions
 from . import output_generator
+from . import tfp_analysis
