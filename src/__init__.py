@@ -1,6 +1,6 @@
-"""Whaling Data Pipeline - Venture Capital of the Sea."""
+"""
+Whaling Data Pipeline - Venture Capital of the Sea.
 
-__version__ = "0.22"
 A comprehensive data pipeline for assembling, analyzing, and linking
 American whaling voyage data with census records for captain wealth analysis.
 
@@ -23,7 +23,8 @@ Analysis:
     run_all_analyses, prepare_analysis_sample
 """
 
-__version__ = "0.22"
+__version__ = "0.23"
+
 
 # Re-export core configuration
 from .config import (

@@ -21,3 +21,8 @@ from . import labor_market
 from . import extensions
 from . import output_generator
 from . import tfp_analysis
+from . import risk_matching
+from . import search_theory
+from . import counterfactual_simulations
+
+
