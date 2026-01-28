@@ -812,6 +812,118 @@ linkage = LinkageConfig(
 
 ---
 
+## Counterfactual Simulations
+
+The `counterfactual_suite.py` module implements five counterfactual exercises that quantify the economic value of organizational structures in 19th-century whaling.
+
+### Core Production Function
+
+All counterfactuals build on the estimated production function with captain-agent interaction:
+
+```
+log(Q) = β_θ·θ + β_ψ·ψ + β₃·(θ × ψ) + controls + ε
+```
+
+where:
+
+- **θ** = captain skill (α̂ from R1)
+- **ψ** = agent capability (γ̂ from R1)
+- **β₃** = interaction term (substitutes if < 0, complements if > 0)
+
+The key estimate: **β₃ varies by ground type**:
+
+| Ground | β₃ | Interpretation |
+|--------|-----|----------------|
+| Sparse | **-0.052** | Strong substitutes (agents substitute for captain skill) |
+| Rich | +0.011 | Weak complements |
+
+---
+
+### CF_A2: Map Diffusion to Sparse Grounds
+
+**Question**: What output gains from transferring routing technology ("maps") to agents on sparse grounds?
+
+**Method**: Uses the movers design to estimate how agent capability (ψ) shifts search geometry (Lévy μ). High-ψ agents operate with μ closer to 2.0 (optimal Lévy). We simulate transferring this μ improvement to low-ψ agents on sparse grounds.
+
+| Metric | Value |
+|--------|-------|
+| Target group | 1,628 voyages (low-ψ × sparse) |
+| Mean Δlog_q | **+0.47%** |
+
+**Interpretation**: Organizational "maps" (routing knowledge embedded in agents) have modest but positive value. The effect is concentrated on sparse grounds where information advantages matter most.
+
+---
+
+### CF_B5: Matching Counterfactuals (PAM vs AAM)
+
+**Question**: Is observed negative sorting efficient given β₃ < 0?
+
+**Method**: Within route×time cells, we recompute output under:
+
+- **PAM** (Positive Assortative Matching): high-θ captains matched with high-ψ agents
+- **AAM** (Anti-Assortative Matching): high-θ captains matched with low-ψ agents
+
+| Ground | β₃ | PAM Effect | AAM Effect |
+|--------|-----|------------|------------|
+| **Sparse** | -0.052 | **-5.50%** | **+2.69%** |
+| **Rich** | +0.011 | +1.04% | -0.73% |
+| **Overall** | -- | -1.02% | +0.32% |
+
+**Interpretation**:
+
+- **Sparse grounds**: Substitutes → AAM optimal. Switching to PAM would cost 5.5% output.
+- **Rich grounds**: Weak complements → PAM marginally better.
+- The observed matching is close to efficient AAM, confirming industry learned to sort negatively where substitution is strongest.
+
+---
+
+### CF_F15: Inequality Decomposition
+
+**Question**: Which factor explains output dispersion—captain skill (θ), agent capability (ψ), or map technology (μ)?
+
+**Method**: Sequentially equalize each factor and compute the reduction in output variance.
+
+| Policy | Variance Reduction |
+|--------|-------------------|
+| Equalize ψ (agent) | **1.073** |
+| Equalize θ (captain) | 1.066 |
+| Equalize map tech (μ) | 0.006 |
+
+**Interpretation**: Agent capability and captain skill explain nearly equal shares of output inequality. Map technology (search geometry) explains very little—suggesting routing knowledge is already widely diffused or less important than bilateral human capital.
+
+---
+
+### CF_C8 & CF_A3 (Require Weather Data)
+
+These counterfactuals require hurricane/ice exposure data:
+
+- **CF_C8**: Decomposes exploration into trait (captain-specific) vs forced (weather-induced) components
+- **CF_A3**: Tests whether map adoption matters more in high-risk climate states
+
+### Running Counterfactuals
+
+```bash
+# Run full counterfactual suite
+python -c "
+from src.analyses.counterfactual_suite import run_full_counterfactual_suite
+run_full_counterfactual_suite(save_outputs=True)
+"
+
+# Outputs saved to: output/counterfactual/tables/
+```
+
+### Output Files
+
+| File | Contents |
+|------|----------|
+| `cf_a2_map_diffusion.csv` | Map diffusion results by ground type |
+| `cf_b5_matching_route_time.csv` | Matching counterfactuals (route×time cells) |
+| `cf_b5_matching_decade_ground.csv` | Matching counterfactuals (decade×ground cells) |
+| `cf_f15_inequality.csv` | Inequality decomposition |
+| `counterfactual_results.md` | Full narrative summary |
+
+---
+
 ## Citation
 
 When using this pipeline, please cite:

@@ -23,7 +23,7 @@ Analysis:
     run_all_analyses, prepare_analysis_sample
 """
 
-__version__ = "0.24"
+__version__ = "0.241"
 
 
 # Re-export core configuration

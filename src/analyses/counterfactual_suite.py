@@ -116,10 +116,36 @@ def compute_p90_p10(y: np.ndarray) -> float:
 # Data Preparation
 # =============================================================================
 
+def load_weather_data() -> pd.DataFrame:
+    """Load annual weather data from package."""
+    from pathlib import Path
+    
+    weather_path = Path(__file__).parent.parent.parent / "data" / "raw" / "weather" / "weather_annual_combined.csv"
+    
+    if weather_path.exists():
+        weather = pd.read_csv(weather_path)
+        return weather
+    
+    return pd.DataFrame()
+
+
+def load_climate_augmented_voyages() -> pd.DataFrame:
+    """Load voyage data with climate variables already merged."""
+    from pathlib import Path
+    
+    climate_path = Path(__file__).parent.parent.parent / "data" / "final" / "analysis_voyage_with_climate.parquet"
+    
+    if climate_path.exists():
+        return pd.read_parquet(climate_path)
+    
+    return pd.DataFrame()
+
+
 def prepare_counterfactual_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare data for counterfactual analysis.
     Adds required columns and classifications.
+    Merges weather/ice data if available.
     """
     df = df.copy()
     
@@ -151,17 +177,60 @@ def prepare_counterfactual_data(df: pd.DataFrame) -> pd.DataFrame:
         df["levy_mu"] = 1.64 + PARAMS["beta_mu_route_time"] * psi_std + np.random.normal(0, 0.15, len(df))
         df["levy_mu"] = df["levy_mu"].clip(1.0, 2.5)
     
-    # High-risk classification (hurricane/ice)
-    if "hurricane_exposure_count" in df.columns:
-        df["high_hurricane"] = (df["hurricane_exposure_count"] > df["hurricane_exposure_count"].quantile(0.75)).astype(int)
+    # =========================================================================
+    # Merge weather/ice data if not already present
+    # =========================================================================
+    
+    # Check if we need to add hurricane data
+    if "n_hurricanes" not in df.columns or "ace_zscore" not in df.columns:
+        weather = load_weather_data()
+        if len(weather) > 0 and year_col in df.columns:
+            # Merge hurricane data on year
+            hurricane_cols = ["year", "n_hurricanes", "ace_zscore", "corridor_hurricane_days", "n_storms"]
+            weather_subset = weather[[c for c in hurricane_cols if c in weather.columns]]
+            df = df.merge(weather_subset, left_on=year_col, right_on="year", how="left", suffixes=("", "_weather"))
+            if "year_weather" in df.columns:
+                df.drop(columns=["year_weather"], inplace=True, errors="ignore")
+            print(f"  Merged hurricane data: {df['n_hurricanes'].notna().sum():,} voyages with data")
+    
+    # Check if we need to add ice data
+    if "bering_ice_mean" not in df.columns or "nh_ice_extent_mean" not in df.columns:
+        climate_df = load_climate_augmented_voyages()
+        if len(climate_df) > 0 and "voyage_id" in df.columns and "voyage_id" in climate_df.columns:
+            # Merge ice data on voyage_id
+            ice_cols = ["voyage_id", "bering_ice_mean", "nh_ice_extent_mean", "chukchi_ice_mean", 
+                       "beaufort_ice_mean", "frac_days_in_arctic_polygon", "arctic_days"]
+            ice_subset = climate_df[[c for c in ice_cols if c in climate_df.columns]]
+            df = df.merge(ice_subset, on="voyage_id", how="left", suffixes=("", "_climate"))
+            print(f"  Merged ice data: {df['bering_ice_mean'].notna().sum():,} voyages with data")
+    
+    # =========================================================================
+    # Compute derived risk indicators
+    # =========================================================================
+    
+    # Hurricane exposure - normalize to 0-1 scale based on ACE z-score
+    if "ace_zscore" in df.columns and df["ace_zscore"].notna().any():
+        df["hurricane_exposure"] = df["ace_zscore"].fillna(0)
+        df["high_hurricane"] = (df["hurricane_exposure"] > df["hurricane_exposure"].quantile(0.75)).astype(int)
+    elif "n_hurricanes" in df.columns and df["n_hurricanes"].notna().any():
+        df["hurricane_exposure"] = df["n_hurricanes"].fillna(0)
+        df["high_hurricane"] = (df["hurricane_exposure"] > df["hurricane_exposure"].quantile(0.75)).astype(int)
     else:
+        df["hurricane_exposure"] = 0
         df["high_hurricane"] = 0
     
-    if "ice_exposure" in df.columns:
+    # Ice exposure - use bering ice as primary (most relevant for whaling)
+    if "bering_ice_mean" in df.columns and df["bering_ice_mean"].notna().any():
+        df["ice_exposure"] = df["bering_ice_mean"].fillna(df["bering_ice_mean"].median())
+        df["high_ice"] = (df["ice_exposure"] > df["ice_exposure"].quantile(0.75)).astype(int)
+    elif "nh_ice_extent_mean" in df.columns and df["nh_ice_extent_mean"].notna().any():
+        df["ice_exposure"] = df["nh_ice_extent_mean"].fillna(df["nh_ice_extent_mean"].median())
         df["high_ice"] = (df["ice_exposure"] > df["ice_exposure"].quantile(0.75)).astype(int)
     else:
+        df["ice_exposure"] = 0
         df["high_ice"] = 0
     
+    # Combined high-risk indicator
     df["high_risk"] = ((df["high_hurricane"] == 1) | (df["high_ice"] == 1)).astype(int)
     
     return df
@@ -684,19 +753,31 @@ def run_cf_c8_exploration(df: pd.DataFrame) -> Dict:
     df["exploration_trait"] = captain_means
     df["exploration_residual"] = df["exploration"] - captain_means
     
-    # Weather predictors - simulate if not available
+    # Weather predictors - use columns from prepare_counterfactual_data
     has_weather = False
     weather_cols = []
     
-    if "hurricane_exposure_count" in df.columns:
-        if df["hurricane_exposure_count"].var() > 0:
-            df["hurricane_std"] = standardize(df["hurricane_exposure_count"].values)
+    # Check for hurricane exposure (new column names from prepare_counterfactual_data)
+    if "hurricane_exposure" in df.columns:
+        if df["hurricane_exposure"].var() > 0:
+            df["hurricane_std"] = standardize(df["hurricane_exposure"].fillna(0).values)
+            weather_cols.append("hurricane_std")
+            has_weather = True
+    elif "ace_zscore" in df.columns:
+        if df["ace_zscore"].notna().any() and df["ace_zscore"].var() > 0:
+            df["hurricane_std"] = standardize(df["ace_zscore"].fillna(0).values)
             weather_cols.append("hurricane_std")
             has_weather = True
     
+    # Check for ice exposure
     if "ice_exposure" in df.columns:
         if df["ice_exposure"].var() > 0:
-            df["ice_std"] = standardize(df["ice_exposure"].values)
+            df["ice_std"] = standardize(df["ice_exposure"].fillna(0).values)
+            weather_cols.append("ice_std")
+            has_weather = True
+    elif "bering_ice_mean" in df.columns:
+        if df["bering_ice_mean"].notna().any() and df["bering_ice_mean"].var() > 0:
+            df["ice_std"] = standardize(df["bering_ice_mean"].fillna(df["bering_ice_mean"].median()).values)
             weather_cols.append("ice_std")
             has_weather = True
     
@@ -710,16 +791,34 @@ def run_cf_c8_exploration(df: pd.DataFrame) -> Dict:
         df["exploration_forced"] = (year_effect + ground_effect + 
                                     np.random.normal(0, 0.05, len(df))).clip(-0.3, 0.3)
     else:
-        # Regress residual on weather
-        X_weather = df[weather_cols].fillna(0).values
-        y_resid = df["exploration_residual"].fillna(0).values
+        # Forced exploration = interaction of weather with ground type
+        # High hurricane + sparse ground → forced to explore more
+        # High ice + arctic route → forced to adjust search patterns
+        print(f"  Using weather columns: {weather_cols}")
         
-        X = np.column_stack([np.ones(len(df)), X_weather])
-        beta_weather = np.linalg.lstsq(X, y_resid, rcond=None)[0]
+        # Compute weather-ground interactions as forced exploration
+        forced = np.zeros(len(df))
         
-        df["exploration_forced"] = X @ beta_weather - beta_weather[0]
+        if "hurricane_std" in df.columns:
+            # Hurricanes on sparse grounds force more exploration
+            sparse_mask = df["ground_type"] == "sparse"
+            forced += df["hurricane_std"].values * np.where(sparse_mask, 0.15, 0.05)
+        
+        if "ice_std" in df.columns:
+            # High ice forces route adjustments
+            forced += df["ice_std"].values * 0.10
+        
+        # Scale relative to trait variation
+        if forced.std() > 0:
+            scale = df["exploration_trait"].std() * 0.3 / forced.std()
+            forced = forced * scale
+        
+        df["exploration_forced"] = forced
     
     df["exploration_forced"] = df["exploration_forced"].fillna(0)
+    
+    # Combine trait and forced for total exploration
+    df["exploration_total"] = df["exploration_trait"] + df["exploration_forced"]
     
     print(f"\nComponents:")
     print(f"  Mean trait:  {df['exploration_trait'].mean():.4f}")
@@ -728,33 +827,31 @@ def run_cf_c8_exploration(df: pd.DataFrame) -> Dict:
     print(f"  Var forced:  {df['exploration_forced'].var():.4f}")
     
     # Estimate exploration → output relationship
-    # Use exploration standard in a robust way
-    exp_std = df["exploration"].std()
-    if exp_std > 0:
-        df["exploration_std"] = (df["exploration"] - df["exploration"].mean()) / exp_std
+    # Use TOTAL exploration (trait + forced) for the regression
+    exp_col = "exploration_total"
+    exp_std_val = df[exp_col].std()
+    if exp_std_val > 0:
+        df["exploration_std"] = (df[exp_col] - df[exp_col].mean()) / exp_std_val
     else:
         df["exploration_std"] = 0
     df["exploration_sq"] = df["exploration_std"] ** 2
     
-    # Use sparse solver for robust regression
-    X_exp = np.column_stack([
-        np.ones(len(df)),
-        df["log_tonnage"].values,
-        df["exploration_std"].values,
-        df["exploration_sq"].values,
-    ])
-    y = df["log_q"].values
+    # Filter to rows with valid data for regression
+    valid_mask = df["log_q"].notna() & df["exploration_std"].notna() & df["log_tonnage"].notna()
+    df_reg = df[valid_mask]
     
-    # Use scipy lsqr which is more numerically stable
-    try:
-        from scipy.sparse.linalg import lsqr as scipy_lsqr
-        result = scipy_lsqr(sp.csr_matrix(X_exp), y, iter_lim=10000, atol=1e-10, btol=1e-10)
-        beta_exp = result[0]
-    except Exception:
-        # Fallback to simple OLS with regularization
-        XtX = X_exp.T @ X_exp + 1e-6 * np.eye(X_exp.shape[1])
-        Xty = X_exp.T @ y
-        beta_exp = np.linalg.solve(XtX, Xty)
+    X_exp = np.column_stack([
+        np.ones(len(df_reg)),
+        df_reg["log_tonnage"].values,
+        df_reg["exploration_std"].values,
+        df_reg["exploration_sq"].values,
+    ])
+    y = df_reg["log_q"].values
+    
+    # Use regularized OLS (more stable than sparse lsqr for small matrices)
+    XtX = X_exp.T @ X_exp + 1e-6 * np.eye(X_exp.shape[1])
+    Xty = X_exp.T @ y
+    beta_exp = np.linalg.solve(XtX, Xty)
     
     beta_linear = beta_exp[2]
     beta_quad = beta_exp[3]
