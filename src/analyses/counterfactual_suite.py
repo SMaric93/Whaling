@@ -88,6 +88,110 @@ def classify_ground(ground_str: str) -> str:
     return "unknown"
 
 
+def classify_ground_ex_ante(df: pd.DataFrame, method: str = "lagged_year") -> pd.DataFrame:
+    """
+    Classify grounds using EX-ANTE productivity data to avoid endogeneity.
+    
+    Addresses reviewer critique: "State classification must be ex-ante to avoid
+    circularity where realized catch defines the state."
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Voyage data with year_out, route_or_ground/ground_or_route, log_q.
+    method : str
+        Classification method:
+        - "lagged_year": Use previous year's average catch on that ground
+        - "decadal_average": Use decadal average catch (prior decade)
+        - "name_based": Use static ground name classification (original method)
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with ground_type_ex_ante column added.
+    """
+    df = df.copy()
+    
+    ground_col = "ground_or_route" if "ground_or_route" in df.columns else "route_or_ground"
+    year_col = "year_out" if "year_out" in df.columns else "year"
+    
+    if ground_col not in df.columns:
+        df["ground_type_ex_ante"] = "unknown"
+        return df
+    
+    if method == "name_based":
+        # Original static classification (for robustness comparison)
+        df["ground_type_ex_ante"] = df[ground_col].apply(classify_ground)
+        
+    elif method == "lagged_year":
+        # Compute previous year's average catch by ground
+        df["ground_normalized"] = df[ground_col].str.lower().str.strip()
+        
+        # Lag productivity: for year t, use year t-1 average
+        ground_year_avg = df.groupby(["ground_normalized", year_col])["log_q"].mean().reset_index()
+        ground_year_avg.columns = ["ground_normalized", "year_lag_source", "lagged_avg_catch"]
+        ground_year_avg["year_for_merge"] = ground_year_avg["year_lag_source"] + 1
+        
+        df = df.merge(
+            ground_year_avg[["ground_normalized", "year_for_merge", "lagged_avg_catch"]],
+            left_on=["ground_normalized", year_col],
+            right_on=["ground_normalized", "year_for_merge"],
+            how="left"
+        )
+        df.drop(columns=["year_for_merge"], errors="ignore", inplace=True)
+        
+        # Classify based on lagged catch: below median = sparse, above = rich
+        median_catch = df["lagged_avg_catch"].median()
+        df["ground_type_ex_ante"] = np.where(
+            df["lagged_avg_catch"].isna(),
+            "unknown",
+            np.where(df["lagged_avg_catch"] < median_catch, "sparse", "rich")
+        )
+        
+        # Clean up
+        df.drop(columns=["ground_normalized", "lagged_avg_catch"], errors="ignore", inplace=True)
+        
+    elif method == "decadal_average":
+        # Use prior decade's average catch by ground
+        df["ground_normalized"] = df[ground_col].str.lower().str.strip()
+        df["decade"] = (df[year_col] // 10) * 10
+        
+        # Compute decade-level averages
+        decade_avg = df.groupby(["ground_normalized", "decade"])["log_q"].mean().reset_index()
+        decade_avg.columns = ["ground_normalized", "decade_lag_source", "decadal_avg_catch"]
+        decade_avg["decade_for_merge"] = decade_avg["decade_lag_source"] + 10  # Prior decade
+        
+        df = df.merge(
+            decade_avg[["ground_normalized", "decade_for_merge", "decadal_avg_catch"]],
+            left_on=["ground_normalized", "decade"],
+            right_on=["ground_normalized", "decade_for_merge"],
+            how="left"
+        )
+        df.drop(columns=["decade_for_merge"], errors="ignore", inplace=True)
+        
+        # Classify
+        median_catch = df["decadal_avg_catch"].median()
+        df["ground_type_ex_ante"] = np.where(
+            df["decadal_avg_catch"].isna(),
+            "unknown",
+            np.where(df["decadal_avg_catch"] < median_catch, "sparse", "rich")
+        )
+        
+        df.drop(columns=["ground_normalized", "decadal_avg_catch"], errors="ignore", inplace=True)
+    
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    # Report classification
+    counts = df["ground_type_ex_ante"].value_counts()
+    print(f"  Ex-ante ground classification ({method}):")
+    for gt in ["sparse", "rich", "unknown"]:
+        if gt in counts:
+            print(f"    {gt}: {counts[gt]:,} ({100*counts[gt]/len(df):.1f}%)")
+    
+    return df
+
+
 def standardize(x: np.ndarray, safe: bool = False) -> np.ndarray:
     """Standardize to mean 0, std 1.
     
