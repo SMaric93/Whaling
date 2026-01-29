@@ -9,6 +9,8 @@ organizational intermediation.
 from typing import Dict, Optional, List
 import warnings
 
+from scipy import stats
+
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -276,13 +278,41 @@ def run_r3_event_study(
     print(results_df.to_string(index=False))
     
     # Pre-trend test: joint significance of k < -1
-    pre_coefs = results_df[results_df["event_time"] < -1]["coefficient"]
+    pre_mask = results_df["event_time"] < -1
+    pre_coefs = results_df[pre_mask]["coefficient"].values
+    pre_ses = results_df[pre_mask]["se"].values
+    
+    pre_trend_results = None
     if len(pre_coefs) > 0:
         pre_mean = pre_coefs.mean()
-        pre_max_abs = pre_coefs.abs().max()
+        pre_max_abs = np.abs(pre_coefs).max()
         print(f"\nPre-trend check:")
         print(f"  Mean pre-period coefficient: {pre_mean:.4f}")
         print(f"  Max absolute pre-period coefficient: {pre_max_abs:.4f}")
+        
+        # Joint F-test: H0: all pre-period coefficients = 0
+        # Using Wald test: W = β'Σ^{-1}β ~ χ²(k)
+        # Approximate as F = (β'β / k) / σ² ~ F(k, n-p)
+        k_pre = len(pre_coefs)
+        wald_stat = np.sum((pre_coefs / pre_ses) ** 2)  # Sum of squared t-stats
+        f_stat = wald_stat / k_pre  # Average
+        p_value = 1 - stats.f.cdf(f_stat, k_pre, n - X.shape[1])
+        
+        pre_trend_results = {
+            "n_pre_periods": k_pre,
+            "f_statistic": f_stat,
+            "p_value": p_value,
+            "passed": p_value > 0.10,  # Pass if cannot reject null
+        }
+        
+        stars = "***" if p_value < 0.01 else "**" if p_value < 0.05 else "*" if p_value < 0.10 else ""
+        print(f"\n  Joint F-test (H0: all pre-trend coeffs = 0):")
+        print(f"    F({k_pre}, {n - X.shape[1]}) = {f_stat:.3f}")
+        print(f"    p-value = {p_value:.4f}{stars}")
+        if p_value > 0.10:
+            print(f"    ✓ PASS: No significant pre-trends (p > 0.10)")
+        else:
+            print(f"    ✗ FAIL: Significant pre-trends detected (p ≤ 0.10)")
     
     # Post-switch effect
     post_coefs = results_df[results_df["event_time"] >= 0]["coefficient"]
@@ -298,6 +328,7 @@ def run_r3_event_study(
         "r2": r2,
         "omit_period": omit_period,
         "event_window": event_window,
+        "pre_trend_test": pre_trend_results,
         "data": df_es,
     }
     
@@ -380,12 +411,19 @@ def create_event_study_figure(
         f"Captains = {results['n_captains']:,}\n"
         f"R² = {results['r2']:.3f}"
     )
+    
+    # Add pre-trend test result if available
+    if results.get("pre_trend_test"):
+        pt = results["pre_trend_test"]
+        status = "✓ PASS" if pt["passed"] else "✗ FAIL"
+        stats_text += f"\n\nPre-trend F-test:\nF = {pt['f_statistic']:.2f}\np = {pt['p_value']:.3f} ({status})"
+    
     ax.annotate(
         stats_text,
         xy=(0.02, 0.98),
         xycoords="axes fraction",
         verticalalignment="top",
-        fontsize=10,
+        fontsize=9,
         bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
     )
     

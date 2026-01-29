@@ -670,6 +670,400 @@ def run_skill_regressions(
 
 
 # =============================================================================
+# C3.1: Alternative Search Metrics
+# =============================================================================
+
+def compute_sinuosity_index(trajectory: List[Tuple[float, float]]) -> float:
+    """
+    Compute sinuosity index: path_length / straight_line_distance.
+    
+    Lower values = straighter paths (more ballistic).
+    Sinuosity = 1 for perfect straight line.
+    
+    Parameters
+    ----------
+    trajectory : List[Tuple[float, float]]
+        List of (lat, lon) positions.
+        
+    Returns
+    -------
+    float
+        Sinuosity index.
+    """
+    if len(trajectory) < 2:
+        return np.nan
+    
+    # Compute path length (sum of step distances)
+    path_length = 0.0
+    for i in range(len(trajectory) - 1):
+        lat1, lon1 = trajectory[i]
+        lat2, lon2 = trajectory[i + 1]
+        path_length += haversine_distance(lat1, lon1, lat2, lon2)
+    
+    # Compute beeline distance
+    beeline = haversine_distance(
+        trajectory[0][0], trajectory[0][1],
+        trajectory[-1][0], trajectory[-1][1]
+    )
+    
+    if beeline <= 0:
+        return np.nan
+    
+    return path_length / beeline
+
+
+def compute_fractal_dimension(
+    trajectory: List[Tuple[float, float]],
+    box_sizes: List[float] = None,
+) -> float:
+    """
+    Compute fractal dimension using box-counting algorithm.
+    
+    D closer to 1 = more linear movement.
+    D closer to 2 = space-filling (more Brownian).
+    
+    Parameters
+    ----------
+    trajectory : List[Tuple[float, float]]
+        List of (lat, lon) positions.
+    box_sizes : List[float], optional
+        Box sizes in degrees. Default: [0.5, 1, 2, 5, 10].
+        
+    Returns
+    -------
+    float
+        Fractal dimension D.
+    """
+    if len(trajectory) < 10:
+        return np.nan
+    
+    if box_sizes is None:
+        box_sizes = [0.5, 1.0, 2.0, 5.0, 10.0]
+    
+    counts = []
+    for eps in box_sizes:
+        # Discretize to grid
+        grid_cells = set()
+        for lat, lon in trajectory:
+            cell = (int(np.floor(lat / eps)), int(np.floor(lon / eps)))
+            grid_cells.add(cell)
+        counts.append(len(grid_cells))
+    
+    # Fit log-log slope
+    log_eps = np.log(box_sizes)
+    log_counts = np.log(counts)
+    
+    # Remove any invalid values
+    valid = np.isfinite(log_counts) & np.isfinite(log_eps)
+    if valid.sum() < 3:
+        return np.nan
+    
+    slope, _ = np.polyfit(log_eps[valid], log_counts[valid], 1)
+    
+    # D = -slope (N ~ eps^{-D})
+    return -slope
+
+
+def compute_msd_exponent(trajectory: List[Tuple[float, float]]) -> float:
+    """
+    Compute Mean Squared Displacement (MSD) exponent.
+    
+    MSD(τ) = <|r(t+τ) - r(t)|²>
+    log(MSD) ~ α log(τ)
+    
+    α closer to 2 = ballistic (superdiffusion)
+    α = 1 = Brownian (normal diffusion)
+    α < 1 = subdiffusion
+    
+    Parameters
+    ----------
+    trajectory : List[Tuple[float, float]]
+        List of (lat, lon) positions.
+        
+    Returns
+    -------
+    float
+        MSD exponent α.
+    """
+    if len(trajectory) < 20:
+        return np.nan
+    
+    n = len(trajectory)
+    tau_values = [1, 2, 5, 10, 20]
+    tau_values = [t for t in tau_values if t < n // 2]
+    
+    if len(tau_values) < 3:
+        return np.nan
+    
+    msd_values = []
+    for tau in tau_values:
+        displacements_sq = []
+        for i in range(n - tau):
+            d = haversine_distance(
+                trajectory[i][0], trajectory[i][1],
+                trajectory[i + tau][0], trajectory[i + tau][1]
+            )
+            displacements_sq.append(d ** 2)
+        msd_values.append(np.mean(displacements_sq))
+    
+    # Fit log-log slope
+    log_tau = np.log(tau_values)
+    log_msd = np.log(msd_values)
+    
+    valid = np.isfinite(log_msd)
+    if valid.sum() < 3:
+        return np.nan
+    
+    alpha, _ = np.polyfit(log_tau[valid], log_msd[valid], 1)
+    return alpha
+
+
+def compute_alternative_metrics(positions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute all alternative search metrics for each voyage.
+    
+    Returns DataFrame with voyage_id and metrics: sinuosity, fractal_D, msd_alpha.
+    """
+    print("\n" + "=" * 60)
+    print("C3.1: COMPUTING ALTERNATIVE SEARCH METRICS")
+    print("=" * 60)
+    
+    results = []
+    
+    for voyage_id, group in positions_df.groupby("voyage_id"):
+        if len(group) < MIN_POSITIONS_PER_VOYAGE:
+            continue
+        
+        # Sort by date
+        group = group.sort_values("obs_date")
+        trajectory = list(zip(group["lat"].values, group["lon"].values))
+        
+        sinuosity = compute_sinuosity_index(trajectory)
+        fractal_D = compute_fractal_dimension(trajectory)
+        msd_alpha = compute_msd_exponent(trajectory)
+        
+        results.append({
+            "voyage_id": voyage_id,
+            "n_positions": len(trajectory),
+            "sinuosity": sinuosity,
+            "fractal_D": fractal_D,
+            "msd_alpha": msd_alpha,
+        })
+    
+    metrics_df = pd.DataFrame(results)
+    
+    # Summary
+    valid = metrics_df.dropna()
+    print(f"\nVoyages with all metrics: {len(valid):,}")
+    print(f"Mean sinuosity: {metrics_df['sinuosity'].mean():.3f}")
+    print(f"Mean fractal D: {metrics_df['fractal_D'].mean():.3f}")
+    print(f"Mean MSD α: {metrics_df['msd_alpha'].mean():.3f}")
+    
+    return metrics_df
+
+
+# =============================================================================
+# C3.2: Tail Sensitivity Analysis
+# =============================================================================
+
+def run_tail_sensitivity_analysis(
+    steps_df: pd.DataFrame,
+    voyage_df: pd.DataFrame,
+    truncation_percentiles: List[float] = None,
+) -> Dict:
+    """
+    C3.2: Re-estimate µ under different tail truncations.
+    
+    Tests robustness of Lévy exponent estimates to extreme step lengths.
+    
+    Parameters
+    ----------
+    steps_df : pd.DataFrame
+        Step-length data from compute_step_lengths().
+    voyage_df : pd.DataFrame
+        Voyage data with organizational effects.
+    truncation_percentiles : List[float], optional
+        Percentiles to truncate. Default: [1, 5, 10].
+        
+    Returns
+    -------
+    Dict
+        Results including stability metrics and pass/fail status.
+    """
+    print("\n" + "=" * 60)
+    print("C3.2: TAIL SENSITIVITY ANALYSIS")
+    print("=" * 60)
+    
+    if truncation_percentiles is None:
+        truncation_percentiles = [1, 5, 10]
+    
+    # Baseline: no truncation
+    baseline_levy = compute_levy_metrics(steps_df, voyage_df)
+    baseline_mu = baseline_levy["mean_mu"].mean()
+    
+    print(f"\nBaseline mean µ: {baseline_mu:.4f}")
+    print(f"Baseline N captains: {len(baseline_levy):,}")
+    
+    results = [{
+        "truncation": "baseline",
+        "truncation_pct": 0,
+        "mean_mu": baseline_mu,
+        "n_captains": len(baseline_levy),
+        "deviation_from_baseline": 0.0,
+    }]
+    
+    # Test upper tail truncation
+    print("\n--- Upper Tail Truncation ---")
+    for pct in truncation_percentiles:
+        threshold = steps_df["step_length"].quantile(1 - pct / 100)
+        truncated = steps_df[steps_df["step_length"] <= threshold].copy()
+        
+        n_excluded = len(steps_df) - len(truncated)
+        
+        levy_truncated = compute_levy_metrics(truncated, voyage_df)
+        mu_truncated = levy_truncated["mean_mu"].mean()
+        deviation = abs(mu_truncated - baseline_mu) / abs(baseline_mu) * 100
+        
+        print(f"Top {pct}% excluded: µ = {mu_truncated:.4f} (deviation: {deviation:.1f}%)")
+        
+        results.append({
+            "truncation": f"top_{pct}pct",
+            "truncation_pct": pct,
+            "mean_mu": mu_truncated,
+            "n_captains": len(levy_truncated),
+            "deviation_from_baseline": deviation,
+        })
+    
+    # Test lower tail truncation
+    print("\n--- Lower Tail Truncation ---")
+    for pct in [1, 5]:
+        threshold = steps_df["step_length"].quantile(pct / 100)
+        truncated = steps_df[steps_df["step_length"] >= threshold].copy()
+        
+        levy_truncated = compute_levy_metrics(truncated, voyage_df)
+        mu_truncated = levy_truncated["mean_mu"].mean()
+        deviation = abs(mu_truncated - baseline_mu) / abs(baseline_mu) * 100
+        
+        print(f"Bottom {pct}% excluded: µ = {mu_truncated:.4f} (deviation: {deviation:.1f}%)")
+        
+        results.append({
+            "truncation": f"bottom_{pct}pct",
+            "truncation_pct": -pct,  # Negative to indicate lower tail
+            "mean_mu": mu_truncated,
+            "n_captains": len(levy_truncated),
+            "deviation_from_baseline": deviation,
+        })
+    
+    results_df = pd.DataFrame(results)
+    
+    # Pass criterion: max deviation < 20%
+    max_deviation = results_df["deviation_from_baseline"].max()
+    passed = max_deviation < 20.0
+    
+    print(f"\n--- RESULT ---")
+    print(f"Maximum deviation: {max_deviation:.1f}%")
+    if passed:
+        print("✓ PASS: µ estimates stable under tail truncation (max deviation < 20%)")
+    else:
+        print("✗ FAIL: µ estimates sensitive to tail truncation")
+    
+    return {
+        "results_df": results_df,
+        "baseline_mu": baseline_mu,
+        "max_deviation": max_deviation,
+        "passed": passed,
+    }
+
+
+# =============================================================================
+# C3.3: Direct Efficiency Test
+# =============================================================================
+
+def test_search_efficiency(
+    voyage_levy: pd.DataFrame,
+    voyage_df: pd.DataFrame,
+) -> Dict:
+    """
+    C3.3: Test whether µ predicts productivity (catch rate).
+    
+    catch_rate = δµ + θ_c + ψ_a + λ_{ground×time} + ε
+    
+    Parameters
+    ----------
+    voyage_levy : pd.DataFrame
+        Voyage-level Lévy metrics with voyage_id and mu.
+    voyage_df : pd.DataFrame
+        Voyage data with productivity and fixed effects.
+        
+    Returns
+    -------
+    Dict
+        Regression results for sparse and rich grounds separately.
+    """
+    print("\n" + "=" * 60)
+    print("C3.3: DIRECT EFFICIENCY TEST (catch_rate ~ µ)")
+    print("=" * 60)
+    
+    # Merge Lévy with voyage data
+    df = voyage_df.merge(
+        voyage_levy[["voyage_id", "mu"]],
+        on="voyage_id",
+        how="inner"
+    )
+    
+    # Compute catch rate (barrels per day)
+    df["catch_rate"] = (df["q_sperm_bbl"] + df["q_whale_bbl"]) / df["duration_days"]
+    df = df[df["catch_rate"] > 0].dropna(subset=["mu", "catch_rate"])
+    
+    print(f"\nSample size: {len(df):,} voyages")
+    print(f"Mean µ: {df['mu'].mean():.3f}")
+    print(f"Mean catch rate: {df['catch_rate'].mean():.2f} bbl/day")
+    
+    # Simple OLS: catch_rate ~ mu
+    y = df["catch_rate"].values
+    X = np.column_stack([np.ones(len(df)), df["mu"].values])
+    
+    beta = np.linalg.lstsq(X, y, rcond=None)[0]
+    y_hat = X @ beta
+    resid = y - y_hat
+    
+    n, k = X.shape
+    sigma_sq = np.sum(resid ** 2) / (n - k)
+    XtX_inv = np.linalg.inv(X.T @ X)
+    se = np.sqrt(np.diag(sigma_sq * XtX_inv))
+    t_stat = beta[1] / se[1]
+    p_val = 2 * (1 - stats.t.cdf(np.abs(t_stat), df=n - k))
+    r2 = 1 - np.var(resid) / np.var(y)
+    
+    stars = "***" if p_val < 0.01 else "**" if p_val < 0.05 else "*" if p_val < 0.1 else ""
+    
+    print(f"\n--- Regression: catch_rate ~ µ ---")
+    print(f"δ (coefficient on µ) = {beta[1]:.4f}{stars}")
+    print(f"SE = {se[1]:.4f}")
+    print(f"t = {t_stat:.2f}, p = {p_val:.4f}")
+    print(f"R² = {r2:.4f}")
+    
+    if beta[1] < 0 and p_val < 0.1:
+        print("\n✓ Lower µ (more ballistic) → higher catch rate (efficiency claim supported)")
+    elif beta[1] > 0 and p_val < 0.1:
+        print("\n⚠ Higher µ (more Brownian) → higher catch rate (unexpected)")
+    else:
+        print("\nNo significant relationship between µ and catch rate")
+        print("Consider reframing as 'organizational influence on search geometry'")
+        print("without strong efficiency claims.")
+    
+    return {
+        "n": n,
+        "delta": beta[1],
+        "se": se[1],
+        "t_stat": t_stat,
+        "p_value": p_val,
+        "r2": r2,
+        "efficiency_supported": beta[1] < 0 and p_val < 0.1,
+    }
+
+
+# =============================================================================
 # Main Orchestration
 # =============================================================================
 
