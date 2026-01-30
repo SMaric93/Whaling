@@ -16,6 +16,7 @@ from enum import Enum
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "final"
+STAGING_DIR = PROJECT_ROOT / "data" / "staging"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 
 # Output subdirectories

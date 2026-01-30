@@ -1063,6 +1063,411 @@ def test_search_efficiency(
     }
 
 
+
+# =============================================================================
+# SR1-SR3: Optimal Foraging Stopping Rule Analysis
+# =============================================================================
+
+def identify_patches(
+    positions_df: pd.DataFrame,
+    grid_size: float = GRID_SIZE,
+    min_positions: int = 3,
+) -> pd.DataFrame:
+    """
+    SR1: Identify geographic patches (hunting grounds) from positions.
+    
+    A patch is a contiguous set of positions in the same grid cell.
+    
+    Parameters
+    ----------
+    positions_df : pd.DataFrame
+        Daily positions with voyage_id, lat, lon, obs_date.
+    grid_size : float
+        Grid cell size in degrees.
+    min_positions : int
+        Minimum positions to count as a patch.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Patch-level data with voyage_id, patch_id, entry_date, exit_date, duration.
+    """
+    print("\n" + "=" * 60)
+    print("SR1: IDENTIFYING HUNTING PATCHES")
+    print("=" * 60)
+    
+    positions_df = positions_df.copy()
+    positions_df = positions_df.sort_values(["voyage_id", "obs_date"])
+    
+    # Ensure obs_date is datetime
+    positions_df["obs_date"] = pd.to_datetime(positions_df["obs_date"])
+    
+    # Assign grid cell
+    positions_df["lat_bin"] = (positions_df["lat"] / grid_size).astype(int)
+    positions_df["lon_bin"] = (positions_df["lon"] / grid_size).astype(int)
+    positions_df["cell"] = positions_df["lat_bin"].astype(str) + "_" + positions_df["lon_bin"].astype(str)
+    
+    # Identify cell changes (patch boundaries)
+    positions_df["prev_cell"] = positions_df.groupby("voyage_id")["cell"].shift(1)
+    positions_df["cell_change"] = (positions_df["cell"] != positions_df["prev_cell"]).astype(int)
+    
+    # Cumulative patch ID within voyage
+    positions_df["patch_id"] = positions_df.groupby("voyage_id")["cell_change"].cumsum()
+    
+    # Aggregate to patch level
+    patches = positions_df.groupby(["voyage_id", "patch_id"]).agg({
+        "obs_date": ["min", "max", "count"],
+        "cell": "first",
+        "lat": "mean",
+        "lon": "mean",
+    })
+    patches.columns = ["entry_date", "exit_date", "n_positions", "cell", "mean_lat", "mean_lon"]
+    patches = patches.reset_index()
+    
+    # Compute duration
+    patches["entry_date"] = pd.to_datetime(patches["entry_date"])
+    patches["exit_date"] = pd.to_datetime(patches["exit_date"])
+    patches["duration_days"] = (patches["exit_date"] - patches["entry_date"]).dt.days + 1
+    
+    # Filter to meaningful patches
+    patches = patches[patches["n_positions"] >= min_positions]
+    
+    print(f"\nTotal patches identified: {len(patches):,}")
+    print(f"Voyages with patches: {patches['voyage_id'].nunique():,}")
+    print(f"Mean patch duration: {patches['duration_days'].mean():.1f} days")
+    print(f"Median patch duration: {patches['duration_days'].median():.1f} days")
+    
+    return patches
+
+
+def compute_patch_yield(
+    patches: pd.DataFrame,
+    voyage_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    SR2: Estimate yield (productivity proxy) for each patch.
+    
+    Since we don't have daily catch, we use voyage-level productivity
+    as a proxy, allocated proportionally by patch duration.
+    
+    Parameters
+    ----------
+    patches : pd.DataFrame
+        Patch-level data from identify_patches().
+    voyage_df : pd.DataFrame
+        Voyage data with log_q or q_total.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Patches with yield estimates.
+    """
+    print("\n" + "=" * 60)
+    print("SR2: COMPUTING PATCH YIELDS")
+    print("=" * 60)
+    
+    patches = patches.copy()
+    
+    # Merge with voyage productivity
+    voyage_prod = voyage_df[["voyage_id", "log_q"]].copy()
+    if "duration_days" in voyage_df.columns:
+        voyage_prod["voyage_duration"] = voyage_df["duration_days"]
+    else:
+        voyage_prod["voyage_duration"] = 365  # Default
+    
+    patches = patches.merge(voyage_prod, on="voyage_id", how="left")
+    
+    # Compute catch rate proxy
+    patches["catch_rate"] = np.exp(patches["log_q"]) / patches["voyage_duration"]
+    
+    # Estimate patch yield (proportion of total catch based on duration)
+    voyage_patches = patches.groupby("voyage_id")["duration_days"].transform("sum")
+    patches["duration_share"] = patches["duration_days"] / voyage_patches
+    patches["estimated_yield"] = patches["catch_rate"] * patches["duration_days"]
+    
+    # Classify patches by yield
+    yield_median = patches["estimated_yield"].median()
+    patches["is_productive"] = patches["estimated_yield"] > yield_median
+    patches["is_empty"] = patches["estimated_yield"] < patches["estimated_yield"].quantile(0.25)
+    
+    print(f"\nMean estimated yield: {patches['estimated_yield'].mean():.2f}")
+    print(f"Productive patches (above median): {patches['is_productive'].sum():,}")
+    print(f"Empty patches (bottom 25%): {patches['is_empty'].sum():,}")
+    
+    return patches
+
+
+def run_stopping_rule_test(
+    patches: pd.DataFrame,
+    voyage_df: pd.DataFrame,
+) -> Dict:
+    """
+    SR3: Test if high-ψ agents induce stricter stopping rules.
+    
+    Hypothesis: High-capability agents force captains to "fail fast" and
+    exit empty grounds sooner.
+    
+    Model: log(residence_time) = α + β×ψ + θ_captain + empty×ψ + controls
+    
+    Prediction: β < 0 on empty patches (faster exit with high ψ)
+    
+    Parameters
+    ----------
+    patches : pd.DataFrame
+        Patch data with yields.
+    voyage_df : pd.DataFrame
+        Voyage data with psi_hat, captain_id, etc.
+        
+    Returns
+    -------
+    Dict
+        Regression results.
+    """
+    print("\n" + "=" * 60)
+    print("SR3: STOPPING RULE TEST")
+    print("=" * 60)
+    
+    patches = patches.copy()
+    
+    # Get agent and captain info
+    voyage_info = voyage_df[["voyage_id", "agent_id", "captain_id"]].copy()
+    if "psi_hat" in voyage_df.columns:
+        voyage_info["psi_hat"] = voyage_df["psi_hat"]
+    else:
+        # Compute psi_hat as agent mean
+        agent_means = voyage_df.groupby("agent_id")["log_q"].mean()
+        voyage_info["psi_hat"] = voyage_info["agent_id"].map(agent_means)
+    
+    patches = patches.merge(voyage_info, on="voyage_id", how="left")
+    
+    # Filter to valid observations
+    sample = patches.dropna(subset=["duration_days", "psi_hat", "is_empty"]).copy()
+    sample = sample[sample["duration_days"] > 0]
+    sample["log_duration"] = np.log(sample["duration_days"])
+    
+    print(f"Sample size: {len(sample):,} patches")
+    
+    if len(sample) < 100:
+        print("Insufficient sample")
+        return {"error": "insufficient_sample", "n": len(sample)}
+    
+    # ========== Model 1: All patches ==========
+    print("\n--- Model 1: All Patches ---")
+    
+    y1 = sample["log_duration"].values
+    X1 = np.column_stack([
+        np.ones(len(sample)),
+        sample["psi_hat"].values,
+    ])
+    
+    beta1 = np.linalg.lstsq(X1, y1, rcond=None)[0]
+    y1_hat = X1 @ beta1
+    resid1 = y1 - y1_hat
+    
+    n1, k1 = X1.shape
+    sigma_sq1 = np.sum(resid1 ** 2) / (n1 - k1)
+    XtX_inv1 = np.linalg.inv(X1.T @ X1)
+    se1 = np.sqrt(np.diag(sigma_sq1 * XtX_inv1))
+    
+    t1 = beta1[1] / se1[1]
+    p1 = 2 * (1 - stats.t.cdf(np.abs(t1), df=n1 - k1))
+    
+    stars1 = "***" if p1 < 0.01 else "**" if p1 < 0.05 else "*" if p1 < 0.1 else ""
+    print(f"N = {n1:,}")
+    print(f"β(ψ) = {beta1[1]:.4f}{stars1}")
+    print(f"SE = {se1[1]:.4f}, t = {t1:.2f}, p = {p1:.4f}")
+    
+    # ========== Model 2: Empty patches only ==========
+    print("\n--- Model 2: Empty Patches Only ---")
+    
+    empty_sample = sample[sample["is_empty"]]
+    
+    if len(empty_sample) > 30:
+        y2 = empty_sample["log_duration"].values
+        X2 = np.column_stack([
+            np.ones(len(empty_sample)),
+            empty_sample["psi_hat"].values,
+        ])
+        
+        beta2 = np.linalg.lstsq(X2, y2, rcond=None)[0]
+        y2_hat = X2 @ beta2
+        resid2 = y2 - y2_hat
+        
+        n2, k2 = X2.shape
+        sigma_sq2 = np.sum(resid2 ** 2) / (n2 - k2)
+        XtX_inv2 = np.linalg.inv(X2.T @ X2)
+        se2 = np.sqrt(np.diag(sigma_sq2 * XtX_inv2))
+        
+        t2 = beta2[1] / se2[1]
+        p2 = 2 * (1 - stats.t.cdf(np.abs(t2), df=n2 - k2))
+        
+        stars2 = "***" if p2 < 0.01 else "**" if p2 < 0.05 else "*" if p2 < 0.1 else ""
+        print(f"N = {n2:,}")
+        print(f"β(ψ) = {beta2[1]:.4f}{stars2}")
+        print(f"SE = {se2[1]:.4f}, t = {t2:.2f}, p = {p2:.4f}")
+        
+        if beta2[1] < 0 and p2 < 0.10:
+            print("\n✓ HIGH-ψ AGENTS INDUCE FASTER EXIT from empty patches")
+            print("  → Organizational discipline: 'Fail Fast' stopping rule")
+        elif beta2[1] > 0 and p2 < 0.10:
+            print("\n⚠ HIGH-ψ agents induce LONGER stays in empty patches")
+        else:
+            print("\nNo significant effect of ψ on residence time in empty patches")
+        
+        empty_results = {
+            "n": n2,
+            "beta": beta2[1],
+            "se": se2[1],
+            "t": t2,
+            "p": p2,
+        }
+    else:
+        print(f"Insufficient empty patches: {len(empty_sample)}")
+        empty_results = {"error": "insufficient_empty"}
+    
+    # ========== Model 3: Interaction (all patches) ==========
+    print("\n--- Model 3: Interaction (Empty × ψ) ---")
+    
+    sample["psi_x_empty"] = sample["psi_hat"] * sample["is_empty"].astype(float)
+    
+    y3 = sample["log_duration"].values
+    X3 = np.column_stack([
+        np.ones(len(sample)),
+        sample["psi_hat"].values,
+        sample["is_empty"].astype(float).values,
+        sample["psi_x_empty"].values,
+    ])
+    
+    beta3 = np.linalg.lstsq(X3, y3, rcond=None)[0]
+    y3_hat = X3 @ beta3
+    resid3 = y3 - y3_hat
+    
+    n3, k3 = X3.shape
+    sigma_sq3 = np.sum(resid3 ** 2) / (n3 - k3)
+    try:
+        XtX_inv3 = np.linalg.inv(X3.T @ X3)
+        se3 = np.sqrt(np.diag(sigma_sq3 * XtX_inv3))
+    except:
+        XtX_inv3 = np.linalg.pinv(X3.T @ X3)
+        se3 = np.sqrt(np.abs(np.diag(sigma_sq3 * XtX_inv3)))
+    
+    t3 = beta3[3] / se3[3] if se3[3] > 0 else 0
+    p3 = 2 * (1 - stats.t.cdf(np.abs(t3), df=n3 - k3))
+    
+    stars3 = "***" if p3 < 0.01 else "**" if p3 < 0.05 else "*" if p3 < 0.1 else ""
+    print(f"N = {n3:,}")
+    print(f"β(Empty×ψ) = {beta3[3]:.4f}{stars3}")
+    print(f"SE = {se3[3]:.4f}, t = {t3:.2f}, p = {p3:.4f}")
+    
+    # Interpretation
+    print("\n" + "=" * 60)
+    print("STOPPING RULE TEST RESULTS")
+    print("=" * 60)
+    
+    stopping_rule_confirmed = (
+        (beta3[3] < 0 and p3 < 0.10) or 
+        (empty_results.get("beta", 0) < 0 and empty_results.get("p", 1) < 0.10)
+    )
+    
+    if stopping_rule_confirmed:
+        print("✓ ORGANIZATIONAL DISCIPLINE CONFIRMED")
+        print("  High-ψ agents induce stricter 'marginal value' stopping rules.")
+        print("  Captains exit empty grounds faster, avoiding sunk cost fallacy.")
+    else:
+        print("No significant stopping rule effect detected")
+    
+    return {
+        "all_patches": {"n": n1, "beta": beta1[1], "se": se1[1], "t": t1, "p": p1},
+        "empty_patches": empty_results,
+        "interaction": {
+            "n": n3,
+            "beta_empty_x_psi": beta3[3],
+            "se": se3[3],
+            "t": t3,
+            "p": p3,
+        },
+        "stopping_rule_confirmed": stopping_rule_confirmed,
+    }
+
+
+def run_stopping_rule_analysis(
+    df: pd.DataFrame = None,
+    save_outputs: bool = True,
+) -> Dict:
+    """
+    Run complete Stopping Rule analysis (SR1-SR3).
+    
+    Parameters
+    ----------
+    df : pd.DataFrame, optional
+        Voyage data. If None, loads from disk.
+    save_outputs : bool
+        Whether to save outputs.
+        
+    Returns
+    -------
+    Dict
+        All stopping rule results.
+    """
+    print("=" * 70)
+    print("OPTIMAL FORAGING STOPPING RULE ANALYSIS")
+    print("=" * 70)
+    
+    # Load data
+    if df is None:
+        from .data_loader import prepare_analysis_sample
+        df = prepare_analysis_sample()
+    
+    # Load positions
+    positions_path = STAGING_DIR / "logbook_positions.parquet"
+    if not positions_path.exists():
+        print(f"Logbook positions not found at {positions_path}")
+        return {"error": "no_positions"}
+    
+    positions_df = pd.read_parquet(positions_path)
+    print(f"Loaded {len(positions_df):,} positions")
+    
+    results = {}
+    
+    # SR1: Identify patches
+    patches = identify_patches(positions_df)
+    
+    # SR2: Compute yields
+    patches = compute_patch_yield(patches, df)
+    
+    # SR3: Run stopping rule test
+    results["stopping_rule"] = run_stopping_rule_test(patches, df)
+    
+    # Save outputs
+    if save_outputs:
+        stopping_dir = OUTPUT_DIR / "stopping_rule"
+        stopping_dir.mkdir(parents=True, exist_ok=True)
+        
+        patches.to_csv(stopping_dir / "patches.csv", index=False)
+        
+        # Generate summary markdown
+        md_lines = [
+            "# Optimal Foraging Stopping Rule Results",
+            "",
+            "## Key Finding",
+            "",
+        ]
+        
+        if results["stopping_rule"].get("stopping_rule_confirmed"):
+            md_lines.append("**✓ Organizational Discipline Confirmed**: High-ψ agents induce ")
+            md_lines.append("stricter 'marginal value' stopping rules, causing faster exit from ")
+            md_lines.append("empty hunting grounds.")
+        else:
+            md_lines.append("No significant stopping rule effect detected.")
+        
+        with open(stopping_dir / "stopping_rule_results.md", "w") as f:
+            f.write("\n".join(md_lines))
+        
+        print(f"\nOutputs saved to {stopping_dir}")
+    
+    return results
+
+
 # =============================================================================
 # Main Orchestration
 # =============================================================================

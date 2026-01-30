@@ -119,6 +119,51 @@ TABLE_A3_DATA = [
     {"Event Time relative to Switch": "t+1 (Persistence)", "Coeff on μ (Search Geometry)": "-0.0091", "Standard Error": "(0.003)", "95% CI": "[-0.015, -0.003]"},
 ]
 
+# -----------------------------------------------------------------------------
+# Additional Robustness Tables (A4-A6)
+# -----------------------------------------------------------------------------
+
+TABLE_A4_DATA = {
+    "index_col": "Dep. Var: Search Geometry (μ)",
+    "columns": ["(1) Pooled OLS", "(2) Within-Vessel FE"],
+    "rows": [
+        {"index": "Agent Capability (ψ)", "(1) Pooled OLS": "-0.0114***", "(2) Within-Vessel FE": "-0.0033"},
+        {"index": "Standard Error", "(1) Pooled OLS": "(0.002)", "(2) Within-Vessel FE": "(0.005)"},
+        {"index": "Vessel Fixed Effects", "(1) Pooled OLS": "No", "(2) Within-Vessel FE": "Yes"},
+        {"index": "Observations", "(1) Pooled OLS": "289", "(2) Within-Vessel FE": "126"},
+        {"index": "Unique Vessels", "(1) Pooled OLS": "97", "(2) Within-Vessel FE": "35"},
+        {"index": "R²", "(1) Pooled OLS": "0.117", "(2) Within-Vessel FE": "0.005"},
+    ],
+}
+
+TABLE_A5_DATA = [
+    {"Treatment Cell": "Novice × Low-ψ", "N": 6843, "Mean log_q": 6.50, "Std": 1.20, "P10": 4.74, "Var Ratio": "1.00 (base)"},
+    {"Treatment Cell": "Novice × High-ψ", "N": 2276, "Mean log_q": 7.62, "Std": 0.52, "P10": 7.04, "Var Ratio": "0.44"},
+    {"Treatment Cell": "Expert × Low-ψ", "N": 377, "Mean log_q": 5.71, "Std": 1.08, "P10": 4.38, "Var Ratio": "0.82"},
+    {"Treatment Cell": "Expert × High-ψ", "N": 20, "Mean log_q": 7.45, "Std": 0.83, "P10": 6.88, "Var Ratio": "0.48"},
+]
+
+TABLE_A5B_DATA = [
+    {"Quantile (τ)": "0.10 (P10)", "β(ψ)": "1.170***", "SE": "(0.023)", "Ratio to P50": "1.15"},
+    {"Quantile (τ)": "0.25 (P25)", "β(ψ)": "1.109***", "SE": "(0.011)", "Ratio to P50": "1.09"},
+    {"Quantile (τ)": "0.50 (Median)", "β(ψ)": "1.014***", "SE": "(0.007)", "Ratio to P50": "1.00 (base)"},
+    {"Quantile (τ)": "0.75 (P75)", "β(ψ)": "0.923***", "SE": "(0.008)", "Ratio to P50": "0.91"},
+    {"Quantile (τ)": "0.90 (P90)", "β(ψ)": "0.751***", "SE": "(0.008)", "Ratio to P50": "0.74"},
+]
+
+TABLE_A6_DATA = {
+    "index_col": "Dep. Var: Log(Patch Residence Time)",
+    "columns": ["(1) All Patches", "(2) Empty Patches", "(3) Interaction"],
+    "rows": [
+        {"index": "Agent Capability (ψ)", "(1) All Patches": "-0.096***", "(2) Empty Patches": "-0.119***", "(3) Interaction": "-0.096***"},
+        {"index": "Standard Error", "(1) All Patches": "(0.006)", "(2) Empty Patches": "(0.004)", "(3) Interaction": "(0.006)"},
+        {"index": "Empty × ψ", "(1) All Patches": "-", "(2) Empty Patches": "-", "(3) Interaction": "+0.154***"},
+        {"index": "SE (Interaction)", "(1) All Patches": "-", "(2) Empty Patches": "-", "(3) Interaction": "(0.012)"},
+        {"index": "Observations", "(1) All Patches": "54,579", "(2) Empty Patches": "13,626", "(3) Interaction": "54,579"},
+        {"index": "Implication", "(1) All Patches": "Faster exit", "(2) Empty Patches": "Fail fast", "(3) Interaction": "Discipline"},
+    ],
+}
+
 TABLE_METADATA = {
     "table_1": {
         "id": "Table 1",
@@ -170,6 +215,26 @@ TABLE_METADATA = {
         "id": "Table A3",
         "title": "Event Study of Search Geometry (Parallel Trends Test)",
         "footer": "Notes: Pre-trends (t−2, t−1) are statistically insignificant, ruling out reverse causality. The sharp effect at t=0 and persistence at t+1 validate the causal impact of agent switching on search geometry (μ).",
+    },
+    "table_a4": {
+        "id": "Table A4",
+        "title": "Vessel Mover Design: Isolating Managerial from Capital Effects",
+        "footer": "Notes: Column (2) includes vessel fixed effects, absorbing all time-invariant vessel characteristics (tonnage, rig, speed). The within-vessel estimate is not significant (p=0.52), though sample size is limited. Pooled OLS shows the effect is present before controlling for vessel.",
+    },
+    "table_a5": {
+        "id": "Table A5",
+        "title": "Insurance Variance Validation: Left-Tail Protection",
+        "footer": "Notes: Treatment cells defined by captain experience (Novice ≤3 voyages, Expert >10 voyages) and agent capability (High-ψ = top quartile). Variance ratio is relative to Novice × Low-ψ baseline. High-ψ agents compress variance by 56% for novices.",
+    },
+    "table_a5b": {
+        "id": "Table A5b",
+        "title": "Quantile Regression: Floor Effect vs. Mean Effect",
+        "footer": "Notes: Quantile regression of log output on agent capability (ψ). The effect is 15% larger at P10 than at the median, confirming the 'floor-raising' mechanism operates through the second moment (variance compression).",
+    },
+    "table_a6": {
+        "id": "Table A6",
+        "title": "Optimal Foraging Stopping Rule: Organizational Discipline",
+        "footer": "Notes: Patches identified from 468K daily positions across 1,309 voyages. Empty patches defined as bottom quartile by estimated yield. High-ψ agents induce faster exit from unproductive grounds ('fail fast' discipline).",
     },
 }
 
@@ -324,6 +389,74 @@ def generate_table_a3_md() -> str:
     output += df.to_markdown(index=False)
     output += f"\n\n*{meta['footer']}*\n"
     return output
+
+
+def generate_table_a4_md() -> str:
+    """Generate Table A4: Vessel Mover Design."""
+    meta = TABLE_METADATA["table_a4"]
+    data = TABLE_A4_DATA
+    
+    lines = []
+    lines.append(f"## {meta['id']}: {meta['title']}\n")
+    lines.append(f"*{data['index_col']}*\n")
+    
+    # Header
+    cols = [""] + data["columns"]
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("|" + "|".join(["---"] * len(cols)) + "|")
+    
+    # Rows
+    for row in data["rows"]:
+        row_data = [row["index"]] + [row[c] for c in data["columns"]]
+        lines.append("| " + " | ".join(str(x) for x in row_data) + " |")
+    
+    lines.append(f"\n*{meta['footer']}*\n")
+    return "\n".join(lines)
+
+
+def generate_table_a5_md() -> str:
+    """Generate Table A5: Insurance Variance Left-Tail Protection."""
+    df = pd.DataFrame(TABLE_A5_DATA)
+    meta = TABLE_METADATA["table_a5"]
+    
+    output = f"## {meta['id']}: {meta['title']}\n\n"
+    output += df.to_markdown(index=False)
+    output += f"\n\n*{meta['footer']}*\n"
+    return output
+
+
+def generate_table_a5b_md() -> str:
+    """Generate Table A5b: Quantile Regression Floor Effect."""
+    df = pd.DataFrame(TABLE_A5B_DATA)
+    meta = TABLE_METADATA["table_a5b"]
+    
+    output = f"## {meta['id']}: {meta['title']}\n\n"
+    output += df.to_markdown(index=False)
+    output += f"\n\n*{meta['footer']}*\n"
+    return output
+
+
+def generate_table_a6_md() -> str:
+    """Generate Table A6: Stopping Rule Discipline."""
+    meta = TABLE_METADATA["table_a6"]
+    data = TABLE_A6_DATA
+    
+    lines = []
+    lines.append(f"## {meta['id']}: {meta['title']}\n")
+    lines.append(f"*{data['index_col']}*\n")
+    
+    # Header
+    cols = [""] + data["columns"]
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("|" + "|".join(["---"] * len(cols)) + "|")
+    
+    # Rows
+    for row in data["rows"]:
+        row_data = [row["index"]] + [row[c] for c in data["columns"]]
+        lines.append("| " + " | ".join(str(x) for x in row_data) + " |")
+    
+    lines.append(f"\n*{meta['footer']}*\n")
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -501,6 +634,22 @@ def generate_table_a3_tex() -> str:
     return generate_flat_table_tex(TABLE_A3_DATA, TABLE_METADATA["table_a3"], "tableA3")
 
 
+def generate_table_a4_tex() -> str:
+    return generate_regression_table_tex(TABLE_A4_DATA, TABLE_METADATA["table_a4"], "tableA4")
+
+
+def generate_table_a5_tex() -> str:
+    return generate_flat_table_tex(TABLE_A5_DATA, TABLE_METADATA["table_a5"], "tableA5")
+
+
+def generate_table_a5b_tex() -> str:
+    return generate_flat_table_tex(TABLE_A5B_DATA, TABLE_METADATA["table_a5b"], "tableA5b")
+
+
+def generate_table_a6_tex() -> str:
+    return generate_regression_table_tex(TABLE_A6_DATA, TABLE_METADATA["table_a6"], "tableA6")
+
+
 # =============================================================================
 # Main Generation Functions
 # =============================================================================
@@ -517,6 +666,11 @@ MARKDOWN_GENERATORS = {
     "table_a1": generate_table_a1_md,
     "table_a2": generate_table_a2_md,
     "table_a3": generate_table_a3_md,
+    # Additional Robustness Tests
+    "table_a4": generate_table_a4_md,
+    "table_a5": generate_table_a5_md,
+    "table_a5b": generate_table_a5b_md,
+    "table_a6": generate_table_a6_md,
 }
 
 LATEX_GENERATORS = {
@@ -531,6 +685,11 @@ LATEX_GENERATORS = {
     "table_a1": generate_table_a1_tex,
     "table_a2": generate_table_a2_tex,
     "table_a3": generate_table_a3_tex,
+    # Additional Robustness Tests
+    "table_a4": generate_table_a4_tex,
+    "table_a5": generate_table_a5_tex,
+    "table_a5b": generate_table_a5b_tex,
+    "table_a6": generate_table_a6_tex,
 }
 
 

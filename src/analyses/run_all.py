@@ -170,12 +170,64 @@ def run_all_analyses(
     all_results["r14"] = labor_results["r14"]
     all_results["r15"] = labor_results["r15"]
     
+    # =========================================================================
+    # Step 10: Mechanism Analysis (Crew-Level)
+    # =========================================================================
+    print("\n" + "-" * 70)
+    print("STEP 10: MECHANISM ANALYSIS (CREW-LEVEL)")
+    print("-" * 70)
+    
+    try:
+        from .mechanism_crew import run_full_mechanism_analysis
+        mechanism_results = run_full_mechanism_analysis(df_loo, save_outputs=save_outputs)
+        all_results["mechanism"] = mechanism_results
+    except Exception as e:
+        print(f"Warning: Mechanism analysis failed: {e}")
+        all_results["mechanism"] = {"error": str(e)}
+    
+    # =========================================================================
+    # Step 11: Additional Robustness Tests (Killer Tests)
+    # =========================================================================
+    print("\n" + "-" * 70)
+    print("STEP 11: ADDITIONAL ROBUSTNESS TESTS")
+    print("-" * 70)
+    
+    # 11a: Vessel Mover Design
+    try:
+        from .vessel_mover_analysis import run_vessel_mover_analysis
+        vessel_mover_results = run_vessel_mover_analysis(df_loo, save_outputs=save_outputs)
+        all_results["vessel_mover"] = vessel_mover_results
+        print("  ✓ Vessel Mover Design complete")
+    except Exception as e:
+        print(f"  ⚠ Vessel Mover Design failed: {e}")
+        all_results["vessel_mover"] = {"error": str(e)}
+    
+    # 11b: Insurance Variance Validation
+    try:
+        from .insurance_variance_test import run_insurance_variance_tests
+        insurance_results = run_insurance_variance_tests(df_loo, save_outputs=save_outputs)
+        all_results["insurance_variance"] = insurance_results
+        print("  ✓ Insurance Variance Validation complete")
+    except Exception as e:
+        print(f"  ⚠ Insurance Variance Validation failed: {e}")
+        all_results["insurance_variance"] = {"error": str(e)}
+    
+    # 11c: Optimal Foraging Stopping Rule
+    try:
+        from .search_theory import run_stopping_rule_analysis
+        stopping_rule_results = run_stopping_rule_analysis(df_loo, save_outputs=save_outputs)
+        all_results["stopping_rule"] = stopping_rule_results
+        print("  ✓ Stopping Rule Analysis complete")
+    except Exception as e:
+        print(f"  ⚠ Stopping Rule Analysis failed: {e}")
+        all_results["stopping_rule"] = {"error": str(e)}
+    
     if not quick:
         # =====================================================================
-        # Step 10: R16-R17 - Optional extensions
+        # Step 12: R16-R17 - Optional extensions
         # =====================================================================
         print("\n" + "-" * 70)
-        print("STEP 10: R16-R17 - OPTIONAL EXTENSIONS")
+        print("STEP 12: R16-R17 - OPTIONAL EXTENSIONS")
         print("-" * 70)
         
         ext_results = run_extensions(df_loo, save_outputs=save_outputs)
@@ -183,11 +235,11 @@ def run_all_analyses(
         all_results["r17"] = ext_results["r17"]
     
     # =========================================================================
-    # Step 11: Generate output exhibits
+    # Step 13: Generate output exhibits
     # =========================================================================
     if save_outputs:
         print("\n" + "-" * 70)
-        print("STEP 11: GENERATING OUTPUT EXHIBITS")
+        print("STEP 13: GENERATING OUTPUT EXHIBITS")
         print("-" * 70)
         
         generate_all_outputs(all_results, diagnostics)

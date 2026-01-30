@@ -362,6 +362,209 @@ def run_mechanism_regressions(
     return results
 
 
+def run_within_captain_variation(df: pd.DataFrame) -> Dict:
+    """
+    Test 6: Within-Captain, Across-Agent Variation.
+    
+    If same captain has different output with different agents,
+    this rules out pure selection and points to organizational effects.
+    """
+    print("\n--- Test 6: Within-Captain, Across-Agent Variation ---")
+    
+    # Find captains who worked with multiple agents
+    captain_agent_counts = df.groupby("captain_id")["agent_id"].nunique()
+    multi_agent_captains = captain_agent_counts[captain_agent_counts > 1].index.tolist()
+    
+    if len(multi_agent_captains) < 100:
+        print(f"  Insufficient multi-agent captains: {len(multi_agent_captains)}")
+        return {}
+    
+    print(f"  Captains with 2+ agents: {len(multi_agent_captains):,}")
+    
+    # Subset to these captains
+    multi_df = df[df["captain_id"].isin(multi_agent_captains)].copy()
+    print(f"  Voyages from multi-agent captains: {len(multi_df):,}")
+    
+    y = multi_df["log_q"].values
+    n = len(y)
+    
+    # Build sparse design matrix for captain FE
+    captain_ids = multi_df["captain_id"].unique()
+    captain_map = {c: i for i, c in enumerate(captain_ids)}
+    captain_idx = multi_df["captain_id"].map(captain_map).values
+    X_captain = sp.csr_matrix((np.ones(n), (np.arange(n), captain_idx)), 
+                               shape=(n, len(captain_ids)))
+    
+    result = lsqr(X_captain, y, iter_lim=5000)
+    resid_captain = y - X_captain @ result[0]
+    r2_captain = 1 - np.var(resid_captain) / np.var(y)
+    
+    # Add agent FE
+    agent_ids = multi_df["agent_id"].unique()
+    agent_map = {a: i for i, a in enumerate(agent_ids)}
+    agent_idx = multi_df["agent_id"].map(agent_map).values
+    X_agent = sp.csr_matrix((np.ones(n), (np.arange(n), agent_idx)), 
+                             shape=(n, len(agent_ids)))[:, 1:]
+    
+    X_full = sp.hstack([X_captain, X_agent])
+    result_full = lsqr(X_full, y, iter_lim=5000)
+    resid_full = y - X_full @ result_full[0]
+    r2_full = 1 - np.var(resid_full) / np.var(y)
+    
+    incremental_r2 = r2_full - r2_captain
+    
+    # F-test for joint significance of agent FEs
+    n_agents = len(agent_ids) - 1
+    rss_r = np.sum(resid_captain**2)
+    rss_u = np.sum(resid_full**2)
+    f_stat = ((rss_r - rss_u) / n_agents) / (rss_u / (n - len(captain_ids) - n_agents))
+    p_val = 1 - stats.f.cdf(f_stat, n_agents, n - len(captain_ids) - n_agents)
+    
+    print(f"  R² (captain FE only): {r2_captain:.4f}")
+    print(f"  R² (captain + agent FE): {r2_full:.4f}")
+    print(f"  Incremental R² from agent: {incremental_r2:.4f}")
+    print(f"  F-test: F({n_agents}, {n - len(captain_ids) - n_agents}) = {f_stat:.2f}, p < {p_val:.4f}")
+    print(f"  Conclusion: Agent effects are {'significant' if p_val < 0.05 else 'not significant'} WITHIN captains")
+    
+    return {
+        "n": n,
+        "n_captains": len(captain_ids),
+        "n_agents": len(agent_ids),
+        "r2_captain": r2_captain,
+        "r2_full": r2_full,
+        "incremental_r2": incremental_r2,
+        "f_stat": f_stat,
+        "p_value": p_val,
+    }
+
+
+def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame) -> Dict:
+    """
+    Test 7: Mate-to-Captain Career Paths.
+    
+    Do mates who become captains perform better with their training agent?
+    """
+    print("\n--- Test 7: Mate-to-Captain Career Paths ---")
+    
+    crew = crew.copy()
+    crew["rank"] = crew["rank"].fillna("").str.upper().str.strip()
+    
+    # Find mates
+    mates = crew[crew["rank"].isin(["1ST MATE", "1 MATE", "MATE", "2ND MATE", "2 MATE"])]
+    mates = mates.dropna(subset=["crew_name_clean"])
+    
+    # Find captains
+    captains = crew[crew["rank"] == "MASTER"]
+    captains = captains.dropna(subset=["crew_name_clean"])
+    
+    print(f"  Unique mate names: {mates['crew_name_clean'].nunique():,}")
+    print(f"  Unique captain names: {captains['crew_name_clean'].nunique():,}")
+    
+    # Find mates who became captains
+    mate_names = set(mates["crew_name_clean"].unique())
+    captain_names = set(captains["crew_name_clean"].unique())
+    promoted = mate_names.intersection(captain_names)
+    
+    print(f"  Mates who became captains: {len(promoted):,}")
+    
+    if len(promoted) < 50:
+        print("  Insufficient promoted mates for analysis")
+        return {}
+    
+    # Get training agent (agent when first served as mate)
+    mate_voyages = mates[mates["crew_name_clean"].isin(promoted)].merge(
+        df[["voyage_id", "agent_id", "year_out"]], on="voyage_id", how="inner"
+    )
+    
+    first_mate_voyage = mate_voyages.sort_values("year_out").groupby("crew_name_clean").first().reset_index()
+    first_mate_voyage = first_mate_voyage[["crew_name_clean", "agent_id"]].rename(
+        columns={"agent_id": "training_agent"}
+    )
+    
+    # Get captain voyages
+    captain_voyages = captains[captains["crew_name_clean"].isin(promoted)].merge(
+        df[["voyage_id", "agent_id", "log_q", "year_out"]], on="voyage_id", how="inner"
+    )
+    
+    captain_voyages = captain_voyages.merge(first_mate_voyage, on="crew_name_clean", how="inner")
+    captain_voyages["same_agent"] = (captain_voyages["agent_id"] == captain_voyages["training_agent"]).astype(int)
+    
+    print(f"  Captain voyages with known training agent: {len(captain_voyages):,}")
+    print(f"  - With training agent: {captain_voyages['same_agent'].sum():,}")
+    print(f"  - With different agent: {(1 - captain_voyages['same_agent']).sum():,}")
+    
+    if len(captain_voyages) < 50:
+        return {}
+    
+    # Regression
+    X = np.column_stack([np.ones(len(captain_voyages)), captain_voyages["same_agent"].values])
+    y = captain_voyages["log_q"].values
+    beta = np.linalg.lstsq(X, y, rcond=None)[0]
+    resid = y - X @ beta
+    se = np.sqrt(np.var(resid) * np.linalg.inv(X.T @ X)[1, 1])
+    t_stat = beta[1] / se
+    p_val = 2 * (1 - stats.t.cdf(abs(t_stat), len(captain_voyages) - 2))
+    
+    print(f"  β(same_agent) = {beta[1]:.4f} (SE: {se:.4f}), t = {t_stat:.2f}")
+    print(f"  Interpretation: Captains perform {'better' if beta[1] > 0 else 'worse'} when with training agent")
+    
+    return {
+        "n": len(captain_voyages),
+        "n_promoted": len(promoted),
+        "n_with_training_agent": int(captain_voyages["same_agent"].sum()),
+        "beta": beta[1],
+        "se": se,
+        "t_stat": t_stat,
+        "p_value": p_val,
+    }
+
+
+def run_agent_network_effects(df: pd.DataFrame) -> Dict:
+    """
+    Test 8: Agent Network Effects.
+    
+    Do larger agents (more captains, more voyages) have different outcomes?
+    """
+    print("\n--- Test 8: Agent Network Effects ---")
+    
+    # Agent portfolio size
+    agent_portfolio = df.groupby("agent_id").agg({
+        "voyage_id": "count",
+        "captain_id": "nunique",
+        "log_q": "mean"
+    }).reset_index()
+    agent_portfolio.columns = ["agent_id", "n_voyages", "n_captains", "mean_output"]
+    
+    df_merged = df.merge(agent_portfolio[["agent_id", "n_voyages", "n_captains"]], on="agent_id")
+    
+    # Regression
+    X = np.column_stack([
+        np.ones(len(df_merged)),
+        df_merged["n_voyages"].values,
+        df_merged["n_captains"].values,
+    ])
+    y = df_merged["log_q"].values
+    
+    beta = np.linalg.lstsq(X, y, rcond=None)[0]
+    resid = y - X @ beta
+    mse = np.sum(resid**2) / (len(y) - 3)
+    se = np.sqrt(np.diag(mse * np.linalg.inv(X.T @ X)))
+    
+    print(f"  N = {len(df_merged):,}")
+    print(f"  β(n_voyages) = {beta[1]:.5f} (SE: {se[1]:.5f}), t = {beta[1]/se[1]:.2f}")
+    print(f"  β(n_captains) = {beta[2]:.5f} (SE: {se[2]:.5f}), t = {beta[2]/se[2]:.2f}")
+    
+    return {
+        "n": len(df_merged),
+        "beta_n_voyages": beta[1],
+        "se_n_voyages": se[1],
+        "t_n_voyages": beta[1] / se[1],
+        "beta_n_captains": beta[2],
+        "se_n_captains": se[2],
+        "t_n_captains": beta[2] / se[2],
+    }
+
+
 def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> Dict:
     """
     Run complete mechanism analysis suite.
@@ -377,8 +580,13 @@ def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> 
     crew_features = compute_crew_features(crew, df)
     experience_df = track_crew_experience(crew, df)
     
-    # Run regressions
+    # Run basic crew regressions (Tests 1-5)
     results = run_mechanism_regressions(df, crew_features, experience_df)
+    
+    # Run high-value tests (Tests 6-8)
+    results["within_captain"] = run_within_captain_variation(df)
+    results["mate_to_captain"] = run_mate_to_captain_test(df, crew)
+    results["agent_network"] = run_agent_network_effects(df)
     
     # Summary
     print("\n" + "=" * 60)
@@ -386,9 +594,14 @@ def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> 
     print("=" * 60)
     
     for test_name, test_results in results.items():
+        if not test_results:
+            continue
         if "p_value" in test_results:
             sig = "***" if test_results["p_value"] < 0.01 else "**" if test_results["p_value"] < 0.05 else "*" if test_results["p_value"] < 0.1 else ""
-            print(f"{test_name}: β = {test_results['beta']:.4f} {sig}")
+            if "beta" in test_results:
+                print(f"{test_name}: β = {test_results['beta']:.4f} {sig}")
+            elif "incremental_r2" in test_results:
+                print(f"{test_name}: ΔR² = {test_results['incremental_r2']:.4f} {sig}")
         elif "mate_share" in test_results:
             print(f"{test_name}: Mate share = {test_results['mate_share']:.1%}")
     
@@ -399,8 +612,9 @@ def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> 
         
         rows = []
         for test_name, test_results in results.items():
-            row = {"test": test_name, **test_results}
-            rows.append(row)
+            if test_results:
+                row = {"test": test_name, **test_results}
+                rows.append(row)
         
         pd.DataFrame(rows).to_csv(output_path, index=False)
         print(f"\nResults saved to {output_path}")
@@ -413,3 +627,4 @@ if __name__ == "__main__":
     
     df = prepare_analysis_sample()
     results = run_full_mechanism_analysis(df)
+
