@@ -17,6 +17,7 @@ from scipy.sparse.linalg import lsqr
 
 from .config import REGRESSIONS, DEFAULT_SAMPLE
 from .connected_set import find_leave_one_out_connected_set
+from .parallel_akm import parallel_kss_leverage
 
 
 def build_sparse_design_matrix(
@@ -274,7 +275,11 @@ def estimate_r1(
     return results
 
 
-def compute_kss_correction(results: Dict) -> Dict:
+def compute_kss_correction(
+    results: Dict,
+    use_parallel: bool = True,
+    n_workers: Optional[int] = None,
+) -> Dict:
     """
     Compute KSS (Kline-Saggio-Sølvsten 2020) bias correction for variance components.
     
@@ -289,13 +294,17 @@ def compute_kss_correction(results: Dict) -> Dict:
     ----------
     results : Dict
         Results from estimate_r1.
+    use_parallel : bool
+        If True, use multithreaded leverage computation.
+    n_workers : int, optional
+        Number of worker threads (default: auto-detect CPU count).
         
     Returns
     -------
     Dict
         Bias-corrected variance estimates.
     """
-    print("\nComputing KSS bias correction (Exact Method)...")
+    print(f"\nComputing KSS bias correction (Exact Method, parallel={use_parallel})...")
     
     df = results["df"]
     residuals = results["residuals"]
@@ -379,27 +388,31 @@ def compute_kss_correction(results: Dict) -> Dict:
     # Leverage of 'captain part' for obs i: B_ii_alpha = x_{i,alpha} @ S_alpha @ x_{i,alpha}'
     # We can compute this efficiently: sum( (X_alpha @ S_alpha) * X_alpha, axis=1 )
     
-    # 1. Project alpha part
+    # Convert to dense for leverage computation
     print("  Projecting bias terms...")
-    # Dense matrix math is fine here
     if sp.issparse(X_alpha): 
         X_alpha_d = X_alpha.toarray() 
     else: 
         X_alpha_d = X_alpha
         
-    leverage_alpha = np.sum((X_alpha_d @ S_alpha) * X_alpha_d, axis=1)
-    
-    # 2. Project gamma part
     if sp.issparse(X_gamma): 
         X_gamma_d = X_gamma.toarray()
     else:
         X_gamma_d = X_gamma
-        
-    leverage_gamma = np.sum((X_gamma_d @ S_gamma) * X_gamma_d, axis=1)
     
-    # 3. Project cross part (for Covariance)
-    # Term is x_{i,alpha} @ S_cross @ x_{i,gamma}'
-    leverage_cov = np.sum((X_alpha_d @ S_cross) * X_gamma_d, axis=1)
+    # Compute leverages - parallel or sequential
+    if use_parallel:
+        leverage_alpha, leverage_gamma, leverage_cov = parallel_kss_leverage(
+            X_alpha_d, S_alpha,
+            X_gamma_d, S_gamma,
+            S_cross,
+            n_workers=n_workers,
+        )
+    else:
+        # Sequential computation
+        leverage_alpha = np.sum((X_alpha_d @ S_alpha) * X_alpha_d, axis=1)
+        leverage_gamma = np.sum((X_gamma_d @ S_gamma) * X_gamma_d, axis=1)
+        leverage_cov = np.sum((X_alpha_d @ S_cross) * X_gamma_d, axis=1)
     
     # Compute component biases
     # Bias = (1/N) * Sum( leverage_component * sigma_i^2 )

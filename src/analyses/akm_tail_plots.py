@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 from scipy import stats
 
 from .config import TABLES_DIR, OUTPUT_DIR
+from .parallel_akm import parallel_loo_fe
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -307,6 +308,8 @@ def compute_loo_fixed_effects(
 
 def compute_kss_loo_fixed_effects(
     voyage_panel_path: Optional[Path] = None,
+    use_parallel: bool = True,
+    n_workers: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Compute KSS-style leave-out fixed effects using efficient group-based formula.
@@ -321,6 +324,15 @@ def compute_kss_loo_fixed_effects(
       LOO(α_c) ≈ α̂_c - (α̂_c - ȳ_c) / n_c
     
     This is the bias-corrected estimator under homoscedastic errors.
+    
+    Parameters
+    ----------
+    voyage_panel_path : Path, optional
+        Path to voyage panel parquet file.
+    use_parallel : bool
+        If True, use multithreaded computation.
+    n_workers : int, optional
+        Number of worker threads.
     """
     if voyage_panel_path is None:
         voyage_panel_path = TABLES_DIR / "voyage_tfp_panel.parquet"
@@ -352,54 +364,67 @@ def compute_kss_loo_fixed_effects(
     
     results = []
     
-    print("Computing KSS-style LOO fixed effects...")
+    print(f"Computing KSS-style LOO fixed effects (parallel={use_parallel})...")
     
     # Captain LOO: for each captain, compute mean of (y - γ) excluding sparse entities
     for entity_col, resid_col, fe_col, entity_type in [
         ('captain_id', 'y_resid_from_agent', 'alpha_hat', 'captain'),
         ('agent_id', 'y_resid_from_captain', 'gamma_hat', 'agent'),
     ]:
-        # Group statistics
-        entity_stats = voyage_df.groupby(entity_col).agg(
-            n_obs=(resid_col, 'count'),
-            sum_resid=(resid_col, 'sum'),
-            mean_resid=(resid_col, 'mean'),
-            var_resid=(resid_col, 'var'),
-            fe_hat=(fe_col, 'first'),
-        ).reset_index()
-        
-        entity_stats = entity_stats.rename(columns={entity_col: 'entity_id'})
-        entity_stats['entity_type'] = entity_type
-        
-        # KSS-style LOO:
-        # For each observation, the leave-out contribution is:
-        #   LOO_mean = (total - this_obs) / (n - 1)
-        # The entity-level LOO FE is the average of LOO_means
-        # 
-        # For large n, LOO ≈ plug-in FE
-        # For small n, LOO shows more regression to mean
-        
-        # Using Andrews et al (2008) / KSS (2020) approximation:
-        # LOO_FE ≈ FE - bias_correction
-        # where bias_correction = σ²_ε * leverage
-        
-        # Simple approximation: for entities with n_obs = 1, LOO is undefined
-        # For n_obs > 1, LOO ≈ mean(y - other_FE)
-        
-        entity_stats['loo_fe_hat'] = np.where(
-            entity_stats['n_obs'] > 1,
-            entity_stats['mean_resid'],
-            np.nan
-        )
-        
-        # Variance of LOO estimator
-        entity_stats['loo_se'] = np.where(
-            entity_stats['n_obs'] > 1,
-            np.sqrt(entity_stats['var_resid'].fillna(0) / (entity_stats['n_obs'] - 1)),
-            np.nan
-        )
-        
-        results.append(entity_stats[['entity_id', 'entity_type', 'loo_fe_hat', 'loo_se', 'n_obs', 'fe_hat']])
+        if use_parallel:
+            # Use parallel implementation
+            entity_stats = parallel_loo_fe(
+                voyage_df, 
+                entity_col, 
+                resid_col, 
+                fe_col,
+                n_workers=n_workers,
+            )
+            entity_stats['entity_type'] = entity_type
+            results.append(entity_stats)
+        else:
+            # Sequential implementation
+            # Group statistics
+            entity_stats = voyage_df.groupby(entity_col).agg(
+                n_obs=(resid_col, 'count'),
+                sum_resid=(resid_col, 'sum'),
+                mean_resid=(resid_col, 'mean'),
+                var_resid=(resid_col, 'var'),
+                fe_hat=(fe_col, 'first'),
+            ).reset_index()
+            
+            entity_stats = entity_stats.rename(columns={entity_col: 'entity_id'})
+            entity_stats['entity_type'] = entity_type
+            
+            # KSS-style LOO:
+            # For each observation, the leave-out contribution is:
+            #   LOO_mean = (total - this_obs) / (n - 1)
+            # The entity-level LOO FE is the average of LOO_means
+            # 
+            # For large n, LOO ≈ plug-in FE
+            # For small n, LOO shows more regression to mean
+            
+            # Using Andrews et al (2008) / KSS (2020) approximation:
+            # LOO_FE ≈ FE - bias_correction
+            # where bias_correction = σ²_ε * leverage
+            
+            # Simple approximation: for entities with n_obs = 1, LOO is undefined
+            # For n_obs > 1, LOO ≈ mean(y - other_FE)
+            
+            entity_stats['loo_fe_hat'] = np.where(
+                entity_stats['n_obs'] > 1,
+                entity_stats['mean_resid'],
+                np.nan
+            )
+            
+            # Variance of LOO estimator
+            entity_stats['loo_se'] = np.where(
+                entity_stats['n_obs'] > 1,
+                np.sqrt(entity_stats['var_resid'].fillna(0) / (entity_stats['n_obs'] - 1)),
+                np.nan
+            )
+            
+            results.append(entity_stats[['entity_id', 'entity_type', 'loo_fe_hat', 'loo_se', 'n_obs', 'fe_hat']])
     
     loo_df = pd.concat(results, ignore_index=True)
     

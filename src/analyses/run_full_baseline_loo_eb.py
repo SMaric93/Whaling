@@ -33,6 +33,8 @@ from datetime import datetime
 import statsmodels.api as sm
 from scipy import stats
 
+from src.analyses.parallel_akm import parallel_eb_shrinkage, get_n_workers
+
 warnings.filterwarnings('ignore')
 
 # Configuration
@@ -107,8 +109,28 @@ def get_loo_connected_set(df):
     }
 
 
-def run_akm_with_eb(df_est, control_cols=None, outcome_col='log_q'):
-    """Run AKM with EB variance correction."""
+def run_akm_with_eb(
+    df_est, 
+    control_cols=None, 
+    outcome_col='log_q',
+    use_parallel: bool = True,
+    n_workers: int = None,
+):
+    """Run AKM with EB variance correction.
+    
+    Parameters
+    ----------
+    df_est : pd.DataFrame
+        Estimation sample with captain_id, agent_id, and outcome.
+    control_cols : list, optional
+        Control variable column names.
+    outcome_col : str
+        Outcome column name.
+    use_parallel : bool
+        If True, use multithreaded EB shrinkage.
+    n_workers : int, optional
+        Number of worker threads.
+    """
     if control_cols is None:
         control_cols = []
     
@@ -182,24 +204,35 @@ def run_akm_with_eb(df_est, control_cols=None, outcome_col='log_q'):
     n_a = np.array([agent_counts.get(a, 1) for a in agent_ids])
     
     # EB correction
-    noise_captain = sigma2_eps * np.mean(1/n_c)
-    noise_agent = sigma2_eps * np.mean(1/n_a)
-    
-    var_theta_signal = max(0, np.var(theta) - noise_captain)
-    var_psi_signal = max(0, np.var(psi) - noise_agent)
-    
-    if var_theta_signal > 0:
-        lambda_captain = var_theta_signal / (var_theta_signal + sigma2_eps/n_c)
+    if use_parallel:
+        # Parallel EB shrinkage for captains
+        theta_eb, lambda_captain, var_theta_signal = parallel_eb_shrinkage(
+            theta, n_c, sigma2_eps, n_workers=n_workers
+        )
+        # Parallel EB shrinkage for agents
+        psi_eb, lambda_agent, var_psi_signal = parallel_eb_shrinkage(
+            psi, n_a, sigma2_eps, n_workers=n_workers
+        )
     else:
-        lambda_captain = np.zeros_like(n_c, dtype=float)
-    
-    if var_psi_signal > 0:
-        lambda_agent = var_psi_signal / (var_psi_signal + sigma2_eps/n_a)
-    else:
-        lambda_agent = np.zeros_like(n_a, dtype=float)
-    
-    theta_eb = lambda_captain * theta + (1 - lambda_captain) * np.mean(theta)
-    psi_eb = lambda_agent * psi + (1 - lambda_agent) * np.mean(psi)
+        # Sequential EB shrinkage
+        noise_captain = sigma2_eps * np.mean(1/n_c)
+        noise_agent = sigma2_eps * np.mean(1/n_a)
+        
+        var_theta_signal = max(0, np.var(theta) - noise_captain)
+        var_psi_signal = max(0, np.var(psi) - noise_agent)
+        
+        if var_theta_signal > 0:
+            lambda_captain = var_theta_signal / (var_theta_signal + sigma2_eps/n_c)
+        else:
+            lambda_captain = np.zeros_like(n_c, dtype=float)
+        
+        if var_psi_signal > 0:
+            lambda_agent = var_psi_signal / (var_psi_signal + sigma2_eps/n_a)
+        else:
+            lambda_agent = np.zeros_like(n_a, dtype=float)
+        
+        theta_eb = lambda_captain * theta + (1 - lambda_captain) * np.mean(theta)
+        psi_eb = lambda_agent * psi + (1 - lambda_agent) * np.mean(psi)
     
     # Build FE dataframes
     captain_fe = pd.DataFrame({
