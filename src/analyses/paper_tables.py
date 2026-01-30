@@ -164,6 +164,29 @@ TABLE_A6_DATA = {
     ],
 }
 
+# -----------------------------------------------------------------------------
+# Mechanism Tests Tables (A7-A8) - Weather, Crew, and Context-Dependent Matching
+# -----------------------------------------------------------------------------
+
+TABLE_A7_DATA = [
+    {"Mechanism Dimension": "Species: Baleen → Sperm", "β₃(Simple)": "+0.13", "β₃(Complex)": "−0.01", "Δβ₃": "−0.14***", "SE": "0.03", "t": "−4.3", "FE": "Route×Year"},
+    {"Mechanism Dimension": "Duration: Short → Long", "β₃(Simple)": "+0.09", "β₃(Complex)": "−0.24", "Δβ₃": "−0.33***", "SE": "0.04", "t": "−7.4", "FE": "Route×Year"},
+    {"Mechanism Dimension": "Vessel: Small → Large", "β₃(Simple)": "+0.02", "β₃(Complex)": "−0.24", "Δβ₃": "−0.26***", "SE": "0.05", "t": "−5.7", "FE": "Route×Year"},
+    {"Mechanism Dimension": "Desertion: Low → High", "β₃(Simple)": "+0.02", "β₃(Complex)": "−0.35", "Δβ₃": "−0.37***", "SE": "0.04", "t": "−8.5", "FE": "Route×Year"},
+    {"Mechanism Dimension": "Hurricane: None → Any", "β₃(Simple)": "−0.05", "β₃(Complex)": "−0.12", "Δβ₃": "−0.06", "SE": "0.04", "t": "−1.4", "FE": "Route×Year"},
+]
+
+TABLE_A8_DATA = [
+    {"Context": "Baleen whaling", "Corr(θ,ψ)": "+0.31", "Sorting": "PAM", "β₃": "+0.13", "Technology": "Complements", "Interpretation": "Predictable hunt → sorted matching"},
+    {"Context": "Sperm whaling", "Corr(θ,ψ)": "−0.26", "Sorting": "NAM", "β₃": "−0.01", "Technology": "Substitutes", "Interpretation": "Search-intensive → agent compensates"},
+    {"Context": "Short voyage", "Corr(θ,ψ)": "+0.12", "Sorting": "PAM", "β₃": "+0.09", "Technology": "Complements", "Interpretation": "Low uncertainty → captain dominates"},
+    {"Context": "Long voyage", "Corr(θ,ψ)": "−0.26", "Sorting": "NAM", "β₃": "−0.24", "Technology": "Substitutes", "Interpretation": "High uncertainty → agent matters"},
+    {"Context": "Low desertion", "Corr(θ,ψ)": "+0.19", "Sorting": "PAM", "β₃": "+0.02", "Technology": "Neutral", "Interpretation": "Good crew → captain skill dominates"},
+    {"Context": "High desertion", "Corr(θ,ψ)": "−0.12", "Sorting": "NAM", "β₃": "−0.35", "Technology": "Substitutes", "Interpretation": "Crew friction → agent compensates"},
+    {"Context": "No hurricanes", "Corr(θ,ψ)": "+0.27", "Sorting": "PAM", "β₃": "−0.05", "Technology": "Weak Sub", "Interpretation": "Calm conditions → standard matching"},
+    {"Context": "Hurricane exposure", "Corr(θ,ψ)": "+0.11", "Sorting": "Weak PAM", "β₃": "−0.12", "Technology": "Substitutes", "Interpretation": "Adversity → agents more critical"},
+]
+
 TABLE_METADATA = {
     "table_1": {
         "id": "Table 1",
@@ -235,6 +258,16 @@ TABLE_METADATA = {
         "id": "Table A6",
         "title": "Optimal Foraging Stopping Rule: Organizational Discipline",
         "footer": "Notes: Patches identified from 468K daily positions across 1,309 voyages. Empty patches defined as bottom quartile by estimated yield. High-ψ agents induce faster exit from unproductive grounds ('fail fast' discipline).",
+    },
+    "table_a7": {
+        "id": "Table A7",
+        "title": "Mechanism Tests: Formal Equality Tests for β₃ Differences",
+        "footer": "Notes: All tests use interaction specification log(q) = β₁θ + β₂ψ + β₃(θ×ψ) + D + (θ×D) + (ψ×D) + (θ×ψ×D) + ε with Route×Year FE. Δβ₃ is the coefficient on (θ×ψ×D). *** p<0.01, ** p<0.05, * p<0.10. 'Simple' and 'Complex' contexts defined by median splits on each dimension.",
+    },
+    "table_a8": {
+        "id": "Table A8",
+        "title": "Context-Dependent Matching: Sorting and Production Technology by Environment",
+        "footer": "Notes: PAM = Positive Assortative Matching (high-θ with high-ψ), NAM = Negative Assortative Matching. β₃ from Route×Year FE specification. All correlation differences significant at p<0.001 via Fisher z-test. Matching regime shifts systematically with operational complexity.",
     },
 }
 
@@ -650,6 +683,38 @@ def generate_table_a6_tex() -> str:
     return generate_regression_table_tex(TABLE_A6_DATA, TABLE_METADATA["table_a6"], "tableA6")
 
 
+# -----------------------------------------------------------------------------
+# Mechanism Tests Generators (A7-A8)
+# -----------------------------------------------------------------------------
+
+def generate_table_a7_md() -> str:
+    """Generate Table A7: Mechanism Equality Tests."""
+    df = pd.DataFrame(TABLE_A7_DATA)
+    meta = TABLE_METADATA["table_a7"]
+    md = f"## {meta['id']}: {meta['title']}\n\n"
+    md += df.to_markdown(index=False)
+    md += f"\n\n*{meta['footer']}*\n"
+    return md
+
+
+def generate_table_a8_md() -> str:
+    """Generate Table A8: Context-Dependent Matching."""
+    df = pd.DataFrame(TABLE_A8_DATA)
+    meta = TABLE_METADATA["table_a8"]
+    md = f"## {meta['id']}: {meta['title']}\n\n"
+    md += df.to_markdown(index=False)
+    md += f"\n\n*{meta['footer']}*\n"
+    return md
+
+
+def generate_table_a7_tex() -> str:
+    return generate_flat_table_tex(TABLE_A7_DATA, TABLE_METADATA["table_a7"], "tableA7")
+
+
+def generate_table_a8_tex() -> str:
+    return generate_flat_table_tex(TABLE_A8_DATA, TABLE_METADATA["table_a8"], "tableA8")
+
+
 # =============================================================================
 # Main Generation Functions
 # =============================================================================
@@ -671,6 +736,9 @@ MARKDOWN_GENERATORS = {
     "table_a5": generate_table_a5_md,
     "table_a5b": generate_table_a5b_md,
     "table_a6": generate_table_a6_md,
+    # Mechanism Tests
+    "table_a7": generate_table_a7_md,
+    "table_a8": generate_table_a8_md,
 }
 
 LATEX_GENERATORS = {
@@ -690,6 +758,9 @@ LATEX_GENERATORS = {
     "table_a5": generate_table_a5_tex,
     "table_a5b": generate_table_a5b_tex,
     "table_a6": generate_table_a6_tex,
+    # Mechanism Tests
+    "table_a7": generate_table_a7_tex,
+    "table_a8": generate_table_a8_tex,
 }
 
 
