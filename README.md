@@ -49,24 +49,18 @@ The analyses module implements a 17-regression empirical suite (R1–R17) for es
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the full pipeline
+# Run the complete 5-stage pipeline
 python run_pipeline.py all
 
 # Or run individual stages
-python run_pipeline.py download          # Download raw data
-python run_pipeline.py parse             # Parse and standardize
-python run_pipeline.py aggregate         # Compute metrics
-python run_pipeline.py assemble-voyages  # Build voyage dataset
-python run_pipeline.py link-captains     # Census linkage
-python run_pipeline.py assemble-captains # Build captain panel
-python run_pipeline.py qa                # Quality assurance
+python run_pipeline.py pull      # Stage 1: Download all data
+python run_pipeline.py clean     # Stage 2: Parse and standardize
+python run_pipeline.py merge     # Stage 3: Assemble and link datasets
+python run_pipeline.py analyze   # Stage 4: Run full analysis suite
+python run_pipeline.py output    # Stage 5: Generate MD and TEX tables
 
-# Run the Online Voyage Augmentation Pack
-python run_pipeline.py augment-all       # Full augmentation pipeline
-
-# Run empirical analyses
-python -m src.analyses.run_all           # Run all R1-R17 regressions
-python -m src.analyses.run_all --quick   # Run main text regressions only
+# Quick analysis (main regressions only)
+python run_pipeline.py analyze --quick
 ```
 
 ### Exploratory & ML Analyses
@@ -319,35 +313,41 @@ python src/download/economic_downloader.py
 python src/parsing/wsl_market_parser.py
 ```
 
-The pipeline consists of 16 sequential stages organized into three major phases:
+## Pipeline Architecture
 
-### Phase 1: Core Pipeline (Stages 1–9)
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 1: Download          ──▶  Raw data acquisition              │
-│  Stage 2: Parse             ──▶  Standardization & normalization   │
-│  Stages 3-5: Aggregate      ──▶  Labor, route, vessel metrics      │
-│  Stage 6: Assemble Voyages  ──▶  analysis_voyage.parquet           │
-│  Stages 7-8: Link Captains  ──▶  IPUMS census matching             │
-│  Stage 9: Assemble Captains ──▶  analysis_captain_year.parquet     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Phase 2: Online Voyage Augmentation Pack (Stages 10–16)
+The pipeline is organized into **5 clear stages**:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 10: Download Online  ──▶  Starbuck, Maury, WSL sources      │
-│  Stage 11: Extract WSL      ──▶  PDF event extraction              │
-│  Stage 12: Crosswalk WSL    ──▶  Map events to voyages             │
-│  Stage 13: Starbuck         ──▶  Parse & reconcile with AOWV       │
-│  Stage 14: Maury            ──▶  Logbook validation                │
-│  Stage 16: Augment          ──▶  analysis_voyage_augmented.parquet │
+│                     5-STAGE DATA PIPELINE                          │
+├─────────────────────────────────────────────────────────────────────┤
+│  Stage 1: PULL      ──▶  Download AOWV, Starbuck, WSL, Weather     │
+│  Stage 2: CLEAN     ──▶  Parse voyages, crew, logbooks, PDFs       │
+│  Stage 3: MERGE     ──▶  Assemble voyage/captain datasets          │
+│  Stage 4: ANALYZE   ──▶  R1-R17 regressions, counterfactuals       │
+│  Stage 5: OUTPUT    ──▶  Generate paper tables (MD + TEX)          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Phase 3: Empirical Analysis Suite
+### Stage Details
+
+| Stage | Command | Description |
+|-------|---------|-------------|
+| 1. PULL | `python run_pipeline.py pull` | Download AOWV, Starbuck, Maury, WSL, Weather, Economic data |
+| 2. CLEAN | `python run_pipeline.py clean` | Parse and standardize all data sources |
+| 3. MERGE | `python run_pipeline.py merge` | Entity resolution (Jaro-Winkler matching), linkage, assembly |
+| 4. ANALYZE | `python run_pipeline.py analyze` | Run R1-R17 regressions, counterfactuals, robustness tests |
+| 5. OUTPUT | `python run_pipeline.py output` | Generate all tables (Tables 1-6, A1-A8) in MD and TEX |
+
+### Entity Matching (Stage 3)
+
+The merge stage uses string-based entity matching with:
+
+- **Jaro-Winkler similarity** for fuzzy name matching (threshold: 0.85)
+- **Soundex** for phonetic matching
+- **Name normalization**: Abbreviation expansion (WM → WILLIAM), case normalization, suffix preservation
+
+### Empirical Analysis Suite (Stage 4)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -365,6 +365,39 @@ The pipeline consists of 16 sequential stages organized into three major phases:
 ---
 
 ## Module Reference
+
+### Pipeline Module (`src/pipeline/`)
+
+**NEW**: The unified 5-stage pipeline orchestration module.
+
+| File | Purpose |
+|------|---------|
+| `__init__.py` | Exports all stage functions |
+| `stage1_pull.py` | Data acquisition (AOWV, Starbuck, Weather, etc.) |
+| `stage2_clean.py` | Parsing and standardization |
+| `stage3_merge.py` | Entity resolution, assembly, linkage (Jaro-Winkler matching) |
+| `stage4_analyze.py` | Full analysis suite (R1-R17, counterfactuals) |
+| `stage5_output.py` | MD and TEX output generation |
+| `runner.py` | Full pipeline orchestration |
+
+**Key Usage:**
+
+```python
+from src.pipeline import run_full_pipeline
+
+# Run complete pipeline
+run_full_pipeline()
+
+# Or run individual stages
+from src.pipeline import run_pull, run_clean, run_merge, run_analyze, run_output
+run_pull()
+run_clean()
+run_merge()
+run_analyze()
+run_output()
+```
+
+---
 
 ### Configuration (`src/config.py`)
 
@@ -699,15 +732,24 @@ results = run_all_analyses(quick=False, save_outputs=True)
 Whaling/
 ├── src/
 │   ├── config.py              # Global configuration
-│   ├── akm_analysis.py        # Standalone AKM decomposition
-│   ├── download/              # Data acquisition (5 modules)
+│   ├── pipeline/              # NEW: 5-stage pipeline orchestration
+│   │   ├── __init__.py        # Unified exports
+│   │   ├── stage1_pull.py     # Data acquisition
+│   │   ├── stage2_clean.py    # Parsing and standardization
+│   │   ├── stage3_merge.py    # Assembly and linkage
+│   │   ├── stage4_analyze.py  # Full analysis suite
+│   │   ├── stage5_output.py   # MD and TEX generation
+│   │   └── runner.py          # Full pipeline orchestration
+│   ├── download/              # Data acquisition (7 modules)
 │   │   ├── aowv_downloader.py
 │   │   ├── archive_downloader.py
 │   │   ├── online_sources_downloader.py
 │   │   ├── wsl_pdf_downloader.py
+│   │   ├── weather_downloader.py
+│   │   ├── economic_downloader.py
 │   │   └── manifest.py
-│   ├── parsing/               # Parsing & normalization (9 modules)
-│   │   ├── string_normalizer.py
+│   ├── parsing/               # Parsing & normalization (11 modules)
+│   │   ├── string_normalizer.py   # Jaro-Winkler, Soundex
 │   │   ├── voyage_parser.py
 │   │   ├── crew_parser.py
 │   │   ├── logbook_parser.py
@@ -715,7 +757,8 @@ Whaling/
 │   │   ├── starbuck_parser.py
 │   │   ├── maury_parser.py
 │   │   ├── wsl_pdf_parser.py
-│   │   └── wsl_event_extractor.py
+│   │   ├── wsl_event_extractor.py
+│   │   └── wsl_market_parser.py
 │   ├── entities/              # Entity resolution (5 modules)
 │   │   ├── entity_resolver.py
 │   │   ├── crosswalk_builder.py
@@ -736,20 +779,15 @@ Whaling/
 │   ├── qa/                    # Quality assurance
 │   │   ├── validators.py
 │   │   └── reporters.py
-│   └── analyses/              # Empirical analysis suite (13 modules)
+│   └── analyses/              # Empirical analysis suite (40+ modules)
 │       ├── config.py
 │       ├── data_loader.py
 │       ├── connected_set.py
 │       ├── baseline_production.py
-│       ├── portability.py
-│       ├── event_study.py
-│       ├── complementarity.py
-│       ├── shock_analysis.py
-│       ├── strategy.py
-│       ├── labor_market.py
-│       ├── extensions.py
-│       ├── output_generator.py
-│       └── run_all.py
+│       ├── run_full_baseline_loo_eb.py  # Main LOO+EB suite
+│       ├── paper_tables.py              # Table generation
+│       ├── counterfactual_suite.py      # Counterfactuals
+│       └── ...                          # Additional analyses
 ├── data/
 │   ├── raw/                   # Downloaded source files
 │   ├── staging/               # Intermediate tables
