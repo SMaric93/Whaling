@@ -222,12 +222,28 @@ def run_all_analyses(
         print(f"  ⚠ Stopping Rule Analysis failed: {e}")
         all_results["stopping_rule"] = {"error": str(e)}
     
+    # =========================================================================
+    # Step 12: Compass Regressions (C1-C6)
+    # =========================================================================
+    print("\n" + "-" * 70)
+    print("STEP 12: C1-C6 - COMPASS REGRESSIONS")
+    print("-" * 70)
+    
+    try:
+        from .compass_regressions import run_compass_regressions
+        compass_results = run_compass_regressions(df_loo, save_outputs=save_outputs)
+        all_results["compass"] = compass_results
+        print("  ✓ Compass regressions complete")
+    except Exception as e:
+        print(f"  ⚠ Compass regressions failed: {e}")
+        all_results["compass"] = {"error": str(e)}
+    
     if not quick:
         # =====================================================================
-        # Step 12: R16-R17 - Optional extensions
+        # Step 13: R16-R17 - Optional extensions
         # =====================================================================
         print("\n" + "-" * 70)
-        print("STEP 12: R16-R17 - OPTIONAL EXTENSIONS")
+        print("STEP 13: R16-R17 - OPTIONAL EXTENSIONS")
         print("-" * 70)
         
         ext_results = run_extensions(df_loo, save_outputs=save_outputs)
@@ -239,7 +255,7 @@ def run_all_analyses(
     # =========================================================================
     if save_outputs:
         print("\n" + "-" * 70)
-        print("STEP 13: GENERATING OUTPUT EXHIBITS")
+        print("STEP 14: GENERATING OUTPUT EXHIBITS")
         print("-" * 70)
         
         generate_all_outputs(all_results, diagnostics)

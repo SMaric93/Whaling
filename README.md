@@ -21,6 +21,7 @@ A comprehensive data pipeline for assembling, analyzing, and linking American wh
   - [Quality Assurance (`src/qa/`)](#quality-assurance-srcqa)
   - [AKM Analysis (`src/akm_analysis.py`)](#akm-analysis-srcakm_analysispy)
   - [Analyses Module (`src/analyses/`)](#analyses-module-srcanalyses)
+  - [Compass Pipeline (`src/compass/`)](#compass-pipeline-srccompass)
 - [Output Files](#output-files)
 - [Project Structure](#project-structure)
 - [Configuration Reference](#configuration-reference)
@@ -692,6 +693,67 @@ results = run_all_analyses(quick=False, save_outputs=True)
 
 ---
 
+### Compass Pipeline (`src/compass/`)
+
+Micro-routing / search policy measurement pipeline. Converts vessel trajectories into regime-labelled step datasets, computes interpretable search-policy features, constructs PCA-based compass indices, and exports panel-ready datasets.
+
+| Module | Purpose |
+| --- | --- |
+| `config.py` | `CompassConfig` dataclass + JSON I/O |
+| `data_io.py` | Load, validate, and clean trajectory data |
+| `preprocess.py` | UTM projection per voyage + optional smoothing |
+| `steps.py` | Step construction, time resampling, distance thinning |
+| `regimes.py` | Gaussian HMM regime segmentation (BIC model selection) |
+| `features.py` | Feature suite: Hill tail index, MRL, grid coverage, loitering |
+| `compass_index.py` | PCA index construction + early-window compass |
+| `embedding_optional.py` | Self-supervised 1D-CNN embedding (requires `torch`) |
+| `robustness.py` | Split-half ICC, step-def robustness, regime placebo, K sensitivity |
+| `export.py` | Voyage-level + captain×year panels + diagnostics |
+| `cli.py` | 10-step CLI orchestrator |
+
+**Pipeline Steps:**
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Step 1:  Load & validate trajectories                              │
+│  Step 2:  UTM projection + smoothing                                │
+│  Step 3:  Step construction (raw, time-resampled, distance-thinned) │
+│  Step 4:  HMM regime segmentation (transit / search / return)       │
+│  Step 5:  Compass feature suite                                     │
+│  Step 6:  PCA compass index (within-strata standardisation)         │
+│  Step 7:  Early-window compass (reverse causality mitigation)       │
+│  Step 8:  Self-supervised embedding (optional, requires torch)      │
+│  Step 9:  Robustness checks (5 batteries)                           │
+│  Step 10: Econometric panel exports                                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Usage:**
+
+```bash
+# Full compass pipeline
+python -m compass.cli --config compass_config.json
+
+# Run specific steps only
+python -m compass.cli --config compass_config.json --steps 1,2,3,4,5
+
+# Dry run (validate config, no outputs)
+python -m compass.cli --config compass_config.json --dry-run
+```
+
+**Key Outputs:**
+
+| File | Description |
+| --- | --- |
+| `panel_voyage_compass.parquet` | Voyage-level features, indices, diagnostics |
+| `panel_captain_year_compass.parquet` | Captain×year aggregated (search-step weighted) |
+| `robustness_report.json` | Full robustness diagnostics |
+| `pca_loadings.json` | PCA loadings for reproducibility |
+
+> See [docs/README_compass.md](docs/README_compass.md) for detailed methods documentation.
+
+---
+
 ## Output Files
 
 ### `analysis_voyage.parquet`
@@ -779,15 +841,26 @@ Whaling/
 │   ├── qa/                    # Quality assurance
 │   │   ├── validators.py
 │   │   └── reporters.py
-│   └── analyses/              # Empirical analysis suite (40+ modules)
-│       ├── config.py
-│       ├── data_loader.py
-│       ├── connected_set.py
-│       ├── baseline_production.py
-│       ├── run_full_baseline_loo_eb.py  # Main LOO+EB suite
-│       ├── paper_tables.py              # Table generation
-│       ├── counterfactual_suite.py      # Counterfactuals
-│       └── ...                          # Additional analyses
+│   ├── analyses/              # Empirical analysis suite (40+ modules)
+│   │   ├── config.py
+│   │   ├── data_loader.py
+│   │   ├── connected_set.py
+│   │   ├── baseline_production.py
+│   │   ├── run_full_baseline_loo_eb.py  # Main LOO+EB suite
+│   │   ├── paper_tables.py              # Table generation
+│   │   ├── counterfactual_suite.py      # Counterfactuals
+│   │   └── ...                          # Additional analyses
+│   └── compass/               # Compass: micro-routing measurement
+│       ├── config.py          # CompassConfig dataclass
+│       ├── data_io.py         # Load & validate trajectories
+│       ├── preprocess.py      # UTM projection + smoothing
+│       ├── steps.py           # Step construction + resampling
+│       ├── regimes.py         # HMM regime segmentation
+│       ├── features.py        # Compass feature suite
+│       ├── compass_index.py   # PCA index + early window
+│       ├── robustness.py      # 5 robustness batteries
+│       ├── export.py          # Econometric panel exports
+│       └── cli.py             # CLI orchestrator
 ├── data/
 │   ├── raw/                   # Downloaded source files
 │   ├── staging/               # Intermediate tables
