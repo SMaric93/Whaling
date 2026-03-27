@@ -19,16 +19,18 @@ import numpy as np
 import pandas as pd
 
 from compass.config import CompassConfig
+from torch_device import (
+    get_torch_device,
+    get_torch_runtime_info,
+    tensor_to_numpy,
+    torch_is_available,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _torch_available() -> bool:
-    try:
-        import torch
-        return True
-    except ImportError:
-        return False
+    return torch_is_available()
 
 
 # ── feature columns for the encoder ────────────────────────────────────────
@@ -141,6 +143,16 @@ def train_embedding(
     torch.manual_seed(cfg.embedding_random_state)
     np.random.seed(cfg.embedding_random_state)
 
+    device_info = get_torch_runtime_info(cfg.torch_device)
+    device = get_torch_device(cfg.torch_device)
+    logger.info(
+        "Embedding device: %s (requested=%s, mps_available=%s, cuda_available=%s)",
+        device_info["selected_device"],
+        device_info["requested_device"],
+        device_info["mps_available"],
+        device_info["cuda_available"],
+    )
+
     seg_arr, vids = _build_segments(steps_df, cfg.segment_length_steps)
     if len(seg_arr) == 0:
         logger.warning("No segments built — skipping embedding.")
@@ -155,8 +167,8 @@ def train_embedding(
         dataset, batch_size=cfg.embedding_batch_size, shuffle=True,
     )
 
-    encoder = _build_encoder(n_features, cfg.embedding_dim)
-    decoder = _build_decoder(cfg.embedding_dim, n_features, seg_len)
+    encoder = _build_encoder(n_features, cfg.embedding_dim).to(device)
+    decoder = _build_decoder(cfg.embedding_dim, n_features, seg_len).to(device)
     params = list(encoder.parameters()) + list(decoder.parameters())
     optimizer = torch.optim.Adam(params, lr=cfg.embedding_lr)
     loss_fn = nn.MSELoss()
@@ -167,8 +179,11 @@ def train_embedding(
     for epoch in range(cfg.embedding_epochs):
         total_loss = 0.0
         for (batch,) in loader:
+            batch = batch.to(device)
             # mask 15% of timesteps
-            mask = torch.rand(batch.shape[0], batch.shape[1]) < 0.15
+            mask = torch.rand(
+                batch.shape[0], batch.shape[1], device=batch.device,
+            ) < 0.15
             masked_input = batch.clone()
             masked_input[mask] = 0.0
 
@@ -176,7 +191,7 @@ def train_embedding(
             recon = decoder(z).view(batch.shape)
 
             # loss only on masked positions
-            loss = loss_fn(recon[mask], batch[mask])
+            loss = loss_fn(recon[mask], batch[mask]) if mask.any() else loss_fn(recon, batch)
 
             optimizer.zero_grad()
             loss.backward()
@@ -191,8 +206,12 @@ def train_embedding(
 
     # extract embeddings
     encoder.eval()
-    with torch.no_grad():
-        all_z = encoder(segments_t).numpy()
+    all_z = []
+    with torch.inference_mode():
+        for i in range(0, len(segments_t), cfg.embedding_batch_size):
+            batch = segments_t[i:i + cfg.embedding_batch_size].to(device)
+            all_z.append(tensor_to_numpy(encoder(batch)))
+    all_z = np.concatenate(all_z, axis=0)
 
     # mean-pool per voyage
     vid_arr = np.array(vids)

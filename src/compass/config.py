@@ -73,6 +73,7 @@ class CompassConfig:
     embedding_batch_size: int = 256
     embedding_lr: float = 1e-3
     embedding_random_state: int = 42
+    torch_device: Optional[str] = None  # None/auto -> prefer MPS, then CUDA, then CPU
 
     # ── Step 9: robustness ──────────────────────────────────────────────
     robustness_enabled: bool = True

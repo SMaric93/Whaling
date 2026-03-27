@@ -209,6 +209,41 @@ class LogbookParser:
         # Extract year from date
         parsed["year"] = parsed["obs_date"].apply(lambda x: x.year if x else None)
         
+        # ── Encounter / catch columns ──────────────────────────────────
+        # These are critical for reinforcement tests (stopping rules,
+        # search vs execution, patch productivity).
+        encounter_mappings = {
+            "encounter": ["Encounter", "ENCOUNTER", "encounter"],
+            "species":   ["Species", "SPECIES", "species"],
+            "n_struck":  ["NStruck", "NSTRUCK", "nstruck", "N_Struck"],
+            "n_tried":   ["NTried", "NTRIED", "ntried", "N_Tried"],
+            "place":     ["Place", "PLACE", "place", "PlaceName"],
+            "remarks":   ["Remarks", "REMARKS", "remarks"],
+        }
+        for target_col, candidates in encounter_mappings.items():
+            matched = None
+            for c in candidates:
+                if c in raw.columns:
+                    matched = c
+                    break
+            if matched:
+                parsed[target_col] = raw[matched]
+                # Clean NULL strings that appear in raw TSV
+                if parsed[target_col].dtype == object:
+                    parsed[target_col] = parsed[target_col].replace(
+                        {"NULL": None, "null": None, "": None}
+                    )
+            else:
+                parsed[target_col] = None
+        
+        # Coerce numeric encounter counts
+        for col in ["n_struck", "n_tried"]:
+            if col in parsed.columns:
+                parsed[col] = pd.to_numeric(parsed[col], errors="coerce")
+        
+        n_enc = (parsed["encounter"].notna() & (parsed["encounter"] != "NoEnc")).sum()
+        logger.info(f"Encounter events (Sight/Strike/Spoke): {n_enc:,}")
+        
         # Source tracking
         parsed["_source_file"] = raw["_source_file"]
         

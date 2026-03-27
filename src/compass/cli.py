@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from compass.config import CompassConfig, load_config, save_config
+from torch_device import get_torch_runtime_info
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 def _log_env():
     """Log library versions and git hash for reproducibility."""
+    torch_runtime = get_torch_runtime_info()
     info = {
         "python": sys.version,
         "platform": platform.platform(),
@@ -46,6 +48,7 @@ def _log_env():
             info[pkg] = getattr(mod, "__version__", "installed")
         except ImportError:
             info[pkg] = "not installed"
+    info["torch_runtime"] = torch_runtime
 
     # git hash
     try:

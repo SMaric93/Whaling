@@ -8,7 +8,8 @@ This determines attribution of the Route×Time FE variance (94.6%).
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict
+from itertools import permutations
+from typing import Dict, List, Tuple
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -37,6 +38,123 @@ def compute_conditional_entropy(df: pd.DataFrame, target: str, condition: str) -
         total_entropy += weight * group_entropy
     
     return total_entropy
+
+
+def compute_joint_conditional_entropy(df: pd.DataFrame, target: str,
+                                      conditions: List[str]) -> float:
+    """
+    Compute H(target | condition_1, condition_2, ...) by grouping on the
+    joint of all conditioning variables.
+
+    If conditions is empty, returns the unconditional entropy H(target).
+    """
+    if not conditions:
+        counts = df[target].value_counts()
+        probs = counts / counts.sum()
+        return -np.sum(probs * np.log2(probs + 1e-10))
+
+    total_entropy = 0.0
+    total_count = len(df)
+    for _, group_df in df.groupby(conditions):
+        counts = group_df[target].value_counts()
+        probs = counts / counts.sum()
+        group_entropy = -np.sum(probs * np.log2(probs + 1e-10))
+        total_entropy += (len(group_df) / total_count) * group_entropy
+    return total_entropy
+
+
+def shapley_entropy_decomposition(df: pd.DataFrame,
+                                   ground_col: str) -> Dict:
+    """
+    Shapley-value decomposition of H(Ground) across predictors.
+
+    For each predictor, its Shapley value is the average marginal
+    reduction in entropy it provides, averaged over all orderings
+    of the predictor set.  The values sum to
+        H(Ground) - H(Ground | all predictors)  (= total explained)
+    so  Shapley_shares + Residual_share = 100%.
+    """
+    # Define the predictor set
+    predictors: List[Tuple[str, str]] = []  # (label, column)
+    if 'home_port' in df.columns:
+        predictors.append(('Home Port', 'home_port'))
+    predictors.append(('Managing Agent', 'agent_id'))
+    predictors.append(('Captain Identity', 'captain_id'))
+
+    labels = [p[0] for p in predictors]
+    cols   = [p[1] for p in predictors]
+    n = len(predictors)
+
+    # Pre-compute H(Ground | S) for every subset S  (2^n entries)
+    from itertools import combinations
+    cache: Dict[tuple, float] = {}
+    for size in range(n + 1):
+        for combo in combinations(range(n), size):
+            key = tuple(sorted(combo))
+            cond_cols = [cols[i] for i in key]
+            cache[key] = compute_joint_conditional_entropy(
+                df, ground_col, cond_cols)
+
+    H_ground = cache[()]              # unconditional
+    H_all    = cache[tuple(range(n))] # fully conditioned
+
+    # Shapley values
+    shapley = {i: 0.0 for i in range(n)}
+    n_perms = 0
+    for perm in permutations(range(n)):
+        n_perms += 1
+        for pos, i in enumerate(perm):
+            before = tuple(sorted(perm[:pos]))
+            after  = tuple(sorted(perm[:pos + 1]))
+            marginal = cache[before] - cache[after]
+            shapley[i] += marginal
+    for i in range(n):
+        shapley[i] /= n_perms
+
+    residual = H_all
+    explained = H_ground - H_all
+
+    # ---- Print results ----
+    print("\n" + "=" * 70)
+    print("SHAPLEY ENTROPY DECOMPOSITION  (shares sum to 100%)")
+    print("=" * 70)
+    print(f"\nH(Ground)              = {H_ground:.3f} bits  (total uncertainty)")
+    print(f"H(Ground | all preds)  = {H_all:.3f} bits  (residual)")
+    print(f"Explained              = {explained:.3f} bits  ({100*explained/H_ground:.1f}%)")
+    print()
+    print(f"{'Predictor':<25s} {'Shapley (bits)':>14s} {'Share of H(Ground)':>20s}")
+    print("-" * 62)
+    result_rows = []
+    for i in range(n):
+        share = shapley[i] / H_ground
+        print(f"{labels[i]:<25s} {shapley[i]:>14.3f} {100*share:>19.1f}%")
+        result_rows.append({
+            'Predictor': labels[i],
+            'Shapley_bits': shapley[i],
+            'Share_pct': 100 * share,
+        })
+    res_share = residual / H_ground
+    print(f"{'Residual':<25s} {residual:>14.3f} {100*res_share:>19.1f}%")
+    print("-" * 62)
+    total_check = sum(shapley.values()) + residual
+    print(f"{'TOTAL':<25s} {total_check:>14.3f} {100*total_check/H_ground:>19.1f}%")
+
+    result_rows.append({
+        'Predictor': 'Residual',
+        'Shapley_bits': residual,
+        'Share_pct': 100 * res_share,
+    })
+
+    return {
+        'H_ground': H_ground,
+        'H_all': H_all,
+        'labels': labels,
+        'shapley_bits': {labels[i]: shapley[i] for i in range(n)},
+        'shapley_pct':  {labels[i]: 100 * shapley[i] / H_ground for i in range(n)},
+        'residual_bits': residual,
+        'residual_pct': 100 * res_share,
+        'rows': result_rows,
+    }
 
 
 def test_ground_ownership(df: pd.DataFrame) -> Dict:
@@ -200,19 +318,30 @@ small MICRO component. The MACRO component is the elephant.
 
 def run_ground_selection_analysis(df: pd.DataFrame, save_outputs: bool = True) -> Dict:
     """Run complete ground selection analysis."""
-    
+
     ownership = test_ground_ownership(df)
     decomp = decompose_macro_micro(df)
-    
+
+    # Identify the ground column (same logic as test_ground_ownership)
+    ground_col = None
+    for col in ['ground', 'route', 'route_or_ground', 'ground_or_route']:
+        if col in df.columns:
+            ground_col = col
+            break
+
+    # Shapley decomposition (shares sum to 100%)
+    shapley = shapley_entropy_decomposition(df, ground_col) if ground_col else None
+
     results = {
         "ownership_test": ownership,
         "macro_micro": decomp,
+        "shapley": shapley,
     }
-    
+
     if save_outputs:
         output_dir = Path("output/variance_fix")
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         lines = [
             "# Ground Selection Analysis",
             "",
@@ -224,6 +353,22 @@ def run_ground_selection_analysis(df: pd.DataFrame, save_outputs: bool = True) -
             f"| Captain | {ownership['I_captain']:.3f} bits | {100*ownership['I_captain']/ownership['H_ground']:.1f}% |",
             "",
             f"**Conclusion:** {ownership['owner']} has {ownership['control_ratio']:.1f}x more control over ground selection.",
+        ]
+
+        if shapley:
+            lines += [
+                "",
+                "## Shapley Entropy Decomposition (sums to 100%)",
+                "",
+                "| Predictor | Shapley (bits) | Share of H(Ground) |",
+                "|-----------|---------------:|-------------------:|",
+            ]
+            for row in shapley['rows']:
+                lines.append(
+                    f"| {row['Predictor']} | {row['Shapley_bits']:.3f} | {row['Share_pct']:.1f}% |"
+                )
+
+        lines += [
             "",
             "## Macro vs Micro Decomposition",
             "",
@@ -238,10 +383,10 @@ def run_ground_selection_analysis(df: pd.DataFrame, save_outputs: bool = True) -
             "",
             "The Lévy flight analysis captures the smaller but more nuanced Micro component.",
         ]
-        
+
         with open(output_dir / "ground_selection_analysis.md", "w") as f:
             f.write("\n".join(lines))
-    
+
     return results
 
 

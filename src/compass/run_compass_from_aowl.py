@@ -28,6 +28,11 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from torch_device import (
+    get_torch_device,
+    get_torch_runtime_info,
+    tensor_to_numpy,
+)
 
 # ── project paths ───────────────────────────────────────────────────────────
 
@@ -430,6 +435,7 @@ def train_enriched_embedding(
     lr: float = 5e-4,
     mask_ratio: float = 0.20,
     seed: int = 42,
+    torch_device: Optional[str] = None,
 ) -> Tuple[object, np.ndarray, List[str]]:
     """
     Train enriched self-supervised embedding with masked-feature prediction.
@@ -446,6 +452,16 @@ def train_enriched_embedding(
 
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    device_info = get_torch_runtime_info(torch_device)
+    device = get_torch_device(torch_device)
+    logger.info(
+        "Enriched embedding device: %s (requested=%s, mps_available=%s, cuda_available=%s)",
+        device_info["selected_device"],
+        device_info["requested_device"],
+        device_info["mps_available"],
+        device_info["cuda_available"],
+    )
 
     # Build feature columns that actually exist
     fcols = [c for c in ENRICHED_STEP_FEATURES if c in steps_df.columns]
@@ -472,8 +488,8 @@ def train_enriched_embedding(
     dataset = TensorDataset(segments_t)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    encoder = build_enriched_encoder(n_features, embed_dim)
-    decoder = build_enriched_decoder(embed_dim, n_features, seg_len)
+    encoder = build_enriched_encoder(n_features, embed_dim).to(device)
+    decoder = build_enriched_decoder(embed_dim, n_features, seg_len).to(device)
     params = list(encoder.parameters()) + list(decoder.parameters())
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -489,8 +505,11 @@ def train_enriched_embedding(
         total_loss = 0.0
         n_samples = 0
         for (batch,) in loader:
+            batch = batch.to(device)
             # Mask random timesteps
-            mask = torch.rand(batch.shape[0], batch.shape[1]) < mask_ratio
+            mask = torch.rand(
+                batch.shape[0], batch.shape[1], device=batch.device,
+            ) < mask_ratio
             masked_input = batch.clone()
             masked_input[mask] = 0.0
 
@@ -498,7 +517,7 @@ def train_enriched_embedding(
             recon = decoder(z).view(batch.shape)
 
             # Loss only on masked positions
-            loss = loss_fn(recon[mask], batch[mask])
+            loss = loss_fn(recon[mask], batch[mask]) if mask.any() else loss_fn(recon, batch)
 
             optimizer.zero_grad()
             loss.backward()
@@ -519,12 +538,12 @@ def train_enriched_embedding(
 
     # Extract embeddings
     encoder.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         # Process in batches to avoid OOM
         all_z = []
         for i in range(0, len(segments_t), batch_size):
-            batch = segments_t[i:i + batch_size]
-            all_z.append(encoder(batch).numpy())
+            batch = segments_t[i:i + batch_size].to(device)
+            all_z.append(tensor_to_numpy(encoder(batch)))
         all_z = np.concatenate(all_z, axis=0)
 
     # Mean-pool per voyage
@@ -550,6 +569,7 @@ def run_full_compass(
     embedding_enabled: bool = True,
     embedding_epochs: int = 30,
     embedding_dim: int = 64,
+    embedding_device: Optional[str] = None,
 ) -> Dict:
     """
     End-to-end: AOWL raw → compass features → PCA index → DL embedding.
@@ -586,6 +606,7 @@ def run_full_compass(
         segment_length_steps=128,
         embedding_dim=embedding_dim,
         embedding_epochs=embedding_epochs,
+        torch_device=embedding_device,
         pca_n_components=3,
         early_window_search_steps=[30, 60],
         early_window_days=[10, 20],
@@ -697,6 +718,7 @@ def run_full_compass(
                 embed_dim=embedding_dim,
                 epochs=embedding_epochs,
                 batch_size=cfg.embedding_batch_size,
+                torch_device=cfg.torch_device,
             )
 
             if encoder is not None and len(embeddings) > 0:
@@ -796,6 +818,7 @@ def run_full_compass(
         "pca_explained_variance": evr,
         "n_panel_columns": len(panel.columns),
         "embedding_enabled": embedding_enabled,
+        "embedding_device": cfg.torch_device or "auto",
         "elapsed_seconds": round(elapsed, 1),
     }
     if "dl_probe_r2" in results:
@@ -833,6 +856,11 @@ def main():
         "--embed-dim", type=int, default=64,
         help="Embedding dimensionality (default: 64)",
     )
+    parser.add_argument(
+        "--device", type=str, default="auto",
+        choices=["auto", "cpu", "mps", "cuda"],
+        help="Torch device for embedding training (default: auto)",
+    )
     args = parser.parse_args()
 
     embedding = not args.no_embedding
@@ -840,6 +868,7 @@ def main():
         embedding_enabled=embedding,
         embedding_epochs=args.epochs,
         embedding_dim=args.embed_dim,
+        embedding_device=args.device,
     )
 
 
