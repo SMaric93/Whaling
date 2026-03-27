@@ -29,8 +29,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from torch_device import (
+    configure_torch_runtime,
     get_torch_device,
-    get_torch_runtime_info,
     tensor_to_numpy,
 )
 
@@ -453,14 +453,15 @@ def train_enriched_embedding(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    device_info = get_torch_runtime_info(torch_device)
+    device_info = configure_torch_runtime(torch_device)
     device = get_torch_device(torch_device)
     logger.info(
-        "Enriched embedding device: %s (requested=%s, mps_available=%s, cuda_available=%s)",
+        "Enriched embedding device: %s (requested=%s, mps_available=%s, cuda_available=%s, matmul_precision=%s)",
         device_info["selected_device"],
         device_info["requested_device"],
         device_info["mps_available"],
         device_info["cuda_available"],
+        device_info["float32_matmul_precision"],
     )
 
     # Build feature columns that actually exist

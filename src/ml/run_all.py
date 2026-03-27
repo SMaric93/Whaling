@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from typing import Dict, Any, List
@@ -95,6 +96,12 @@ def run_all(
         If True, only run core phases (1-5).
     """
     t0 = time.time()
+
+    from src.ml.acceleration import get_ml_runtime_info
+    from src.ml.config import ML_CFG
+
+    runtime_info = get_ml_runtime_info(ML_CFG.torch_device)
+    logger.info("ML acceleration runtime: %s", json.dumps(runtime_info, indent=2))
 
     all_phases = {**CORE_PHASES}
     if not skip_appendix:

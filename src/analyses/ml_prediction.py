@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Dict, Optional, List
 import warnings
 
+from src.ml.acceleration import (
+    get_lightgbm_regressor_kwargs,
+    get_ml_runtime_info,
+    get_xgboost_regressor_kwargs,
+)
+
 warnings.filterwarnings('ignore')
 
 
@@ -83,18 +89,20 @@ def train_prediction_model(
     print(f"Test size: {len(X_test):,}")
     
     # Train model
+    runtime_info = get_ml_runtime_info()
     if model_type == "xgboost":
         import xgboost as xgb
-        model = xgb.XGBRegressor(
+        model_kwargs, acceleration = get_xgboost_regressor_kwargs(
             n_estimators=200,
             max_depth=6,
             learning_rate=0.1,
             random_state=random_state,
             n_jobs=-1,
         )
+        model = xgb.XGBRegressor(**model_kwargs)
     elif model_type == "lightgbm":
         import lightgbm as lgb
-        model = lgb.LGBMRegressor(
+        model_kwargs, acceleration = get_lightgbm_regressor_kwargs(
             n_estimators=200,
             max_depth=6,
             learning_rate=0.1,
@@ -102,10 +110,17 @@ def train_prediction_model(
             n_jobs=-1,
             verbose=-1,
         )
+        model = lgb.LGBMRegressor(**model_kwargs)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
-    
+
     print(f"\nTraining {model_type}...")
+    print(
+        "Acceleration backend: "
+        f"{acceleration['family']} on {acceleration['runtime']} "
+        f"(accelerated={acceleration['accelerated']})"
+    )
+    print(f"Backend note: {acceleration['reason']}")
     model.fit(X_train, y_train)
     
     # Predictions
@@ -148,6 +163,8 @@ def train_prediction_model(
         "rmse_test": rmse_test,
         "feature_importance": importance,
         "df_valid": df_valid,
+        "acceleration": acceleration,
+        "runtime_info": runtime_info,
     }
 
 
@@ -408,6 +425,12 @@ def run_ml_prediction_analysis(
             f"|--------|-------|------|",
             f"| R² | {model_results['r2_train']:.4f} | {model_results['r2_test']:.4f} |",
             f"| RMSE | {model_results['rmse_train']:.4f} | {model_results['rmse_test']:.4f} |",
+            "",
+            "## Runtime",
+            "",
+            f"- Torch device: {model_results['runtime_info']['torch']['selected_device']}",
+            f"- Model backend: {model_results['acceleration']['family']} on {model_results['acceleration']['runtime']}",
+            f"- Backend note: {model_results['acceleration']['reason']}",
             "",
             "## SHAP Feature Importance",
             "",

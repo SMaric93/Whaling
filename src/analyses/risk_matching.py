@@ -30,6 +30,23 @@ from .baseline_production import estimate_r1
 RISK_MATCHING_DIR = OUTPUT_DIR / "risk_matching"
 
 
+def _safe_corr(left: pd.Series, right: pd.Series) -> float:
+    """Return a correlation only when both inputs have variation."""
+    left_std = left.std(ddof=0)
+    right_std = right.std(ddof=0)
+    if pd.isna(left_std) or pd.isna(right_std) or left_std == 0 or right_std == 0:
+        return np.nan
+    return float(left.corr(right))
+
+
+def _safe_r_squared(y: np.ndarray, residuals: np.ndarray) -> float:
+    """Avoid divide-by-zero warnings when the outcome is constant."""
+    y_var = np.var(y)
+    if np.isclose(y_var, 0):
+        return np.nan
+    return float(1 - np.var(residuals) / y_var)
+
+
 # =============================================================================
 # RM1: Captain Variance Decomposition
 # =============================================================================
@@ -347,7 +364,7 @@ def run_risk_sorting_regression(
     t_stats = beta / se
     p_values = 2 * (1 - stats.t.cdf(np.abs(t_stats), df=n - k))
     
-    r2 = 1 - np.var(residuals) / np.var(y)
+    r2 = _safe_r_squared(y, residuals)
     
     # Key results
     b_risk_sorting = beta[1]
@@ -375,8 +392,14 @@ def run_risk_sorting_regression(
         print("  ○ No significant risk sorting detected")
     
     # RM3b: Correlation-based test (robustness)
-    corr_risk = valid["portfolio_breadth"].corr(valid["captain_variance_mean"])
-    corr_skill = valid["portfolio_breadth"].corr(valid["captain_skill_mean"])
+    corr_risk = _safe_corr(
+        valid["portfolio_breadth"],
+        valid["captain_variance_mean"],
+    )
+    corr_skill = _safe_corr(
+        valid["portfolio_breadth"],
+        valid["captain_skill_mean"],
+    )
     
     print(f"\n--- Correlation Tests ---")
     print(f"Corr(portfolio_breadth, captain_σ²):  {corr_risk:.4f} (RISK sorting)")

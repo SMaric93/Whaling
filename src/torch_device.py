@@ -86,6 +86,7 @@ def get_torch_runtime_info(preferred: Optional[str] = None) -> dict[str, Any]:
         "mps_available": False,
         "cuda_available": False,
         "mps_fallback_enabled": False,
+        "float32_matmul_precision": None,
     }
 
     try:
@@ -104,6 +105,36 @@ def get_torch_runtime_info(preferred: Optional[str] = None) -> dict[str, Any]:
     info["mps_fallback_enabled"] = (
         os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
     )
+    if hasattr(torch, "get_float32_matmul_precision"):
+        try:
+            info["float32_matmul_precision"] = torch.get_float32_matmul_precision()
+        except Exception:
+            info["float32_matmul_precision"] = None
+    return info
+
+
+def configure_torch_runtime(preferred: Optional[str] = None) -> dict[str, Any]:
+    """
+    Apply lightweight runtime tuning for the selected PyTorch backend.
+
+    On Apple Silicon this enables MPS fallback and opts into higher
+    float32 matmul precision when supported.
+    """
+    info = get_torch_runtime_info(preferred)
+    if not info["torch_available"]:
+        return info
+
+    _prepare_torch_env()
+    import torch
+
+    precision = os.environ.get("PYTORCH_FLOAT32_MATMUL_PRECISION", "high")
+    if hasattr(torch, "set_float32_matmul_precision"):
+        try:
+            torch.set_float32_matmul_precision(precision)
+            info["float32_matmul_precision"] = precision
+        except Exception:
+            pass
+
     return info
 
 

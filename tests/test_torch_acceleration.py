@@ -20,6 +20,14 @@ def _try_import(module: str) -> bool:
 
 
 def _fake_torch(*, mps_available: bool, cuda_available: bool):
+    precision = {"value": "highest"}
+
+    def _set_precision(value: str):
+        precision["value"] = value
+
+    def _get_precision() -> str:
+        return precision["value"]
+
     return types.SimpleNamespace(
         __version__="fake",
         backends=types.SimpleNamespace(
@@ -27,6 +35,8 @@ def _fake_torch(*, mps_available: bool, cuda_available: bool):
         ),
         cuda=types.SimpleNamespace(is_available=lambda: cuda_available),
         device=lambda name: types.SimpleNamespace(type=name),
+        set_float32_matmul_precision=_set_precision,
+        get_float32_matmul_precision=_get_precision,
     )
 
 
@@ -64,6 +74,20 @@ def test_get_torch_runtime_info_reports_selected_device(monkeypatch):
     assert info["torch_available"] is True
     assert info["selected_device"] == "cuda"
     assert info["mps_fallback_enabled"] is True
+
+
+def test_configure_torch_runtime_sets_high_matmul_precision(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "torch",
+        _fake_torch(mps_available=True, cuda_available=False),
+    )
+
+    from torch_device import configure_torch_runtime
+
+    info = configure_torch_runtime()
+
+    assert info["selected_device"] == "mps"
+    assert info["float32_matmul_precision"] == "high"
 
 
 @pytest.mark.skipif(

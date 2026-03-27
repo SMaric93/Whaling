@@ -20,8 +20,8 @@ import pandas as pd
 
 from compass.config import CompassConfig
 from torch_device import (
+    configure_torch_runtime,
     get_torch_device,
-    get_torch_runtime_info,
     tensor_to_numpy,
     torch_is_available,
 )
@@ -143,14 +143,15 @@ def train_embedding(
     torch.manual_seed(cfg.embedding_random_state)
     np.random.seed(cfg.embedding_random_state)
 
-    device_info = get_torch_runtime_info(cfg.torch_device)
+    device_info = configure_torch_runtime(cfg.torch_device)
     device = get_torch_device(cfg.torch_device)
     logger.info(
-        "Embedding device: %s (requested=%s, mps_available=%s, cuda_available=%s)",
+        "Embedding device: %s (requested=%s, mps_available=%s, cuda_available=%s, matmul_precision=%s)",
         device_info["selected_device"],
         device_info["requested_device"],
         device_info["mps_available"],
         device_info["cuda_available"],
+        device_info["float32_matmul_precision"],
     )
 
     seg_arr, vids = _build_segments(steps_df, cfg.segment_length_steps)
