@@ -23,6 +23,9 @@ __all__ = [
     "interpret",
     "calibration",
     "baselines",
+    "record_matching",
+    "text_models",
+    "anomaly_detection",
     # Dataset builders
     "build_action_dataset",
     "build_state_dataset",

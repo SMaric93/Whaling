@@ -14,6 +14,7 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import VALIDATION_CONFIG
+from ml.anomaly_detection import compute_anomaly_scores
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,6 +29,36 @@ class ValidationResult:
     affected_count: int = 0
     affected_fraction: float = 0.0
     details: Dict[str, Any] = None
+
+
+def _append_anomaly_check(
+    results: List[ValidationResult],
+    df: pd.DataFrame,
+    *,
+    check_name: str,
+    numeric_cols: List[str],
+) -> None:
+    """Append an IsolationForest anomaly summary when enough numeric data exists."""
+    anomaly_df = compute_anomaly_scores(df, numeric_cols)
+    if len(anomaly_df) == 0 or "anomaly_flag" not in anomaly_df.columns:
+        return
+
+    flags = anomaly_df["anomaly_flag"].fillna(False)
+    if len(flags) == 0 or flags.isna().all():
+        return
+
+    flagged = int(flags.sum())
+    results.append(ValidationResult(
+        check_name=check_name,
+        passed=(flagged == 0),
+        message=f"{flagged} rows flagged by multivariate anomaly detection",
+        affected_count=flagged,
+        affected_fraction=flagged / len(df) if len(df) > 0 else 0,
+        details={
+            "numeric_cols": [col for col in numeric_cols if col in df.columns],
+            "model": "IsolationForest",
+        },
+    ))
 
 
 def validate_analysis_voyage(df: pd.DataFrame) -> List[ValidationResult]:
@@ -131,6 +162,19 @@ def validate_analysis_voyage(df: pd.DataFrame) -> List[ValidationResult]:
             affected_count=out_of_era,
             affected_fraction=out_of_era / y.notna().sum() if y.notna().sum() > 0 else 0,
         ))
+
+    _append_anomaly_check(
+        results,
+        df,
+        check_name="voyage_multivariate_anomalies",
+        numeric_cols=[
+            "q_oil_bbl",
+            "q_bone_lbs",
+            "duration_days",
+            "desertion_rate",
+            "year_out",
+        ],
+    )
     
     return results
 
@@ -197,6 +241,19 @@ def validate_analysis_captain_year(df: pd.DataFrame) -> List[ValidationResult]:
             affected_count=implausible,
             affected_fraction=implausible / a.notna().sum() if a.notna().sum() > 0 else 0,
         ))
+
+    _append_anomaly_check(
+        results,
+        df,
+        check_name="captain_year_multivariate_anomalies",
+        numeric_cols=[
+            "AGE",
+            "REALPROP",
+            "PERSPROP",
+            "total_wealth",
+            "whaling_voyages_count",
+        ],
+    )
     
     return results
 

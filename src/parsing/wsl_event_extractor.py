@@ -21,7 +21,8 @@ import pandas as pd
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import WSL_EVENT_TYPES, STAGING_DIR
+from config import WSL_EVENT_TYPES, STAGING_DIR, ML_SHIFT_CONFIG
+from ml.text_models import fit_text_classifier, predict_text_probabilities
 from parsing.string_normalizer import normalize_name, normalize_port_name
 
 logging.basicConfig(level=logging.INFO)
@@ -57,6 +58,9 @@ class WSLEvent:
     event_type: EventType
     event_text_snippet: str
     confidence: float
+    heuristic_event_type: Optional[str] = None
+    event_type_probability: Optional[float] = None
+    event_type_model_trained: bool = False
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for DataFrame."""
@@ -71,8 +75,11 @@ class WSLEvent:
             'port_name_raw': self.port_name_raw,
             'port_name_clean': self.port_name_clean,
             'event_type': self.event_type.value,
+            'heuristic_event_type': self.heuristic_event_type or self.event_type.value,
             'event_text_snippet': self.event_text_snippet,
             'confidence': self.confidence,
+            'event_type_probability': self.event_type_probability,
+            'event_type_model_trained': self.event_type_model_trained,
         }
 
 
@@ -221,6 +228,62 @@ def detect_event_type(text: str) -> Tuple[EventType, float]:
     return EventType.OTHER, 0.5
 
 
+def _event_type_from_label(label: str) -> EventType:
+    """Convert a classifier label into an EventType with a safe fallback."""
+    if label in EventType.__members__:
+        return EventType[label]
+    try:
+        return EventType(label)
+    except ValueError:
+        return EventType.OTHER
+
+
+def _apply_ml_event_typing(events: List[WSLEvent]) -> List[WSLEvent]:
+    """Refine heuristic event labels using weakly supervised text classification."""
+    if len(events) == 0 or not ML_SHIFT_CONFIG.enabled:
+        return events
+
+    for event in events:
+        event.heuristic_event_type = event.event_type.value
+        event.event_type_probability = event.confidence
+        event.event_type_model_trained = False
+
+    texts = [event.event_text_snippet for event in events]
+    labels = [event.event_type.value for event in events]
+    bundle = fit_text_classifier(
+        texts,
+        labels,
+        min_training_rows=max(12, ML_SHIFT_CONFIG.min_text_training_rows // 2),
+    )
+    probabilities = predict_text_probabilities(bundle, texts)
+
+    if not bundle.trained or probabilities.empty:
+        return events
+
+    for idx, event in enumerate(events):
+        row = probabilities.iloc[idx]
+        if row.empty:
+            continue
+
+        predicted_label = str(row.idxmax())
+        predicted_prob = float(row.max())
+        event.event_type_probability = predicted_prob
+        event.event_type_model_trained = True
+
+        if (
+            predicted_prob >= ML_SHIFT_CONFIG.text_probability_threshold
+            and (
+                predicted_label == event.heuristic_event_type
+                or event.event_type == EventType.OTHER
+                or predicted_prob >= max(0.85, ML_SHIFT_CONFIG.text_probability_threshold)
+            )
+        ):
+            event.event_type = _event_type_from_label(predicted_label)
+            event.confidence = max(event.confidence, predicted_prob)
+
+    return events
+
+
 def extract_date_from_context(
     text: str,
     issue_year: int,
@@ -351,8 +414,8 @@ def extract_events_from_text(
             )
             
             events.append(event)
-    
-    return events
+
+    return _apply_ml_event_typing(events)
 
 
 def extract_events_from_issue(
@@ -381,6 +444,8 @@ def extract_events_from_issue(
         # Adjust confidence based on page extraction quality
         for event in page_events:
             event.confidence *= page.confidence
+            if event.event_type_probability is not None:
+                event.event_type_probability *= page.confidence
         
         all_events.extend(page_events)
     
@@ -421,6 +486,23 @@ def save_extracted_events(
     
     logger.info(f"Saved {len(df)} events to {output_path}")
     return output_path
+
+
+def extract_all_wsl_events(wsl_dir: Path) -> pd.DataFrame:
+    """Parse all WSL PDFs in a directory and return extracted events."""
+    from parsing.wsl_pdf_parser import batch_parse_wsl_issues
+
+    pdf_paths = sorted(wsl_dir.glob("*.pdf"))
+    if not pdf_paths:
+        logger.warning(f"No WSL PDFs found in {wsl_dir}")
+        return pd.DataFrame()
+
+    issues = batch_parse_wsl_issues(pdf_paths)
+    all_events: List[WSLEvent] = []
+    for issue in issues:
+        all_events.extend(extract_events_from_issue(issue))
+
+    return events_to_dataframe(all_events)
 
 
 if __name__ == "__main__":

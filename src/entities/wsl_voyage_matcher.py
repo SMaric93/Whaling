@@ -18,8 +18,9 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
-    STAGING_DIR, MATCH_CONFIDENCE_THRESHOLDS, CROSSWALK_CONFIG,
+    STAGING_DIR, MATCH_CONFIDENCE_THRESHOLDS, CROSSWALK_CONFIG, ML_SHIFT_CONFIG,
 )
+from ml.record_matching import fit_match_probability_model, score_match_probability
 
 # Try to import fuzzy matching
 try:
@@ -293,50 +294,121 @@ def match_events_to_voyages(
     """
     logger.info(f"Matching {len(events_df)} events to {len(voyages_df)} voyages")
     
-    crosswalk_rows = []
-    
-    for idx, event in events_df.iterrows():
+    candidate_rows = []
+
+    for _, event in events_df.iterrows():
         candidates = generate_candidates(event, voyages_df)
-        
-        # Build crosswalk row
+        for rank, candidate in enumerate(candidates, start=1):
+            candidate_rows.append({
+                "wsl_event_id": event["wsl_event_id"],
+                "voyage_id": candidate.voyage_id,
+                "candidate_rank_heuristic": rank,
+                "heuristic_score": candidate.total_score,
+                "vessel_score": candidate.vessel_score,
+                "captain_score": candidate.captain_score,
+                "date_score": candidate.date_score,
+                "port_score": candidate.port_score,
+            })
+
+    diagnostics_df = pd.DataFrame(candidate_rows)
+    bundle = None
+    if len(diagnostics_df) > 0:
+        feature_cols = [
+            "heuristic_score",
+            "vessel_score",
+            "captain_score",
+            "date_score",
+            "port_score",
+        ]
+        positives = diagnostics_df["heuristic_score"] >= ML_SHIFT_CONFIG.heuristic_positive_threshold
+        negatives = diagnostics_df["heuristic_score"] <= ML_SHIFT_CONFIG.heuristic_negative_threshold
+        bundle = fit_match_probability_model(
+            diagnostics_df[feature_cols],
+            positives,
+            negatives,
+        )
+        diagnostics_df["match_probability"] = score_match_probability(
+            bundle,
+            diagnostics_df[feature_cols],
+            fallback_scores=diagnostics_df["heuristic_score"],
+        )
+        diagnostics_df["match_model_trained"] = bundle.trained
+        diagnostics_df["match_model_training_rows"] = bundle.training_rows
+    else:
+        diagnostics_df = pd.DataFrame(columns=[
+            "wsl_event_id",
+            "voyage_id",
+            "candidate_rank_heuristic",
+            "heuristic_score",
+            "vessel_score",
+            "captain_score",
+            "date_score",
+            "port_score",
+            "match_probability",
+            "match_model_trained",
+            "match_model_training_rows",
+        ])
+
+    crosswalk_rows = []
+
+    for _, event in events_df.iterrows():
         row = {
             'wsl_event_id': event['wsl_event_id'],
             'voyage_id': None,
             'match_method': 'none',
             'match_confidence': 0.0,
+            'match_probability': 0.0,
+            'heuristic_match_score': 0.0,
+            'match_model_trained': bool(bundle.trained) if bundle is not None else False,
+            'match_model_training_rows': int(bundle.training_rows) if bundle is not None else 0,
             'match_reason': '',
             'top_candidates': [],
         }
-        
-        if candidates:
-            best = candidates[0]
-            
-            if best.total_score >= confidence_threshold:
-                row['voyage_id'] = best.voyage_id
-                row['match_method'] = 'scored'
-                row['match_confidence'] = best.total_score
+
+        event_candidates = diagnostics_df[
+            diagnostics_df["wsl_event_id"] == event["wsl_event_id"]
+        ].sort_values(
+            ["match_probability", "heuristic_score"],
+            ascending=[False, False],
+        )
+
+        if len(event_candidates) > 0:
+            best = event_candidates.iloc[0]
+            best_score = float(best["match_probability"])
+            row["heuristic_match_score"] = float(best["heuristic_score"])
+            row["match_probability"] = best_score
+            row["match_confidence"] = best_score
+
+            if best_score >= confidence_threshold:
+                row['voyage_id'] = best['voyage_id']
+                row['match_method'] = 'ml_scored' if bool(best["match_model_trained"]) else 'scored'
                 row['match_reason'] = (
-                    f"vessel={best.vessel_score:.2f}, "
-                    f"captain={best.captain_score:.2f}, "
-                    f"date={best.date_score:.2f}, "
-                    f"port={best.port_score:.2f}"
+                    f"prob={best_score:.2f}, "
+                    f"vessel={best['vessel_score']:.2f}, "
+                    f"captain={best['captain_score']:.2f}, "
+                    f"date={best['date_score']:.2f}, "
+                    f"port={best['port_score']:.2f}"
                 )
             else:
-                row['match_method'] = 'below_threshold'
-                row['match_confidence'] = best.total_score
-                row['match_reason'] = f"best_score={best.total_score:.2f} < threshold={confidence_threshold}"
-            
-            # Store top candidates for QA
+                row['match_method'] = 'ml_below_threshold' if bool(best["match_model_trained"]) else 'below_threshold'
+                row['match_reason'] = (
+                    f"best_prob={best_score:.2f} < threshold={confidence_threshold}"
+                )
+
             row['top_candidates'] = [
-                {'voyage_id': c.voyage_id, 'score': c.total_score}
-                for c in candidates[:max_candidates]
+                {
+                    'voyage_id': cand['voyage_id'],
+                    'score': float(cand['match_probability']),
+                    'heuristic_score': float(cand['heuristic_score']),
+                }
+                for _, cand in event_candidates.head(max_candidates).iterrows()
             ]
         else:
             row['match_method'] = 'no_candidates'
             row['match_reason'] = 'No vessel name matches found'
-        
+
         crosswalk_rows.append(row)
-    
+
     crosswalk_df = pd.DataFrame(crosswalk_rows)
     
     # Compute diagnostics
@@ -346,7 +418,7 @@ def match_events_to_voyages(
     
     logger.info(f"Matched {matched}/{total} events ({match_rate:.1%})")
     
-    return crosswalk_df, None
+    return crosswalk_df, diagnostics_df
 
 
 def build_voyage_event_panel(

@@ -14,6 +14,10 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+# This module contains analysis routines with historical names that look like
+# pytest tests. Prevent pytest from collecting it as a test module.
+__test__ = False
+
 
 def compute_conditional_entropy(df: pd.DataFrame, target: str, condition: str) -> float:
     """

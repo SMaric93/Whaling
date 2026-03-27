@@ -16,6 +16,8 @@ scipy>=1.10.0
 scikit-learn>=1.2.0
 pyproj>=3.4.0
 hmmlearn>=0.3.0
+networkx>=3.0
+matplotlib>=3.7.0
 
 # Optional: Record linkage
 # recordlinkage>=0.15  # Uncomment if using advanced linkage features

@@ -16,7 +16,8 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import STAGING_DIR, CROSSWALKS_DIR, LINKAGE_CONFIG
+from config import STAGING_DIR, CROSSWALKS_DIR, LINKAGE_CONFIG, ML_SHIFT_CONFIG
+from ml.record_matching import fit_match_probability_model, score_match_probability
 from parsing.string_normalizer import (
     normalize_name, 
     jaro_winkler_similarity, 
@@ -133,6 +134,8 @@ class RecordLinker:
             }
             for m in all_matches
         ])
+
+        results = self._apply_ml_match_probabilities(results)
         
         # Rank matches per captain
         results["match_rank"] = results.groupby("captain_id")["match_score"].rank(
@@ -145,6 +148,48 @@ class RecordLinker:
         logger.info(f"Found {len(results)} total matches for {results['captain_id'].nunique()} captains")
         
         return results
+
+    def _apply_ml_match_probabilities(self, results: pd.DataFrame) -> pd.DataFrame:
+        """Learn calibrated match probabilities from heuristic extremes."""
+        if len(results) == 0 or not ML_SHIFT_CONFIG.enabled:
+            return results
+
+        enhanced = results.copy()
+        feature_cols = [
+            "match_score",
+            "name_score",
+            "age_score",
+            "geo_score",
+            "occ_score",
+            "spouse_validated",
+        ]
+        for col in feature_cols:
+            if col not in enhanced.columns:
+                enhanced[col] = 0.0
+
+        positives = (
+            (enhanced["match_method"] == "deterministic") |
+            (enhanced["match_score"] >= ML_SHIFT_CONFIG.heuristic_positive_threshold)
+        )
+        negatives = enhanced["match_score"] <= ML_SHIFT_CONFIG.heuristic_negative_threshold
+        bundle = fit_match_probability_model(
+            enhanced[feature_cols],
+            positives,
+            negatives,
+        )
+        enhanced["match_probability"] = score_match_probability(
+            bundle,
+            enhanced[feature_cols],
+            fallback_scores=enhanced["match_score"],
+        )
+        enhanced["match_model_trained"] = bundle.trained
+        enhanced["match_model_training_rows"] = bundle.training_rows
+        enhanced["match_method"] = np.where(
+            bundle.trained & (enhanced["match_method"] != "deterministic"),
+            "ml_probabilistic",
+            enhanced["match_method"],
+        )
+        return enhanced
     
     def _find_matches_for_captain(
         self,

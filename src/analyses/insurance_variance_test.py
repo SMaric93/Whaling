@@ -66,10 +66,11 @@ def classify_captain_experience(
     # Compute prior voyages for each captain at each voyage
     df = df.sort_values(["captain_id", "year_out"])
     df["n_prior_voyages"] = df.groupby("captain_id").cumcount()
+    df["captain_voyage_num"] = df["n_prior_voyages"] + 1
     
     # Classify
-    df["is_novice"] = df["n_prior_voyages"] <= novice_threshold
-    df["is_expert"] = df["n_prior_voyages"] >= expert_threshold
+    df["is_novice"] = df["captain_voyage_num"] <= (novice_threshold + 1)
+    df["is_expert"] = df["captain_voyage_num"] >= expert_threshold
     
     # Create categorical
     conditions = [df["is_novice"], df["is_expert"]]

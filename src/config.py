@@ -327,3 +327,33 @@ class ValidationConfig:
 
 
 VALIDATION_CONFIG = ValidationConfig()
+
+# =============================================================================
+# ML SHIFT CONFIGURATION
+# =============================================================================
+
+@dataclass
+class MLShiftConfig:
+    """Configuration for ML-assisted ETL, linkage, and validation layers."""
+
+    enabled: bool = True
+    random_state: int = 42
+    min_training_rows: int = 24
+
+    # Pairwise matching / linkage
+    pair_match_probability_threshold: float = 0.75
+    entity_merge_probability_threshold: float = 0.90
+    heuristic_positive_threshold: float = 0.88
+    heuristic_negative_threshold: float = 0.35
+    max_blocking_candidates: int = 5000
+
+    # Text classification
+    text_probability_threshold: float = 0.60
+    min_text_training_rows: int = 30
+
+    # QA anomaly detection
+    anomaly_contamination: float = 0.02
+    anomaly_min_rows: int = 50
+
+
+ML_SHIFT_CONFIG = MLShiftConfig()

@@ -14,7 +14,8 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import CROSSWALK_CONFIG, CROSSWALKS_DIR
+from config import CROSSWALK_CONFIG, CROSSWALKS_DIR, ML_SHIFT_CONFIG
+from ml.record_matching import fit_match_probability_model, score_match_probability
 from parsing.string_normalizer import (
     normalize_name,
     normalize_vessel_name,
@@ -112,6 +113,7 @@ class CrosswalkBuilder:
                 })
         
         crosswalk_df = pd.DataFrame(matches)
+        crosswalk_df = self._apply_ml_scoring(crosswalk_df)
         
         if output_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +123,40 @@ class CrosswalkBuilder:
         logger.info(f"Created {len(crosswalk_df)} crosswalk matches")
         
         return crosswalk_df
+
+    def _apply_ml_scoring(self, crosswalk_df: pd.DataFrame) -> pd.DataFrame:
+        """Replace heuristic crosswalk scores with ML-ranked probabilities when possible."""
+        if len(crosswalk_df) == 0 or not ML_SHIFT_CONFIG.enabled:
+            return crosswalk_df
+
+        scored = crosswalk_df.copy()
+        if "date_diff_days" not in scored.columns:
+            scored["date_diff_days"] = np.nan
+        feature_cols = [col for col in ["match_score", "vessel_score", "captain_score", "date_diff_days"] if col in scored.columns]
+        if len(feature_cols) == 0:
+            return scored
+
+        features = scored[feature_cols].copy()
+        if "date_diff_days" in features.columns:
+            features["date_diff_days"] = features["date_diff_days"].fillna(CROSSWALK_CONFIG.out_date_tolerance_days)
+            features["date_similarity"] = 1.0 - np.clip(
+                features["date_diff_days"] / max(CROSSWALK_CONFIG.in_date_tolerance_days, 1),
+                0.0,
+                1.0,
+            )
+            feature_cols = list(features.columns)
+
+        positives = scored["match_score"] >= ML_SHIFT_CONFIG.heuristic_positive_threshold
+        negatives = scored["match_score"] <= ML_SHIFT_CONFIG.heuristic_negative_threshold
+        bundle = fit_match_probability_model(features[feature_cols], positives, negatives)
+        scored["match_probability"] = score_match_probability(
+            bundle,
+            features[feature_cols],
+            fallback_scores=scored["match_score"],
+        )
+        scored["match_model_trained"] = bundle.trained
+        scored["match_score"] = scored["match_probability"]
+        return scored
     
     def _find_best_voyage_match(
         self,
@@ -269,6 +305,7 @@ class CrosswalkBuilder:
                         })
         
         crosswalk_df = pd.DataFrame(matches)
+        crosswalk_df = self._apply_ml_scoring(crosswalk_df)
         
         # Keep only best match per logbook record
         if len(crosswalk_df) > 0:

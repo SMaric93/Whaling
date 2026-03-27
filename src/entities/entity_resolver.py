@@ -14,8 +14,15 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import CROSSWALKS_DIR
+from config import CROSSWALKS_DIR, ML_SHIFT_CONFIG
 from parsing.string_normalizer import normalize_name, normalize_vessel_name
+from ml.record_matching import (
+    cluster_match_pairs,
+    compute_numeric_distance_features,
+    compute_text_pair_features,
+    fit_match_probability_model,
+    score_match_probability,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,6 +53,7 @@ class EntityResolver:
         self._vessel_registry: Dict[str, EntityVariants] = {}
         self._captain_registry: Dict[str, EntityVariants] = {}
         self._agent_registry: Dict[str, EntityVariants] = {}
+        self._ml_duplicate_pairs: Dict[str, pd.DataFrame] = {}
     
     @staticmethod
     def _compute_id(components: List[str], prefix: str = "") -> str:
@@ -180,7 +188,12 @@ class EntityResolver:
         
         return agent_id
     
-    def resolve_voyages_df(self, df: pd.DataFrame) -> pd.DataFrame:
+    def resolve_voyages_df(
+        self,
+        df: pd.DataFrame,
+        *,
+        ml_refine: bool = True,
+    ) -> pd.DataFrame:
         """
         Add entity IDs to a voyages dataframe.
         
@@ -243,8 +256,218 @@ class EntityResolver:
         result["vessel_id"] = result.apply(resolve_vessel_row, axis=1)
         result["captain_id"] = result.apply(resolve_captain_row, axis=1)
         result["agent_id"] = result.apply(resolve_agent_row, axis=1)
+
+        if ml_refine and ML_SHIFT_CONFIG.enabled:
+            result = self._apply_ml_entity_refinement(result)
         
         return result
+
+    def _apply_ml_entity_refinement(self, voyages_df: pd.DataFrame) -> pd.DataFrame:
+        """Collapse likely duplicate entity ids using a learned pairwise model."""
+        refined = voyages_df.copy()
+        entity_specs = [
+            ("vessel", "vessel_id", "vessel_name_clean", ["home_port", "rig"], "year_out"),
+            ("captain", "captain_id", "captain_name_clean", ["home_port", "port_out"], "year_out"),
+            ("agent", "agent_id", "agent_name_clean", ["home_port", "port_out"], "year_out"),
+        ]
+
+        for entity_type, id_col, name_col, aux_cols, year_col in entity_specs:
+            if id_col not in refined.columns or name_col not in refined.columns:
+                continue
+            entity_df = self._build_entity_frame(refined, id_col, name_col, aux_cols, year_col)
+            if len(entity_df) < 2:
+                continue
+
+            pair_scores = self._score_duplicate_entity_pairs(entity_df, entity_type)
+            self._ml_duplicate_pairs[entity_type] = pair_scores
+
+            if len(pair_scores) == 0:
+                continue
+
+            mapping = cluster_match_pairs(
+                pair_scores,
+                left_col="left_id",
+                right_col="right_id",
+                probability_col="match_probability",
+                threshold=ML_SHIFT_CONFIG.entity_merge_probability_threshold,
+            )
+            if not mapping:
+                continue
+
+            refined[id_col] = refined[id_col].map(
+                lambda value: mapping.get(str(value), value) if pd.notna(value) else value
+            )
+
+        return refined
+
+    def _build_entity_frame(
+        self,
+        voyages_df: pd.DataFrame,
+        id_col: str,
+        name_col: str,
+        aux_cols: List[str],
+        year_col: str,
+    ) -> pd.DataFrame:
+        """Aggregate voyage-level entities into one row per current entity id."""
+        work = voyages_df[[col for col in [id_col, name_col, year_col] + aux_cols if col in voyages_df.columns]].copy()
+        work = work[work[id_col].notna() & work[name_col].notna()].copy()
+        if len(work) == 0:
+            return pd.DataFrame(columns=[id_col, name_col, "obs_count"])
+
+        def _mode(series: pd.Series):
+            clean = series.dropna()
+            if len(clean) == 0:
+                return None
+            return clean.mode().iloc[0]
+
+        agg_map = {name_col: _mode}
+        if year_col in work.columns:
+            agg_map[year_col] = "min"
+        agg_map.update({col: _mode for col in aux_cols if col in work.columns})
+
+        grouped = work.groupby(id_col, dropna=False).agg(agg_map).reset_index()
+        counts = work.groupby(id_col).size().rename("obs_count").reset_index()
+        grouped = grouped.merge(counts, on=id_col, how="left")
+        return grouped
+
+    def _score_duplicate_entity_pairs(
+        self,
+        entity_df: pd.DataFrame,
+        entity_type: str,
+    ) -> pd.DataFrame:
+        """Score likely duplicate pairs for vessels, captains, or agents."""
+        id_col = f"{entity_type}_id"
+        name_col = {
+            "vessel": "vessel_name_clean",
+            "captain": "captain_name_clean",
+            "agent": "agent_name_clean",
+        }[entity_type]
+        port_col = "home_port" if "home_port" in entity_df.columns else ("port_out" if "port_out" in entity_df.columns else None)
+        year_col = "year_out" if "year_out" in entity_df.columns else None
+        rig_col = "rig" if "rig" in entity_df.columns else None
+
+        entity_df = entity_df.copy()
+        entity_df["block"] = entity_df[name_col].fillna("").astype(str).str[:2]
+
+        pair_rows = []
+        for _, block_df in entity_df.groupby("block", dropna=False):
+            block_df = block_df.head(ML_SHIFT_CONFIG.max_blocking_candidates)
+            rows = block_df.to_dict("records")
+            for i in range(len(rows)):
+                for j in range(i + 1, len(rows)):
+                    left = rows[i]
+                    right = rows[j]
+                    features = compute_text_pair_features(left.get(name_col), right.get(name_col), prefix="name_")
+                    if port_col:
+                        features.update(compute_text_pair_features(left.get(port_col), right.get(port_col), prefix="port_"))
+                    if year_col:
+                        features.update(compute_numeric_distance_features(left.get(year_col), right.get(year_col), scale=30.0, prefix="year_"))
+                    if rig_col:
+                        features["rig_match"] = float((left.get(rig_col) or "") == (right.get(rig_col) or "") and pd.notna(left.get(rig_col)) and pd.notna(right.get(rig_col)))
+                    features["obs_count_ratio"] = min(left.get("obs_count", 1), right.get("obs_count", 1)) / max(left.get("obs_count", 1), right.get("obs_count", 1), 1)
+
+                    rule_score = (
+                        0.65 * features["name_jw"] +
+                        0.15 * features.get("port_exact", 0.5) +
+                        0.10 * features.get("year_similarity", 0.5) +
+                        0.10 * features.get("rig_match", 0.5)
+                    )
+                    pair_rows.append({
+                        "left_id": str(left[id_col]),
+                        "right_id": str(right[id_col]),
+                        "left_name": left.get(name_col),
+                        "right_name": right.get(name_col),
+                        "heuristic_score": float(rule_score),
+                        **features,
+                    })
+
+        if not pair_rows:
+            return pd.DataFrame()
+
+        pair_df = pd.DataFrame(pair_rows)
+        feature_cols = [
+            col for col in pair_df.columns
+            if col not in {"left_id", "right_id", "left_name", "right_name", "heuristic_score"}
+        ]
+        positives = pair_df["heuristic_score"] >= ML_SHIFT_CONFIG.heuristic_positive_threshold
+        negatives = pair_df["heuristic_score"] <= ML_SHIFT_CONFIG.heuristic_negative_threshold
+        bundle = fit_match_probability_model(
+            pair_df[feature_cols],
+            positives,
+            negatives,
+        )
+        pair_df["match_probability"] = score_match_probability(
+            bundle,
+            pair_df[feature_cols],
+            fallback_scores=pair_df["heuristic_score"],
+        )
+        pair_df["model_trained"] = bundle.trained
+        return pair_df.sort_values("match_probability", ascending=False).reset_index(drop=True)
+
+    def _build_entity_crosswalk(
+        self,
+        voyages_df: pd.DataFrame,
+        *,
+        entity_type: str,
+        id_col: str,
+        name_col: str,
+        extra_cols: List[str],
+    ) -> pd.DataFrame:
+        """Build a saved crosswalk with ML merge metadata for one entity type."""
+        resolved = self.resolve_voyages_df(voyages_df, ml_refine=True)
+        keep_cols = [col for col in [id_col, name_col] + extra_cols if col in resolved.columns]
+        crosswalk = resolved[keep_cols].dropna(subset=[id_col, name_col]).drop_duplicates().copy()
+        counts = (
+            resolved[resolved[id_col].notna()]
+            .groupby(id_col)
+            .size()
+            .rename("observation_count")
+            .reset_index()
+        )
+        crosswalk = crosswalk.merge(counts, on=id_col, how="left")
+
+        pair_scores = self._ml_duplicate_pairs.get(entity_type, pd.DataFrame())
+        if len(pair_scores) > 0:
+            max_prob = {}
+            for _, row in pair_scores.iterrows():
+                prob = float(row["match_probability"])
+                max_prob[row["left_id"]] = max(prob, max_prob.get(row["left_id"], 0.0))
+                max_prob[row["right_id"]] = max(prob, max_prob.get(row["right_id"], 0.0))
+            crosswalk["ml_duplicate_probability"] = crosswalk[id_col].astype(str).map(max_prob).fillna(0.0)
+        else:
+            crosswalk["ml_duplicate_probability"] = 0.0
+
+        return crosswalk.sort_values([id_col, name_col]).reset_index(drop=True)
+
+    def resolve_vessels(self, voyages_df: pd.DataFrame) -> pd.DataFrame:
+        """Resolve and summarize vessel entities with ML-assisted duplicate collapsing."""
+        return self._build_entity_crosswalk(
+            voyages_df,
+            entity_type="vessel",
+            id_col="vessel_id",
+            name_col="vessel_name_clean",
+            extra_cols=["home_port", "rig"],
+        )
+
+    def resolve_captains(self, voyages_df: pd.DataFrame) -> pd.DataFrame:
+        """Resolve and summarize captain entities with ML-assisted duplicate collapsing."""
+        return self._build_entity_crosswalk(
+            voyages_df,
+            entity_type="captain",
+            id_col="captain_id",
+            name_col="captain_name_clean",
+            extra_cols=["home_port", "port_out", "year_out"],
+        )
+
+    def resolve_agents(self, voyages_df: pd.DataFrame) -> pd.DataFrame:
+        """Resolve and summarize agent entities with ML-assisted duplicate collapsing."""
+        return self._build_entity_crosswalk(
+            voyages_df,
+            entity_type="agent",
+            id_col="agent_id",
+            name_col="agent_name_clean",
+            extra_cols=["home_port", "port_out"],
+        )
     
     def save_registries(self, output_dir: Optional[Path] = None):
         """Save entity registries to crosswalks directory."""

@@ -13,7 +13,8 @@ import hashlib
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import RAW_CREWLIST, STAGING_DIR
+from config import RAW_CREWLIST, STAGING_DIR, ML_SHIFT_CONFIG
+from ml.text_models import fit_text_classifier, predict_text_probabilities
 from parsing.string_normalizer import (
     normalize_name,
     parse_date,
@@ -54,6 +55,16 @@ class CrewParser:
         "LEFT", "DISCHARGED ASHORE", "PUT ASHORE", "LEFT SICK", "LEFT AT",
         "WENT ASHORE", "REMAINED", "STAYED",
     ]
+
+    NON_DESERTION_KEYWORDS = [
+        "DISCHARGED",
+        "DIED",
+        "DEAD",
+        "TRANSFERRED",
+        "PAID OFF",
+        "LANDED",
+        "HOME",
+    ]
     
     def __init__(self, raw_dir: Optional[Path] = None):
         self.raw_dir = raw_dir or RAW_CREWLIST
@@ -71,32 +82,36 @@ class CrewParser:
     def _load_raw_files(self) -> pd.DataFrame:
         """Load all raw crew files from the raw directory."""
         dfs = []
-        
-        for pattern in ["*.csv", "*.txt"]:
-            for filepath in self.raw_dir.glob(pattern):
-                if "readme" in filepath.name.lower():
-                    continue
-                
-                logger.info(f"Loading {filepath.name}")
-                
-                for sep in [",", "\t", "|"]:
-                    try:
-                        df = pd.read_csv(filepath, sep=sep, low_memory=False, encoding="utf-8")
-                        if len(df.columns) > 2:
-                            df["_source_file"] = filepath.name
-                            dfs.append(df)
-                            logger.info(f"  Loaded {len(df)} rows")
-                            break
-                    except:
-                        continue
-                else:
-                    try:
-                        df = pd.read_csv(filepath, sep=",", low_memory=False, encoding="latin-1")
+
+        filepaths = [self.raw_dir] if self.raw_dir.is_file() else []
+        if not filepaths:
+            for pattern in ["*.csv", "*.txt"]:
+                filepaths.extend(self.raw_dir.glob(pattern))
+
+        for filepath in filepaths:
+            if "readme" in filepath.name.lower():
+                continue
+
+            logger.info(f"Loading {filepath.name}")
+
+            for sep in [",", "\t", "|"]:
+                try:
+                    df = pd.read_csv(filepath, sep=sep, low_memory=False, encoding="utf-8")
+                    if len(df.columns) > 2:
                         df["_source_file"] = filepath.name
                         dfs.append(df)
-                        logger.info(f"  Loaded {len(df)} rows (latin-1)")
-                    except Exception as e:
-                        logger.warning(f"  Could not load {filepath.name}: {e}")
+                        logger.info(f"  Loaded {len(df)} rows")
+                        break
+                except:
+                    continue
+            else:
+                try:
+                    df = pd.read_csv(filepath, sep=",", low_memory=False, encoding="latin-1")
+                    df["_source_file"] = filepath.name
+                    dfs.append(df)
+                    logger.info(f"  Loaded {len(df)} rows (latin-1)")
+                except Exception as e:
+                    logger.warning(f"  Could not load {filepath.name}: {e}")
         
         if not dfs:
             raise ValueError(f"No crew files found in {self.raw_dir}")
@@ -136,6 +151,38 @@ class CrewParser:
         ]
         key = "|".join(components)
         return hashlib.md5(key.encode()).hexdigest()[:12]
+
+    def _apply_ml_desertion_scores(self, parsed: pd.DataFrame) -> pd.DataFrame:
+        """Augment keyword desertion flags with a lightweight text model."""
+        result = parsed.copy()
+        result["desertion_probability"] = result["is_deserted"].astype(float)
+        result["desertion_model_trained"] = False
+
+        if len(result) == 0 or not ML_SHIFT_CONFIG.enabled or "crew_status" not in result.columns:
+            return result
+
+        status_text = result["crew_status"].fillna("")
+        negative_mask = status_text.str.len().gt(0) & ~result["is_deserted"]
+        labels = pd.Series(index=result.index, dtype=object)
+        labels.loc[result["is_deserted"]] = "DESERTED"
+        labels.loc[negative_mask] = "NOT_DESERTED"
+
+        bundle = fit_text_classifier(
+            status_text,
+            labels,
+            min_training_rows=max(12, ML_SHIFT_CONFIG.min_text_training_rows // 2),
+        )
+        probabilities = predict_text_probabilities(bundle, status_text)
+
+        if bundle.trained and "DESERTED" in probabilities.columns:
+            result["desertion_probability"] = probabilities["DESERTED"].astype(float).to_numpy()
+            result["desertion_model_trained"] = True
+
+        result["is_deserted"] = (
+            result["is_deserted"] |
+            (result["desertion_probability"] >= ML_SHIFT_CONFIG.text_probability_threshold)
+        )
+        return result
     
     def parse(self, force_reload: bool = False) -> pd.DataFrame:
         """
@@ -191,6 +238,7 @@ class CrewParser:
         
         # Identify desertion
         parsed["is_deserted"] = status.apply(self._identify_desertion)
+        parsed = self._apply_ml_desertion_scores(parsed)
         
         # Demographic fields (when available)
         age = self._extract_field(raw, "age")
@@ -257,10 +305,17 @@ class CrewParser:
             "unique_ranks": df["rank"].nunique(),
             "desertion_count": df["is_deserted"].sum(),
             "desertion_rate": df["is_deserted"].mean(),
+            "mean_desertion_probability": df["desertion_probability"].mean() if "desertion_probability" in df.columns else None,
             "missing_voyage_id_rate": df["voyage_id"].isna().mean(),
             "age_available_rate": df["age"].notna().mean(),
             "birthplace_available_rate": df["birthplace"].notna().mean(),
         }
+
+
+def parse_crew_lists(source: Optional[Path] = None) -> pd.DataFrame:
+    """Convenience wrapper for stage-level pipeline imports."""
+    parser = CrewParser(raw_dir=source or RAW_CREWLIST)
+    return parser.parse()
 
 
 if __name__ == "__main__":

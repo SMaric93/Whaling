@@ -13,7 +13,8 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import STAGING_DIR, MATCH_CONFIDENCE_THRESHOLDS
+from config import STAGING_DIR, MATCH_CONFIDENCE_THRESHOLDS, ML_SHIFT_CONFIG
+from ml.record_matching import fit_match_probability_model, score_match_probability
 
 # Try fuzzy matching
 try:
@@ -125,24 +126,14 @@ def match_starbuck_to_aowv(
     """
     logger.info(f"Matching {len(starbuck_df)} Starbuck to {len(aowv_df)} AOWV voyages")
     
-    results = []
+    candidate_rows = []
     
-    for idx, sb_row in starbuck_df.iterrows():
+    for _, sb_row in starbuck_df.iterrows():
         sb_vessel = sb_row.get('vessel_name_clean')
         sb_dep = sb_row.get('departure_year')
         sb_ret = sb_row.get('return_year')
-        
-        candidates = []
-        
+
         if not sb_vessel:
-            results.append({
-                'starbuck_row_id': sb_row['starbuck_row_id'],
-                'candidate_voyage_ids': [],
-                'best_voyage_id': None,
-                'match_confidence': 0.0,
-                'match_method': 'no_vessel',
-                'unmatched_flag': True,
-            })
             continue
         
         # Find vessel matches
@@ -161,37 +152,94 @@ def match_starbuck_to_aowv(
             )
             
             if overlaps or year_score > 0:
-                total_score = 0.6 * name_sim + 0.4 * year_score
-                candidates.append({
+                aowv_port = aowv_row.get('home_port') or aowv_row.get('port_out')
+                port_score = compute_name_similarity(sb_row.get('home_port_clean'), aowv_port)
+                total_score = 0.55 * name_sim + 0.30 * year_score + 0.15 * port_score
+                candidate_rows.append({
+                    'starbuck_row_id': sb_row['starbuck_row_id'],
                     'voyage_id': aowv_row.get('voyage_id'),
-                    'score': total_score,
+                    'heuristic_score': total_score,
                     'name_sim': name_sim,
                     'year_score': year_score,
+                    'port_score': port_score,
                 })
-        
-        # Sort by score
-        candidates.sort(key=lambda x: x['score'], reverse=True)
-        
-        if candidates:
-            best = candidates[0]
+
+    candidate_df = pd.DataFrame(candidate_rows)
+    bundle = None
+    if len(candidate_df) > 0:
+        feature_cols = [
+            "heuristic_score",
+            "name_sim",
+            "year_score",
+            "port_score",
+        ]
+        positives = candidate_df["heuristic_score"] >= ML_SHIFT_CONFIG.heuristic_positive_threshold
+        negatives = candidate_df["heuristic_score"] <= ML_SHIFT_CONFIG.heuristic_negative_threshold
+        bundle = fit_match_probability_model(
+            candidate_df[feature_cols],
+            positives,
+            negatives,
+        )
+        candidate_df["match_probability"] = score_match_probability(
+            bundle,
+            candidate_df[feature_cols],
+            fallback_scores=candidate_df["heuristic_score"],
+        )
+        candidate_df["match_model_trained"] = bundle.trained
+        candidate_df["match_model_training_rows"] = bundle.training_rows
+    else:
+        candidate_df = pd.DataFrame(columns=[
+            "starbuck_row_id",
+            "voyage_id",
+            "heuristic_score",
+            "name_sim",
+            "year_score",
+            "port_score",
+            "match_probability",
+            "match_model_trained",
+            "match_model_training_rows",
+        ])
+
+    results = []
+
+    for _, sb_row in starbuck_df.iterrows():
+        row_id = sb_row["starbuck_row_id"]
+        sb_candidates = candidate_df[
+            candidate_df["starbuck_row_id"] == row_id
+        ].sort_values(
+            ["match_probability", "heuristic_score"],
+            ascending=[False, False],
+        )
+
+        if len(sb_candidates) > 0:
+            best = sb_candidates.iloc[0]
+            match_confidence = float(best["match_probability"])
             results.append({
-                'starbuck_row_id': sb_row['starbuck_row_id'],
-                'candidate_voyage_ids': [c['voyage_id'] for c in candidates[:3]],
+                'starbuck_row_id': row_id,
+                'candidate_voyage_ids': sb_candidates.head(3)['voyage_id'].tolist(),
                 'best_voyage_id': best['voyage_id'],
-                'match_confidence': best['score'],
-                'match_method': 'vessel_year',
-                'unmatched_flag': best['score'] < 0.7,
+                'match_confidence': match_confidence,
+                'match_probability': match_confidence,
+                'heuristic_match_score': float(best['heuristic_score']),
+                'match_method': 'ml_vessel_year' if bool(best["match_model_trained"]) else 'vessel_year',
+                'match_model_trained': bool(best["match_model_trained"]),
+                'match_model_training_rows': int(best["match_model_training_rows"]),
+                'unmatched_flag': match_confidence < MATCH_CONFIDENCE_THRESHOLDS["medium"],
             })
         else:
             results.append({
-                'starbuck_row_id': sb_row['starbuck_row_id'],
+                'starbuck_row_id': row_id,
                 'candidate_voyage_ids': [],
                 'best_voyage_id': None,
                 'match_confidence': 0.0,
-                'match_method': 'no_match',
+                'match_probability': 0.0,
+                'heuristic_match_score': 0.0,
+                'match_method': 'no_vessel' if not sb_row.get('vessel_name_clean') else 'no_match',
+                'match_model_trained': bool(bundle.trained) if bundle is not None else False,
+                'match_model_training_rows': int(bundle.training_rows) if bundle is not None else 0,
                 'unmatched_flag': True,
             })
-    
+
     df = pd.DataFrame(results)
     
     # Stats

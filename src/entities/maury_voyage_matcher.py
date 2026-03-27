@@ -13,7 +13,12 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import STAGING_DIR, ARCTIC_LAT_THRESHOLD
+from config import STAGING_DIR, ARCTIC_LAT_THRESHOLD, ML_SHIFT_CONFIG
+from ml.record_matching import (
+    compute_numeric_distance_features,
+    fit_match_probability_model,
+    score_match_probability,
+)
 
 # Fuzzy matching
 try:
@@ -82,19 +87,16 @@ def match_positions_to_voyages(
     voyages_df['year_out'] = voyages_df['date_out'].apply(parse_year)
     voyages_df['year_in'] = voyages_df['date_in'].apply(parse_year)
     
-    crosswalk_rows = []
+    candidate_rows = []
     
-    for _, pos_row in vessel_years.iterrows():
+    for group_id, pos_row in vessel_years.iterrows():
         pos_vessel = pos_row['vessel_name_clean']
         pos_year = pos_row['obs_year']
         pos_captain = pos_row['captain_name_clean']
         
         if not pos_vessel or not pos_year:
             continue
-        
-        best_match = None
-        best_score = 0.0
-        
+
         for _, voy_row in voyages_df.iterrows():
             voy_vessel = voy_row.get('vessel_name_clean')
             voy_captain = voy_row.get('captain_name_clean')
@@ -110,12 +112,15 @@ def match_positions_to_voyages(
             if year_out and year_in:
                 if not (year_out <= pos_year <= year_in):
                     continue
+                year_score = 1.0
             elif year_out:
                 if pos_year < year_out or pos_year > year_out + 5:
                     continue
+                year_score = max(0.0, 1.0 - abs(pos_year - year_out) / 5.0)
             elif year_in:
                 if pos_year > year_in or pos_year < year_in - 5:
                     continue
+                year_score = max(0.0, 1.0 - abs(pos_year - year_in) / 5.0)
             else:
                 continue
             
@@ -123,11 +128,73 @@ def match_positions_to_voyages(
             captain_sim = compute_name_similarity(pos_captain, voy_captain)
             
             score = 0.7 * name_sim + 0.3 * captain_sim
-            
-            if score > best_score:
-                best_score = score
-                best_match = voy_row.get('voyage_id')
-        
+            year_anchor = year_out if pd.notna(year_out) else year_in
+            year_features = compute_numeric_distance_features(
+                pos_year,
+                year_anchor,
+                scale=5.0,
+                prefix="year_",
+            )
+
+            candidate_rows.append({
+                "position_group_id": group_id,
+                "voyage_id": voy_row.get("voyage_id"),
+                "heuristic_score": score,
+                "name_score": name_sim,
+                "captain_score": captain_sim,
+                "year_overlap_score": year_score,
+                **year_features,
+            })
+
+    candidate_df = pd.DataFrame(candidate_rows)
+    bundle = None
+    if len(candidate_df) > 0:
+        feature_cols = [
+            "heuristic_score",
+            "name_score",
+            "captain_score",
+            "year_overlap_score",
+            "year_missing",
+            "year_distance",
+            "year_similarity",
+        ]
+        positives = candidate_df["heuristic_score"] >= ML_SHIFT_CONFIG.heuristic_positive_threshold
+        negatives = candidate_df["heuristic_score"] <= ML_SHIFT_CONFIG.heuristic_negative_threshold
+        bundle = fit_match_probability_model(
+            candidate_df[feature_cols],
+            positives,
+            negatives,
+        )
+        candidate_df["match_probability"] = score_match_probability(
+            bundle,
+            candidate_df[feature_cols],
+            fallback_scores=candidate_df["heuristic_score"],
+        )
+        candidate_df["match_model_trained"] = bundle.trained
+        candidate_df["match_model_training_rows"] = bundle.training_rows
+
+    best_candidates = {}
+    if len(candidate_df) > 0:
+        ranked = candidate_df.sort_values(
+            ["position_group_id", "match_probability", "heuristic_score"],
+            ascending=[True, False, False],
+        )
+        best_candidates = (
+            ranked.groupby("position_group_id", as_index=False)
+            .first()
+            .set_index("position_group_id")
+            .to_dict("index")
+        )
+
+    crosswalk_rows = []
+    for group_id, pos_row in vessel_years.iterrows():
+        pos_vessel = pos_row['vessel_name_clean']
+        pos_year = pos_row['obs_year']
+        best = best_candidates.get(group_id)
+        best_match = best["voyage_id"] if best else None
+        best_score = float(best["match_probability"]) if best else 0.0
+        heuristic_score = float(best["heuristic_score"]) if best else 0.0
+
         # Add all positions for this vessel-year
         for obs_id in positions_df[
             (positions_df['vessel_name_clean'] == pos_vessel) &
@@ -137,13 +204,23 @@ def match_positions_to_voyages(
                 'maury_obs_id': obs_id,
                 'voyage_id': best_match,
                 'match_confidence': best_score if best_match else 0.0,
-                'match_method': 'vessel_year_captain' if best_match else 'no_match',
+                'match_probability': best_score if best_match else 0.0,
+                'heuristic_match_score': heuristic_score if best_match else 0.0,
+                'match_method': (
+                    'ml_vessel_year_captain'
+                    if best_match and bundle is not None and bundle.trained
+                    else ('vessel_year_captain' if best_match else 'no_match')
+                ),
+                'match_model_trained': bool(bundle.trained) if bundle is not None else False,
+                'match_model_training_rows': int(bundle.training_rows) if bundle is not None else 0,
             })
     
     crosswalk_df = pd.DataFrame(crosswalk_rows)
     
     matched = crosswalk_df['voyage_id'].notna().sum()
-    logger.info(f"Matched {matched}/{len(crosswalk_df)} positions ({matched/len(crosswalk_df):.1%})")
+    total = len(crosswalk_df)
+    rate = matched / total if total > 0 else 0.0
+    logger.info(f"Matched {matched}/{total} positions ({rate:.1%})")
     
     return crosswalk_df
 

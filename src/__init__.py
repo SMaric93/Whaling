@@ -8,7 +8,7 @@ Public API
 ----------
 Core configuration:
     PROJECT_ROOT, RAW_DIR, STAGING_DIR, FINAL_DIR
-    LINKAGE_CONFIG, CROSSWALK_CONFIG, VALIDATION_CONFIG
+    LINKAGE_CONFIG, CROSSWALK_CONFIG, VALIDATION_CONFIG, ML_SHIFT_CONFIG
 
 Download utilities:
     download_aowv_data, ManifestManager
@@ -23,7 +23,7 @@ Analysis:
     run_all_analyses, prepare_analysis_sample
 """
 
-__version__ = "0.425"
+__version__ = "0.475"
 
 
 # Re-export core configuration
@@ -35,6 +35,7 @@ from .config import (
     LINKAGE_CONFIG,
     CROSSWALK_CONFIG,
     VALIDATION_CONFIG,
+    ML_SHIFT_CONFIG,
 )
 
 # Re-export key download utilities
@@ -76,6 +77,7 @@ __all__ = [
     "LINKAGE_CONFIG",
     "CROSSWALK_CONFIG",
     "VALIDATION_CONFIG",
+    "ML_SHIFT_CONFIG",
     # Download
     "download_aowv_data",
     "ManifestManager",

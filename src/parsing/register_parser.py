@@ -14,7 +14,8 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import RAW_INSURANCE, STAGING_DIR
+from config import RAW_INSURANCE, STAGING_DIR, ML_SHIFT_CONFIG
+from ml.text_models import fit_text_classifier, predict_text_probabilities
 from parsing.string_normalizer import normalize_vessel_name, jaro_winkler_similarity
 
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +51,11 @@ class RegisterParser:
     
     def _load_ocr_text(self) -> str:
         """Load OCR text file."""
-        ocr_file = self.raw_dir / "mutual_marine_register_1843_1862_ocr.txt"
+        ocr_file = (
+            self.raw_dir
+            if self.raw_dir.is_file()
+            else self.raw_dir / "mutual_marine_register_1843_1862_ocr.txt"
+        )
         
         if not ocr_file.exists():
             raise FileNotFoundError(f"OCR file not found: {ocr_file}")
@@ -136,6 +141,47 @@ class RegisterParser:
         
         logger.info(f"Extracted {len(entries)} potential vessel entries")
         return entries
+
+    def _apply_ml_parse_quality(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Score OCR parse quality using weak labels from extracted completeness."""
+        result = df.copy()
+        rating = result["rating"] if "rating" in result.columns else pd.Series(index=result.index, dtype=object)
+        insured_value = (
+            result["insured_value"]
+            if "insured_value" in result.columns
+            else pd.Series(index=result.index, dtype=float)
+        )
+        completeness = (
+            rating.notna().astype(float) +
+            insured_value.notna().astype(float)
+        ) / 2.0
+        result["parse_quality_probability"] = completeness.clip(0.0, 1.0)
+        result["parse_quality_model_trained"] = False
+
+        if len(result) == 0 or not ML_SHIFT_CONFIG.enabled:
+            return result
+
+        labels = np.where(completeness >= 0.5, "STRONG_PARSE", "WEAK_PARSE")
+        bundle = fit_text_classifier(
+            result["raw_line"].fillna(result["vessel_name_raw"]),
+            labels,
+            min_training_rows=max(12, ML_SHIFT_CONFIG.min_text_training_rows // 2),
+        )
+        probabilities = predict_text_probabilities(
+            bundle,
+            result["raw_line"].fillna(result["vessel_name_raw"]),
+        )
+
+        if bundle.trained and "STRONG_PARSE" in probabilities.columns:
+            result["parse_quality_probability"] = probabilities["STRONG_PARSE"].astype(float).to_numpy()
+            result["parse_quality_model_trained"] = True
+
+        result["parse_quality_label"] = np.where(
+            result["parse_quality_probability"] >= ML_SHIFT_CONFIG.text_probability_threshold,
+            "strong",
+            "weak",
+        )
+        return result
     
     def _deduplicate_entries(self, entries: List[Dict]) -> List[Dict]:
         """
@@ -206,6 +252,7 @@ class RegisterParser:
         
         # Compute VQI proxy
         df = self._compute_vqi_proxy(df)
+        df = self._apply_ml_parse_quality(df)
         
         self._parsed_df = df
         logger.info(f"Parsed {len(df)} vessel register entries")
@@ -217,6 +264,10 @@ class RegisterParser:
         Compute vessel quality index proxy from available data.
         """
         result = df.copy()
+        if "rating" not in result.columns:
+            result["rating"] = None
+        if "insured_value" not in result.columns:
+            result["insured_value"] = np.nan
         
         # Rating score (higher is better)
         rating_scores = {
@@ -300,8 +351,15 @@ class RegisterParser:
             "rating_coverage": df["rating"].notna().mean(),
             "value_coverage": df.get("insured_value", pd.Series()).notna().mean(),
             "vqi_coverage": df["vqi_proxy"].notna().mean(),
+            "mean_parse_quality_probability": df["parse_quality_probability"].mean() if "parse_quality_probability" in df.columns else None,
             "rating_distribution": df["rating"].value_counts().to_dict() if df["rating"].notna().any() else {},
         }
+
+
+def parse_registers(source: Optional[Path] = None) -> pd.DataFrame:
+    """Convenience wrapper for stage-level pipeline imports."""
+    parser = RegisterParser(raw_dir=source or RAW_INSURANCE)
+    return parser.parse()
 
 
 if __name__ == "__main__":

@@ -134,9 +134,12 @@ def identify_multi_agent_vessels(df: pd.DataFrame) -> pd.DataFrame:
     vessel_agent_counts = df.groupby("vessel_id")["agent_id"].nunique()
     multi_agent_vessels = vessel_agent_counts[vessel_agent_counts >= 2].index
     
+    filtered = df[
+        df["vessel_id"].isin(multi_agent_vessels) & df["prev_agent"].notna()
+    ].copy()
+
     print(f"Vessels with 2+ agents: {len(multi_agent_vessels):,}")
-    print(f"Total voyages on these vessels: "
-          f"{len(df[df['vessel_id'].isin(multi_agent_vessels)]):,}")
+    print(f"Total voyages on these vessels: {len(filtered):,}")
     
     # Distribution of agent counts
     agent_count_dist = vessel_agent_counts.value_counts().sort_index()
@@ -144,7 +147,7 @@ def identify_multi_agent_vessels(df: pd.DataFrame) -> pd.DataFrame:
     for n_agents, count in agent_count_dist.items():
         print(f"  {n_agents} agents: {count:,} vessels")
     
-    return df[df["vessel_id"].isin(multi_agent_vessels)].copy()
+    return filtered
 
 
 # =============================================================================
@@ -188,8 +191,15 @@ def merge_with_levy_metrics(
         df = df.merge(
             levy_df[["captain_id", "mean_mu"]].rename(columns={"mean_mu": "levy_mu"}),
             on="captain_id",
-            how="left"
+            how="left",
+            suffixes=("", "_captain"),
         )
+        if "levy_mu_captain" in df.columns:
+            if "levy_mu" in df.columns:
+                df["levy_mu"] = df["levy_mu"].fillna(df["levy_mu_captain"])
+                df = df.drop(columns=["levy_mu_captain"])
+            else:
+                df = df.rename(columns={"levy_mu_captain": "levy_mu"})
     else:
         print("Lévy metrics not found. Attempting to compute from logbooks...")
         

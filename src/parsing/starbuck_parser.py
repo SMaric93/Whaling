@@ -12,10 +12,12 @@ from dataclasses import dataclass
 import logging
 import uuid
 import pandas as pd
+import numpy as np
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import RAW_STARBUCK, STAGING_DIR
+from config import RAW_STARBUCK, STAGING_DIR, ML_SHIFT_CONFIG
+from ml.text_models import fit_text_classifier, predict_text_probabilities
 from parsing.string_normalizer import normalize_name, normalize_port_name
 
 logging.basicConfig(level=logging.INFO)
@@ -75,6 +77,8 @@ def load_starbuck_ocr(path: Optional[Path] = None) -> str:
     """
     if path is None:
         path = RAW_STARBUCK / "starbuck_1878_ocr.txt"
+    elif path.is_dir():
+        path = path / "starbuck_1878_ocr.txt"
     
     if not path.exists():
         raise FileNotFoundError(f"Starbuck OCR not found: {path}")
@@ -142,7 +146,7 @@ def parse_voyage_line(line: str, context_port: Optional[str] = None) -> Optional
     
     # Pattern 1: Ship name followed by years
     # Example: "Awashonks, 1845-1848"
-    pattern1 = r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*,?\s*(\d{4})\s*[-–]\s*(\d{4})"
+    pattern1 = r"([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s*,?\s*(\d{4})\s*[-–]\s*(\d{4})"
     match = re.search(pattern1, line)
     if match:
         vessel_raw = match.group(1)
@@ -163,7 +167,7 @@ def parse_voyage_line(line: str, context_port: Optional[str] = None) -> Optional
     
     # Pattern 2: Ship name with single year
     # Example: "Minerva sailed 1852"
-    pattern2 = r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:sailed|departed|left)?\s*(\d{4})"
+    pattern2 = r"([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s+(?:sailed|departed|left)?\s*(\d{4})"
     match = re.search(pattern2, line)
     if match:
         vessel_raw = match.group(1)
@@ -183,7 +187,7 @@ def parse_voyage_line(line: str, context_port: Optional[str] = None) -> Optional
     
     # Pattern 3: Tabular format with columns
     # Example: "Levi Starbuck    New Bedford    1847    1851    Pacific"
-    pattern3 = r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s{2,}(\w+(?:\s+\w+)?)\s{2,}(\d{4})\s{2,}(\d{4})"
+    pattern3 = r"([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s{2,}(\w+(?:\s+\w+)?)\s{2,}(\d{4})\s{2,}(\d{4})"
     match = re.search(pattern3, line)
     if match:
         vessel_raw = match.group(1)
@@ -292,7 +296,29 @@ def voyages_to_dataframe(voyages: List[StarbuckVoyage]) -> pd.DataFrame:
     """Convert voyage list to DataFrame."""
     if not voyages:
         return pd.DataFrame()
-    return pd.DataFrame([v.to_dict() for v in voyages])
+
+    df = pd.DataFrame([v.to_dict() for v in voyages])
+    if len(df) == 0 or not ML_SHIFT_CONFIG.enabled:
+        return df
+
+    labels = np.where(df["confidence"] >= 0.75, "STRONG_PARSE", "WEAK_PARSE")
+    bundle = fit_text_classifier(
+        df["notes_text"].fillna(df["vessel_name_raw"]),
+        labels,
+        min_training_rows=max(12, ML_SHIFT_CONFIG.min_text_training_rows // 2),
+    )
+    probabilities = predict_text_probabilities(
+        bundle,
+        df["notes_text"].fillna(df["vessel_name_raw"]),
+    )
+
+    df["parse_probability"] = df["confidence"].clip(0.0, 1.0)
+    df["parse_model_trained"] = False
+    if bundle.trained and "STRONG_PARSE" in probabilities.columns:
+        df["parse_probability"] = probabilities["STRONG_PARSE"].astype(float).to_numpy()
+        df["parse_model_trained"] = True
+
+    return df
 
 
 def save_starbuck_voyages(
@@ -337,6 +363,11 @@ def run_starbuck_parser(
     voyages = parse_starbuck_full(ocr_path)
     save_starbuck_voyages(voyages)
     return voyages_to_dataframe(voyages)
+
+
+def parse_starbuck(source: Optional[Path] = None) -> pd.DataFrame:
+    """Convenience wrapper for stage-level pipeline imports."""
+    return run_starbuck_parser(source)
 
 
 if __name__ == "__main__":
