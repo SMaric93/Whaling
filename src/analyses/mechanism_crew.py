@@ -362,7 +362,7 @@ def run_mechanism_regressions(
     return results
 
 
-def run_within_captain_variation(df: pd.DataFrame) -> Dict:
+def run_within_captain_variation(df: pd.DataFrame, outcome_col: str = "log_q") -> Dict:
     """
     Test 6: Within-Captain, Across-Agent Variation.
     
@@ -370,6 +370,7 @@ def run_within_captain_variation(df: pd.DataFrame) -> Dict:
     this rules out pure selection and points to organizational effects.
     """
     print("\n--- Test 6: Within-Captain, Across-Agent Variation ---")
+    print(f"  DV: {outcome_col}")
     
     # Find captains who worked with multiple agents
     captain_agent_counts = df.groupby("captain_id")["agent_id"].nunique()
@@ -382,10 +383,10 @@ def run_within_captain_variation(df: pd.DataFrame) -> Dict:
     print(f"  Captains with 2+ agents: {len(multi_agent_captains):,}")
     
     # Subset to these captains
-    multi_df = df[df["captain_id"].isin(multi_agent_captains)].copy()
+    multi_df = df[df["captain_id"].isin(multi_agent_captains)].dropna(subset=[outcome_col]).copy()
     print(f"  Voyages from multi-agent captains: {len(multi_df):,}")
     
-    y = multi_df["log_q"].values
+    y = multi_df[outcome_col].values
     n = len(y)
     
     # Build sparse design matrix for captain FE
@@ -438,13 +439,14 @@ def run_within_captain_variation(df: pd.DataFrame) -> Dict:
     }
 
 
-def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame) -> Dict:
+def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame, outcome_col: str = "log_q") -> Dict:
     """
     Test 7: Mate-to-Captain Career Paths.
     
     Do mates who become captains perform better with their training agent?
     """
     print("\n--- Test 7: Mate-to-Captain Career Paths ---")
+    print(f"  DV: {outcome_col}")
     
     crew = crew.copy()
     crew["rank"] = crew["rank"].fillna("").str.upper().str.strip()
@@ -482,12 +484,17 @@ def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame) -> Dict:
     )
     
     # Get captain voyages
+    merge_cols = ["voyage_id", "agent_id", outcome_col, "year_out"]
+    if outcome_col != "log_q":
+        merge_cols.append("log_q")  # keep log_q available for fallback
+    merge_cols = [c for c in merge_cols if c in df.columns]
     captain_voyages = captains[captains["crew_name_clean"].isin(promoted)].merge(
-        df[["voyage_id", "agent_id", "log_q", "year_out"]], on="voyage_id", how="inner"
+        df[merge_cols].drop_duplicates(subset=["voyage_id"]), on="voyage_id", how="inner"
     )
     
     captain_voyages = captain_voyages.merge(first_mate_voyage, on="crew_name_clean", how="inner")
     captain_voyages["same_agent"] = (captain_voyages["agent_id"] == captain_voyages["training_agent"]).astype(int)
+    captain_voyages = captain_voyages.dropna(subset=[outcome_col])
     
     print(f"  Captain voyages with known training agent: {len(captain_voyages):,}")
     print(f"  - With training agent: {captain_voyages['same_agent'].sum():,}")
@@ -498,7 +505,7 @@ def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame) -> Dict:
     
     # Regression
     X = np.column_stack([np.ones(len(captain_voyages)), captain_voyages["same_agent"].values])
-    y = captain_voyages["log_q"].values
+    y = captain_voyages[outcome_col].values
     beta = np.linalg.lstsq(X, y, rcond=None)[0]
     resid = y - X @ beta
     se = np.sqrt(np.var(resid) * np.linalg.inv(X.T @ X)[1, 1])
@@ -519,23 +526,24 @@ def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame) -> Dict:
     }
 
 
-def run_agent_network_effects(df: pd.DataFrame) -> Dict:
+def run_agent_network_effects(df: pd.DataFrame, outcome_col: str = "log_q") -> Dict:
     """
     Test 8: Agent Network Effects.
     
     Do larger agents (more captains, more voyages) have different outcomes?
     """
     print("\n--- Test 8: Agent Network Effects ---")
+    print(f"  DV: {outcome_col}")
     
     # Agent portfolio size
     agent_portfolio = df.groupby("agent_id").agg({
         "voyage_id": "count",
         "captain_id": "nunique",
-        "log_q": "mean"
     }).reset_index()
-    agent_portfolio.columns = ["agent_id", "n_voyages", "n_captains", "mean_output"]
+    agent_portfolio.columns = ["agent_id", "n_voyages", "n_captains"]
     
     df_merged = df.merge(agent_portfolio[["agent_id", "n_voyages", "n_captains"]], on="agent_id")
+    df_merged = df_merged.dropna(subset=[outcome_col])
     
     # Regression
     X = np.column_stack([
@@ -543,7 +551,7 @@ def run_agent_network_effects(df: pd.DataFrame) -> Dict:
         df_merged["n_voyages"].values,
         df_merged["n_captains"].values,
     ])
-    y = df_merged["log_q"].values
+    y = df_merged[outcome_col].values
     
     beta = np.linalg.lstsq(X, y, rcond=None)[0]
     resid = y - X @ beta
@@ -572,7 +580,17 @@ def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> 
     print("\n" + "=" * 60)
     print("MECHANISM ANALYSIS: HOW ORGANIZATIONS ALTER SEARCH")
     print("=" * 60)
-    
+
+    # Merge voyage-level Lévy exponents if available
+    from pathlib import Path as _Path
+    levy_path = _Path("output/search_theory/voyage_levy_exponents.csv")
+    if levy_path.exists() and "mu" not in df.columns:
+        levy_df = pd.read_csv(levy_path)
+        n_before = len(df)
+        df = df.merge(levy_df[["voyage_id", "mu"]], on="voyage_id", how="left")
+        n_mu = df["mu"].notna().sum()
+        print(f"Merged Lévy exponents: {n_mu:,}/{n_before:,} voyages have μ")
+
     # Load crew data
     crew = load_crew_data()
     
@@ -583,10 +601,14 @@ def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> 
     # Run basic crew regressions (Tests 1-5)
     results = run_mechanism_regressions(df, crew_features, experience_df)
     
+    # Detect best outcome column for Tests 6-8
+    outcome_col = "mu" if "mu" in df.columns and df["mu"].notna().sum() > 100 else "log_q"
+    print(f"\nUsing '{outcome_col}' as outcome for Tests 6-8")
+
     # Run high-value tests (Tests 6-8)
-    results["within_captain"] = run_within_captain_variation(df)
-    results["mate_to_captain"] = run_mate_to_captain_test(df, crew)
-    results["agent_network"] = run_agent_network_effects(df)
+    results["within_captain"] = run_within_captain_variation(df, outcome_col=outcome_col)
+    results["mate_to_captain"] = run_mate_to_captain_test(df, crew, outcome_col=outcome_col)
+    results["agent_network"] = run_agent_network_effects(df, outcome_col=outcome_col)
     
     # Summary
     print("\n" + "=" * 60)

@@ -1197,6 +1197,120 @@ def compute_patch_yield(
     return patches
 
 
+def compute_patch_yield_loo(
+    patches: pd.DataFrame,
+    positions_df: pd.DataFrame,
+    voyage_df: pd.DataFrame,
+    grid_size: float = GRID_SIZE,
+) -> pd.DataFrame:
+    """
+    SR2-ALT: Classify patches using leave-one-out historical cell density.
+
+    For each patch, computes the mean log_q of all *other* voyages whose
+    positions passed through the same grid cell in strictly prior years.
+    "Empty" = bottom quartile of historical density, or no prior history.
+
+    Parameters
+    ----------
+    patches : pd.DataFrame
+        Patch-level data from identify_patches() (needs cell, entry_date, voyage_id).
+    positions_df : pd.DataFrame
+        Daily positions with voyage_id, lat, lon, obs_date.
+    voyage_df : pd.DataFrame
+        Voyage data with voyage_id and log_q.
+
+    Returns
+    -------
+    pd.DataFrame
+        Patches with is_empty_loo, is_productive_loo, and hist_density columns.
+    """
+    print("\n" + "=" * 60)
+    print("SR2-ALT: LOO HISTORICAL DENSITY CLASSIFICATION")
+    print("=" * 60)
+
+    patches = patches.copy()
+
+    # --- Build cell-year-voyage density index from all positions ---
+    pos = positions_df.copy()
+    pos = pos.dropna(subset=["lat", "lon"])
+    pos["obs_date"] = pd.to_datetime(pos["obs_date"])
+    pos["year"] = pos["obs_date"].dt.year
+    pos["lat_bin"] = (pos["lat"] / grid_size).astype(int)
+    pos["lon_bin"] = (pos["lon"] / grid_size).astype(int)
+    pos["cell"] = pos["lat_bin"].astype(str) + "_" + pos["lon_bin"].astype(str)
+
+    # Attach voyage-level log_q
+    prod = voyage_df[["voyage_id", "log_q"]].drop_duplicates()
+    pos = pos.merge(prod, on="voyage_id", how="inner")
+
+    # Compute voyage-level mean per cell (one row per voyage × cell × year)
+    cell_voyage = (
+        pos.groupby(["cell", "year", "voyage_id"])["log_q"]
+        .first()  # log_q is voyage-level, so first() suffices
+        .reset_index()
+    )
+
+    print(f"Cell-voyage-year observations: {len(cell_voyage):,}")
+    print(f"Unique cells: {cell_voyage['cell'].nunique():,}")
+    print(f"Year range: {cell_voyage['year'].min()} – {cell_voyage['year'].max()}")
+
+    # --- For each patch, compute LOO historical density ---
+    # Extract patch year from entry_date
+    patches["patch_year"] = pd.to_datetime(patches["entry_date"]).dt.year
+
+    hist_densities = []
+    for _, patch in patches.iterrows():
+        cell = patch["cell"]
+        patch_year = patch["patch_year"]
+        patch_vid = patch["voyage_id"]
+
+        # All OTHER voyages in this cell in PRIOR years
+        mask = (
+            (cell_voyage["cell"] == cell)
+            & (cell_voyage["year"] < patch_year)
+            & (cell_voyage["voyage_id"] != patch_vid)
+        )
+        prior = cell_voyage.loc[mask, "log_q"]
+
+        if len(prior) > 0:
+            hist_densities.append(prior.mean())
+        else:
+            hist_densities.append(np.nan)
+
+    patches["hist_density"] = hist_densities
+
+    # --- Classify ---
+    has_history = patches["hist_density"].notna()
+    n_with = has_history.sum()
+    n_without = (~has_history).sum()
+
+    print(f"\nPatches with prior history: {n_with:,} ({n_with / len(patches) * 100:.1f}%)")
+    print(f"Patches with NO history (uncharted): {n_without:,} ({n_without / len(patches) * 100:.1f}%)")
+
+    if n_with > 0:
+        q25 = patches.loc[has_history, "hist_density"].quantile(0.25)
+        median = patches.loc[has_history, "hist_density"].median()
+
+        # Empty = bottom quartile of historical density OR no history
+        patches["is_empty_loo"] = (
+            (~has_history) | (patches["hist_density"] < q25)
+        )
+        # Productive = above median (only for those with history)
+        patches["is_productive_loo"] = has_history & (patches["hist_density"] > median)
+
+        print(f"Historical density Q25: {q25:.3f}")
+        print(f"Historical density median: {median:.3f}")
+    else:
+        # No history at all — mark everything as empty
+        patches["is_empty_loo"] = True
+        patches["is_productive_loo"] = False
+
+    print(f"Empty (LOO): {patches['is_empty_loo'].sum():,}")
+    print(f"Productive (LOO): {patches['is_productive_loo'].sum():,}")
+
+    return patches
+
+
 def run_stopping_rule_test(
     patches: pd.DataFrame,
     voyage_df: pd.DataFrame,

@@ -1,4 +1,5 @@
 venv/
+venv2/
 __pycache__/
 *.pyc
 *.pyo
@@ -23,3 +24,10 @@ build/
 *.pkl
 *.pickle
 data/
+
+# Output folders
+output/
+outputs/
+
+# OS files
+.DS_Store
