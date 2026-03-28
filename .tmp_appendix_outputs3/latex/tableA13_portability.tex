@@ -1,0 +1,20 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\begin{document}
+\section*{Table A13. Portability / Invariance Tests}
+\begin{tabular}{lrrrrrrrrrr}
+\hline
+test & auc & n_train & n_test & level & env_log_loss & types_log_loss & log_loss_improvement & env_top3_accuracy & types_top3_accuracy & n_obs \\
+\hline
+out\_of\_time\_high\_psi & 0.9446824862521436 & 101241.0 & 89433.0 & nan & nan & nan & nan & nan & nan & nan \\
+out\_of\_time\_low\_psi & 0.9624999648163298 & 115802.0 & 74064.0 & nan & nan & nan & nan & nan & nan & nan \\
+out\_of\_ground & 0.9876175896891436 & 196815.0 & 3128.0 & nan & nan & nan & nan & nan & nan & nan \\
+captain-group holdout & nan & nan & nan & basin choice & 0.9528259911304073 & 0.9161422552377716 & 0.03668373589263574 & 0.9364833462432223 & 0.9388071262587142 & 1291.0 \\
+captain-group holdout & nan & nan & nan & theater choice conditional on basin & 0.2926038514384634 & 0.27875104147137664 & 0.013852809967086765 & 0.981629392971246 & 0.9888178913738019 & 1252.0 \\
+captain-group holdout & nan & nan & nan & major-ground choice conditional on theater & 0.7301894043624966 & 0.7183742183140481 & 0.011815186048448445 & 0.940677966101695 & 0.9432203389830508 & 1180.0 \\
+agent-group holdout & nan & nan & nan & basin choice & 1.0903387838795733 & 1.072669178015365 & 0.017669605864208293 & 0.9173047473200613 & 0.9196018376722818 & 1306.0 \\
+agent-group holdout & nan & nan & nan & theater choice conditional on basin & 0.37500552273266025 & 0.3680792685942377 & 0.006926254138422572 & 0.9752396166134185 & 0.9784345047923323 & 1252.0 \\
+agent-group holdout & nan & nan & nan & major-ground choice conditional on theater & 0.7008366957755039 & 0.683757077910447 & 0.01707961786505685 & 0.9504289799809342 & 0.9485224022878932 & 1049.0 \\
+\hline
+\end{tabular}
+\end{document}

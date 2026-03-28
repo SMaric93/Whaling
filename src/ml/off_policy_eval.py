@@ -38,16 +38,32 @@ def estimate_propensity(
     """
     Estimate propensity scores P(treatment | covariates).
 
-    Returns array of propensity scores.
+    The caller MUST ensure that `df` has no NaN values in
+    `treatment_col` or `covariate_cols` before calling this function.
+    An internal check raises ValueError if NaNs are detected, rather
+    than silently dropping rows (which would mis-align arrays).
+
+    Returns
+    -------
+    np.ndarray
+        Propensity scores, same length as `df`.
     """
     from sklearn.linear_model import LogisticRegression
 
-    df_valid = df.dropna(subset=[treatment_col] + covariate_cols).copy()
-    X = df_valid[covariate_cols].fillna(0).values
-    t = df_valid[treatment_col].astype(int).values
+    check_cols = [treatment_col] + covariate_cols
+    n_missing = df[check_cols].isna().any(axis=1).sum()
+    if n_missing > 0:
+        raise ValueError(
+            f"estimate_propensity received {n_missing} rows with NaN in "
+            f"{check_cols}. The caller must drop these rows first to "
+            f"keep arrays aligned."
+        )
+
+    X = df[covariate_cols].values
+    t = df[treatment_col].astype(int).values
 
     if method == "logistic":
-        lr = LogisticRegression(max_iter=2000, random_state=ML_CFG.random_seed)
+        lr = LogisticRegression(max_iter=2000, random_state=ML_CFG.random_seed, n_jobs=-1)
         lr.fit(X, t)
         ps = lr.predict_proba(X)[:, 1]
     elif method == "hist_gbt":
@@ -199,11 +215,23 @@ def run_off_policy_evaluation(
     if not covariates:
         return {"error": "no_covariates"}
 
+    # Drop rows with NAs in any covariate, outcome, or treatment to keep
+    # all arrays perfectly aligned (propensity, outcome, treatment).
+    df_valid = df_valid.dropna(
+        subset=covariates + [target_col, "treatment"]
+    ).copy().reset_index(drop=True)
+
+    n = len(df_valid)
     y = df_valid[target_col].values
     treatment = df_valid["treatment"].values
 
     # ── Propensity scores ───────────────────────────────────────────
     propensity = estimate_propensity(df_valid, "treatment", covariates)
+
+    # Guard: arrays must be the same length
+    assert len(propensity) == n, (
+        f"Propensity array length ({len(propensity)}) != sample size ({n})"
+    )
 
     # ── IPW ─────────────────────────────────────────────────────────
     ipw_results = ipw_estimate(y, treatment, propensity)

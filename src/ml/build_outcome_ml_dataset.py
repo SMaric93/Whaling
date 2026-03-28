@@ -49,11 +49,47 @@ def build_outcome_ml_dataset(
 
     df = build_analysis_panel(require_akm=True, require_logbook=False)
 
+    # ── Cross-fitted type estimation ────────────────────────────────
+    # Produce held-out theta/psi via time-split cross-fitting to avoid
+    # leaking in-sample information into downstream ML models.
+    if "theta_heldout" not in df.columns:
+        try:
+            from src.reinforcement.type_estimation import run_type_estimation
+            logger.info("Running cross-fitted type estimation (time_split)...")
+            df = run_type_estimation(df, method="time_split")
+        except Exception as e:
+            logger.warning(
+                "Cross-fitted type estimation failed (%s); "
+                "theta_hat_holdout will be NaN — do NOT fall back to "
+                "in-sample theta, as that leaks information.",
+                e,
+            )
+
     # ── Standardize column names ────────────────────────────────────
+    # Rename cross-fitted columns to the ML-standard names.
+    # NOTE: We intentionally do NOT fall back to in-sample theta/psi.
+    # If cross-fitting failed, theta_hat_holdout stays NaN so the
+    # problem is visible rather than silently using leaked estimates.
     for old, new in [("theta_heldout", "theta_hat_holdout"),
                      ("psi_heldout", "psi_hat_holdout")]:
         if old in df.columns and new not in df.columns:
-            df.rename(columns={old: new}, inplace=True)
+            df[new] = df[old]
+
+    # Sanity: warn if holdout is identical to in-sample (regression guard)
+    if (
+        "theta_hat_holdout" in df.columns
+        and "theta" in df.columns
+        and df["theta_hat_holdout"].notna().sum() > 100
+    ):
+        both = df[["theta", "theta_hat_holdout"]].dropna()
+        if len(both) > 100:
+            corr = both.corr().iloc[0, 1]
+            if abs(corr - 1.0) < 1e-10:
+                logger.warning(
+                    "theta_hat_holdout is identical to in-sample theta "
+                    "(r=%.6f). Cross-fitting may not have run correctly.",
+                    corr,
+                )
 
     # ── Derived outcome variables ───────────────────────────────────
     if "log_q" not in df.columns and "q_total_index" in df.columns:

@@ -53,51 +53,20 @@ for d in [OUTPUT_DIR, TABLES_DIR, DIAGNOSTICS_DIR]:
 # =============================================================================
 
 def get_loo_connected_set(df):
-    """Find Leave-One-Out connected set for proper AKM identification."""
+    """Find Leave-One-Out connected set for proper AKM identification.
+    
+    Delegates to the KSS-correct implementation in connected_set.py which
+    uses articulation point detection (see KSS 2020, Appendix B).
+    """
+    from src.analyses.connected_set import find_connected_set, find_leave_one_out_connected_set
+    
     df_clean = df.dropna(subset=['log_q', 'captain_id', 'agent_id', 'year_out']).copy()
     
-    # Standard connected set
-    G = nx.Graph()
-    pairs = df_clean[['captain_id', 'agent_id']].drop_duplicates()
-    for _, row in pairs.iterrows():
-        G.add_edge(f'C_{row["captain_id"]}', f'A_{row["agent_id"]}')
+    # Standard connected set first
+    df_cc, cc_diag = find_connected_set(df_clean)
     
-    components = list(nx.connected_components(G))
-    largest_cc = max(components, key=len)
-    connected_captains = {n[2:] for n in largest_cc if n.startswith('C_')}
-    connected_agents = {n[2:] for n in largest_cc if n.startswith('A_')}
-    
-    df_cc = df_clean[
-        df_clean['captain_id'].isin(connected_captains) & 
-        df_clean['agent_id'].isin(connected_agents)
-    ].copy()
-    
-    # LOO pruning
-    df_loo = df_cc.copy()
-    prev_n = 0
-    while len(df_loo) != prev_n:
-        prev_n = len(df_loo)
-        pair_counts = df_loo.groupby(['captain_id', 'agent_id']).size()
-        df_loo['_pair'] = list(zip(df_loo['captain_id'], df_loo['agent_id']))
-        df_loo['_pair_count'] = df_loo['_pair'].map(pair_counts)
-        captain_n_agents = df_loo.groupby('captain_id')['agent_id'].transform('nunique')
-        agent_n_captains = df_loo.groupby('agent_id')['captain_id'].transform('nunique')
-        keep_mask = (df_loo['_pair_count'] > 1) | ((captain_n_agents > 1) & (agent_n_captains > 1))
-        df_loo = df_loo[keep_mask].copy()
-        if len(df_loo) > 0:
-            G = nx.Graph()
-            for _, row in df_loo[['captain_id', 'agent_id']].drop_duplicates().iterrows():
-                G.add_edge(f'C_{row["captain_id"]}', f'A_{row["agent_id"]}')
-            if len(G) > 0:
-                largest_cc = max(nx.connected_components(G), key=len)
-                connected_captains = {n[2:] for n in largest_cc if n.startswith('C_')}
-                connected_agents = {n[2:] for n in largest_cc if n.startswith('A_')}
-                df_loo = df_loo[
-                    df_loo['captain_id'].isin(connected_captains) & 
-                    df_loo['agent_id'].isin(connected_agents)
-                ].copy()
-    
-    df_loo = df_loo.drop(columns=['_pair', '_pair_count'], errors='ignore')
+    # LOO connected set (KSS articulation-point algorithm)
+    df_loo, loo_diag = find_leave_one_out_connected_set(df_cc)
     
     return df_loo, {
         'raw': len(df),
@@ -356,6 +325,36 @@ def run_r1_baseline(df_est):
         print(f"    Sorting share: {100*r['share_cov']:.1f}%")
         print(f"    Corr(α,γ) = {r['corr_eb']:.3f}")
     
+    # Compute trimmed and winsorized implied productivity for the no-controls spec
+    noctl = results['no_controls']
+    for fe_name, fe_df, col in [
+        ('captain', noctl['captain_fe'], 'alpha_eb'),
+        ('agent', noctl['agent_fe'], 'gamma_eb'),
+    ]:
+        vals = fe_df[col].values
+        std_full = float(np.std(vals))
+        
+        # Trimmed (5/95): remove tails
+        lo, hi = np.percentile(vals, [5, 95])
+        trimmed = vals[(vals >= lo) & (vals <= hi)]
+        std_trimmed = float(np.std(trimmed))
+        
+        # Winsorized (5/95): clip tails
+        winsorized = np.clip(vals, lo, hi)
+        std_winsorized = float(np.std(winsorized))
+        
+        noctl[f'{fe_name}_std_full'] = std_full
+        noctl[f'{fe_name}_std_trimmed_5_95'] = std_trimmed
+        noctl[f'{fe_name}_std_winsorized_5_95'] = std_winsorized
+        noctl[f'{fe_name}_implied_pct_full'] = float(100 * (np.exp(std_full) - 1))
+        noctl[f'{fe_name}_implied_pct_trimmed'] = float(100 * (np.exp(std_trimmed) - 1))
+        noctl[f'{fe_name}_implied_pct_winsorized'] = float(100 * (np.exp(std_winsorized) - 1))
+        
+        print(f"\n  {fe_name} implied productivity (±1 SD):")
+        print(f"    Full:            σ={std_full:.3f} → ±{100*(np.exp(std_full)-1):.0f}%")
+        print(f"    Trimmed(5,95):   σ={std_trimmed:.3f} → ±{100*(np.exp(std_trimmed)-1):.0f}%")
+        print(f"    Winsorized(5,95):σ={std_winsorized:.3f} → ±{100*(np.exp(std_winsorized)-1):.0f}%")
+    
     return results
 
 
@@ -455,17 +454,97 @@ def run_complementarity(df_est, akm_results):
 # =============================================================================
 
 def run_heterogeneous_effects(df):
-    """Run heterogeneous effects analysis: CATE of agent by captain skill quartile."""
+    """Run heterogeneous effects analysis: CATE of agent by captain skill quartile.
+    
+    Uses CausalForestDML (econml) when available; falls back to OLS-by-quartile.
+    """
     print('\n' + '='*70)
     print('HETEROGENEOUS EFFECTS: CATE BY CAPTAIN SKILL QUARTILE')
     print('='*70)
     
-    # Create quartiles
     df = df.copy()
     df['theta_quartile'] = pd.qcut(df['alpha_eb'], 4, labels=['Q1 (Novice)', 'Q2', 'Q3', 'Q4 (Expert)'])
     
-    results = []
+    # Try CausalForestDML first
+    try:
+        from econml.dml import CausalForestDML
+        from sklearn.ensemble import RandomForestRegressor
+        
+        print('  Using CausalForestDML (econml)...')
+        
+        # Prepare arrays
+        required = ['psi_std', 'alpha_eb', 'log_q']
+        extra_controls = [c for c in ['log_tonnage', 'log_duration'] if c in df.columns]
+        df_valid = df.dropna(subset=required + extra_controls).copy()
+        
+        Y = df_valid['log_q'].values
+        T = df_valid['psi_std'].values
+        X = df_valid[['alpha_eb']].values  # Heterogeneity dimension: captain skill
+        W = df_valid[extra_controls].values if extra_controls else None
+        
+        cf = CausalForestDML(
+            model_y=RandomForestRegressor(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1),
+            model_t=RandomForestRegressor(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1),
+            n_estimators=200,
+            min_samples_leaf=20,
+            random_state=42,
+        )
+        cf.fit(Y, T, X=X, W=W)
+        
+        # Get individual CATE predictions
+        cate_pred = cf.effect(X).flatten()
+        try:
+            cate_intervals = cf.effect_interval(X, alpha=0.05)
+            cate_lower = cate_intervals[0].flatten()
+            cate_upper = cate_intervals[1].flatten()
+        except Exception:
+            cate_lower = cate_pred - 1.96 * np.std(cate_pred)
+            cate_upper = cate_pred + 1.96 * np.std(cate_pred)
+        
+        df_valid['cate_pred'] = cate_pred
+        df_valid['cate_lower'] = cate_lower
+        df_valid['cate_upper'] = cate_upper
+        df_valid['theta_quartile'] = pd.qcut(df_valid['alpha_eb'], 4, labels=['Q1 (Novice)', 'Q2', 'Q3', 'Q4 (Expert)'])
+        
+        # Aggregate by quartile
+        results = []
+        for q in ['Q1 (Novice)', 'Q2', 'Q3', 'Q4 (Expert)']:
+            df_q = df_valid[df_valid['theta_quartile'] == q]
+            if len(df_q) > 0:
+                cate = float(df_q['cate_pred'].mean())
+                se = float(df_q['cate_pred'].std() / np.sqrt(len(df_q)))
+                # Use the CI from the forest for significance
+                mean_lower = float(df_q['cate_lower'].mean())
+                mean_upper = float(df_q['cate_upper'].mean())
+                is_sig = (mean_lower > 0) or (mean_upper < 0)
+                
+                # Approximate p-value from t-stat
+                t_stat = abs(cate / se) if se > 0 else 0
+                pval = float(2 * (1 - stats.t.cdf(t_stat, df=len(df_q)-1)))
+                stars = '***' if pval < 0.01 else '**' if pval < 0.05 else '*' if pval < 0.1 else ''
+                
+                results.append({
+                    'quartile': q,
+                    'mean_theta': float(df_q['alpha_eb'].mean()),
+                    'cate': cate,
+                    'se': se,
+                    'pval': pval,
+                    'stars': stars,
+                    'n': len(df_q),
+                    'method': 'CausalForest',
+                })
+                print(f"  {q}: CATE(ψ) = {cate:.4f}{stars} (SE = {se:.4f}), Mean θ = {df_q['alpha_eb'].mean():.2f}")
+        
+        print(f"  Method: CausalForestDML (200 trees, min_leaf=20)")
+        return pd.DataFrame(results)
     
+    except ImportError:
+        print('  econml not available, falling back to OLS-by-quartile...')
+    except Exception as e:
+        print(f'  CausalForest failed ({e}), falling back to OLS-by-quartile...')
+    
+    # Fallback: OLS by quartile
+    results = []
     for q in ['Q1 (Novice)', 'Q2', 'Q3', 'Q4 (Expert)']:
         df_q = df[df['theta_quartile'] == q].dropna(subset=['psi_std', 'log_q'])
         
@@ -477,7 +556,6 @@ def run_heterogeneous_effects(df):
             cate = float(model.params['psi_std'])
             se = float(model.bse['psi_std'])
             pval = float(model.pvalues['psi_std'])
-            
             stars = '***' if pval < 0.01 else '**' if pval < 0.05 else '*' if pval < 0.1 else ''
             
             results.append({
@@ -488,10 +566,11 @@ def run_heterogeneous_effects(df):
                 'pval': pval,
                 'stars': stars,
                 'n': len(df_q),
+                'method': 'OLS',
             })
-            
             print(f"  {q}: CATE(ψ) = {cate:.4f}{stars} (SE = {se:.4f}), Mean θ = {df_q['alpha_eb'].mean():.2f}")
     
+    print(f"  Method: OLS-by-quartile (fallback)")
     return pd.DataFrame(results)
 
 

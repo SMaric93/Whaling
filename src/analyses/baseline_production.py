@@ -283,17 +283,21 @@ def compute_kss_correction(
     """
     Compute KSS (Kline-Saggio-Sølvsten 2020) bias correction for variance components.
     
-    Uses exact leverage computation via the inverse Gram matrix:
-        P_ii = x_i' (X'X)^-1 x_i
+    Follows the KSS MATLAB reference implementation (leave_out_KSS.m, lines 448-462):
     
-    Bias corrections:
-        Bias(Var(θ)) = (1/N) * Σ P_ii_θ * σ_i^2
-        Bias(Cov(θ,ψ)) = (1/N) * Σ P_ii_θψ * σ_i^2
-        
+    1. Use the full model (with all FEs and controls) to estimate nuisance coefficients.
+    2. Partial out nuisance FEs (vessel×period, route×time, port×time) and controls
+       from the outcome: y_new = y - X_nuisance @ b_nuisance.
+    3. Re-estimate a reduced model with only captain + agent FEs on y_new.
+    4. Compute KSS leverages on the reduced design matrix, which is well-conditioned.
+    
+    This avoids the numerical instability that arises when the full design matrix
+    has more columns than observations (which makes the Gram matrix singular).
+    
     Parameters
     ----------
     results : Dict
-        Results from estimate_r1.
+        Results from estimate_r1 (which ran the full model).
     use_parallel : bool
         If True, use multithreaded leverage computation.
     n_workers : int, optional
@@ -304,98 +308,121 @@ def compute_kss_correction(
     Dict
         Bias-corrected variance estimates.
     """
-    print(f"\nComputing KSS bias correction (Exact Method, parallel={use_parallel})...")
+    print(f"\nComputing KSS bias correction (partial-out method, parallel={use_parallel})...")
     
     df = results["df"]
-    residuals = results["residuals"]
-    X = results["X"]
+    full_X = results["X"]
+    y = results["y"]
+    idx_maps = results["index_maps"]
     n = len(df)
     
-    alpha_i = df["alpha_hat"].values
-    gamma_j = df["gamma_hat"].values
+    # =========================================================================
+    # Step 1: Identify captain+agent vs nuisance columns in full design matrix
+    # =========================================================================
+    cap_n = idx_maps["captain"]["n"]
+    ag_n = idx_maps["agent"]["n"] - 1  # minus 1 for dropped reference
     
-    # 1. Compute Inverse Gram Matrix (X'X)^-1
-    # Note: With ~9000 parameters, dense inversion is feasible (~600MB RAM)
-    # We maintain sparsity for measuring X'X
-    print(f"  Computing Gram matrix (shape {X.shape[1]}x{X.shape[1]})...")
-    XtX = X.T @ X
+    ca_end = cap_n + ag_n  # End of captain+agent columns
     
-    # Using sparse linear solver to get inverse diagonal logic or dense inv
-    # Given size, dense inv is safer for stability if memory allows
-    try:
-        if sp.issparse(XtX):
-            XtX_dense = XtX.toarray()
-        else:
-            XtX_dense = XtX
-            
-        print("  Inverting Gram matrix...")
-        XtX_inv = np.linalg.inv(XtX_dense)
+    # Nuisance columns: everything after captain+agent FEs
+    nuisance_start = ca_end
+    n_nuisance = full_X.shape[1] - nuisance_start
+    
+    print(f"  Full design: {full_X.shape[1]} columns")
+    print(f"  Captain+Agent FEs: {cap_n + ag_n} columns")
+    print(f"  Nuisance (vessel×period, route×time, port×time, controls): {n_nuisance} columns")
+    
+    # =========================================================================
+    # Step 2: Partial out nuisance FEs from y
+    # Following KSS MATLAB: y = y - X(:,N+J:end) * b(N+J:end)
+    # =========================================================================
+    if n_nuisance > 0:
+        # Get the full model coefficients (already estimated in estimate_r1)
+        full_beta = lsqr(full_X, y, iter_lim=10000, atol=1e-10, btol=1e-10)[0]
         
+        # Nuisance component: X_nuisance @ b_nuisance
+        X_nuisance = full_X[:, nuisance_start:]
+        b_nuisance = full_beta[nuisance_start:]
+        nuisance_fitted = X_nuisance @ b_nuisance
+        
+        y_partialled = y - nuisance_fitted
+        print(f"  Partialled out {n_nuisance} nuisance columns from y")
+        print(f"  Var(y_original) = {np.var(y):.4f}")
+        print(f"  Var(y_partialled) = {np.var(y_partialled):.4f}")
+    else:
+        y_partialled = y
+    
+    # =========================================================================
+    # Step 3: Build reduced design matrix (captain + agent FEs only)
+    # =========================================================================
+    X_reduced = full_X[:, :ca_end]
+    print(f"  Reduced design matrix: ({n}, {ca_end})")
+    print(f"  Observations per parameter: {n / ca_end:.1f}")
+    
+    # =========================================================================
+    # Step 4: Re-estimate reduced model on partialled-out y
+    # =========================================================================
+    result_reduced = lsqr(X_reduced, y_partialled, iter_lim=10000, atol=1e-10, btol=1e-10)
+    beta_reduced = result_reduced[0]
+    residuals_reduced = y_partialled - X_reduced @ beta_reduced
+    
+    # Extract FE estimates from reduced model
+    theta_reduced = beta_reduced[:cap_n]
+    psi_reduced = np.concatenate([[0], beta_reduced[cap_n:ca_end]])
+    
+    # Map to observation level
+    captain_map = idx_maps["captain"]["map"]
+    agent_map = idx_maps["agent"]["map"]
+    alpha_i = np.array([theta_reduced[captain_map[c]] for c in df["captain_id"]])
+    psi_j_est = beta_reduced[cap_n:ca_end]
+    gamma_j = np.array([
+        psi_j_est[agent_map[a] - 1] if agent_map[a] > 0 else 0.0 
+        for a in df["agent_id"]
+    ])
+    
+    # =========================================================================
+    # Step 5: Compute KSS leverages on the reduced (well-conditioned) system
+    # =========================================================================
+    print(f"  Computing Gram matrix ({ca_end}×{ca_end})...")
+    XtX = X_reduced.T @ X_reduced
+    
+    if sp.issparse(XtX):
+        XtX_dense = XtX.toarray()
+    else:
+        XtX_dense = XtX
+    
+    # Check condition number
+    try:
+        cond = np.linalg.cond(XtX_dense)
+        print(f"  Condition number: {cond:.2e}")
+        if cond > 1e15:
+            print("  WARNING: Gram matrix is ill-conditioned, using pseudo-inverse")
+    except Exception:
+        cond = None
+    
+    print("  Inverting Gram matrix...")
+    try:
+        XtX_inv = np.linalg.inv(XtX_dense)
     except np.linalg.LinAlgError:
         print("  WARNING: Singular matrix, using pseudo-inverse...")
         XtX_inv = np.linalg.pinv(XtX_dense)
-
-    # 2. Compute Leverages (P_ii)
-    # We need P_ii for the whole system, but specifically we need to project 
-    # the bias onto the alpha and gamma components.
-    # Actually, KSS defines the bias for the quadratic form.
-    # Var(alpha) = alpha' alpha / N.
-    # Bias = tr( (X'X)^-1 * M_alpha * Sigma ) / N?
-    # Simplified KSS for random effects variance components:
-    # Var_hat(\theta) = Var(\theta) + bias.
-    # Bias correction term for observation i: B_i = P_ii * sigma_i^2 (approx)
-    # More precisely, we need the leverage corresponding to the specific FE block.
     
-    # Let's use the 'statistical leverage' approach P_ii = diag(X * (X'X)^-1 * X')
-    # Since X is n x k and (X'X)^-1 is k x k, we can compute row-wise dot products efficiently
-    # P_ii = sum( (X[i] @ XtX_inv) * X[i] )
+    # Captain and agent sub-blocks
+    X_alpha = X_reduced[:, :cap_n]
+    X_gamma = X_reduced[:, cap_n:ca_end]
     
-    # Efficient calculation:
-    # H = X @ XtX_inv
-    # P_ii = sum(H * X, axis=1)
-    
-    print("  Calculating exact leverages...")
-    # This might be memory intensive if we materialize H.
-    # Do it in chunks or utilizing sparsity.
-    
-    # Identify indices for Captain (alpha) and Agent (gamma) coefficients
-    idx_maps = results["index_maps"]
-    cap_start = 0
-    cap_end = idx_maps["captain"]["n"]
-    
-    ag_start = cap_end
-    ag_end = cap_end + idx_maps["agent"]["n"] - 1 # -1 for dropped ref
-    
-    # Captain part of X
-    X_alpha = X[:, cap_start:cap_end]
-    # Agent part of X
-    X_gamma = X[:, ag_start:ag_end]
-    
-    # Corresponding blocks of inverse matrix
-    S_alpha = XtX_inv[cap_start:cap_end, cap_start:cap_end]
-    S_gamma = XtX_inv[ag_start:ag_end, ag_start:ag_end]
-    S_cross = XtX_inv[cap_start:cap_end, ag_start:ag_end]
-    
-    # Compute leverages specifically for the variance components
-    # The bias in Var(\hat\alpha) comes from the trace of the variance of estimate
-    # Bias ≈ (1/N) * Sum( Trace(S_alpha) ? No. )
-    
-    # KSS (2020) Equation 11:
-    # Bias correction for \sigma^2_\theta = \hat{\sigma}^2_\theta - \hat{B}_\theta
-    # \hat{B}_\theta = (1/N) \sum_i \hat{\sigma}^2_i * ( x_{i,\theta}' S_{\theta\theta} x_{i,\theta} - x_{i,\theta}' S_{\theta\psi} x_{i,\psi} ... )
-    # Actually simpler: Bias is summing the "prediction variance" of that component.
-    
-    # Leverage of 'captain part' for obs i: B_ii_alpha = x_{i,alpha} @ S_alpha @ x_{i,alpha}'
-    # We can compute this efficiently: sum( (X_alpha @ S_alpha) * X_alpha, axis=1 )
+    S_alpha = XtX_inv[:cap_n, :cap_n]
+    S_gamma = XtX_inv[cap_n:ca_end, cap_n:ca_end]
+    S_cross = XtX_inv[:cap_n, cap_n:ca_end]
     
     # Convert to dense for leverage computation
-    print("  Projecting bias terms...")
-    if sp.issparse(X_alpha): 
-        X_alpha_d = X_alpha.toarray() 
-    else: 
+    print("  Calculating exact leverages...")
+    if sp.issparse(X_alpha):
+        X_alpha_d = X_alpha.toarray()
+    else:
         X_alpha_d = X_alpha
-        
-    if sp.issparse(X_gamma): 
+    
+    if sp.issparse(X_gamma):
         X_gamma_d = X_gamma.toarray()
     else:
         X_gamma_d = X_gamma
@@ -409,20 +436,20 @@ def compute_kss_correction(
             n_workers=n_workers,
         )
     else:
-        # Sequential computation
         leverage_alpha = np.sum((X_alpha_d @ S_alpha) * X_alpha_d, axis=1)
         leverage_gamma = np.sum((X_gamma_d @ S_gamma) * X_gamma_d, axis=1)
         leverage_cov = np.sum((X_alpha_d @ S_cross) * X_gamma_d, axis=1)
     
-    # Compute component biases
-    # Bias = (1/N) * Sum( leverage_component * sigma_i^2 )
-    sigma_sq = residuals ** 2
+    # =========================================================================
+    # Step 6: Compute bias corrections using reduced-model residuals
+    # =========================================================================
+    sigma_sq = residuals_reduced ** 2
     
     bias_var_alpha = np.sum(leverage_alpha * sigma_sq) / n
     bias_var_gamma = np.sum(leverage_gamma * sigma_sq) / n
     bias_cov = np.sum(leverage_cov * sigma_sq) / n
     
-    # Plug-in estimates
+    # Plugin estimates (from partialled-out model)
     var_alpha_plugin = np.var(alpha_i)
     var_gamma_plugin = np.var(gamma_j)
     cov_plugin = np.cov(alpha_i, gamma_j)[0, 1]
@@ -432,6 +459,7 @@ def compute_kss_correction(
     var_gamma_kss = max(0, var_gamma_plugin - bias_var_gamma)
     cov_kss = cov_plugin - bias_cov
     
+    print(f"\n  --- KSS Results (partial-out method) ---")
     print(f"  Var(α): Plugin={var_alpha_plugin:.4f} - Bias={bias_var_alpha:.4f} = {var_alpha_kss:.4f}")
     print(f"  Var(γ): Plugin={var_gamma_plugin:.4f} - Bias={bias_var_gamma:.4f} = {var_gamma_kss:.4f}")
     print(f"  Cov(α,γ): Plugin={cov_plugin:.4f} - Bias={bias_cov:.4f} = {cov_kss:.4f}")
@@ -446,6 +474,9 @@ def compute_kss_correction(
         "bias_var_alpha": bias_var_alpha,
         "bias_var_gamma": bias_var_gamma,
         "bias_cov": bias_cov,
+        "n_nuisance_partialled": n_nuisance,
+        "reduced_design_shape": (n, ca_end),
+        "condition_number": cond,
     }
 
 

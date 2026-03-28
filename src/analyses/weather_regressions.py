@@ -303,7 +303,7 @@ def format_results(results: Dict) -> str:
 # Main Regression Suite
 # =============================================================================
 
-def run_weather_regressions(df: pd.DataFrame) -> Dict[str, Dict]:
+def run_weather_regressions(df: Optional[pd.DataFrame] = None) -> Dict[str, Dict]:
     """
     Run suite of weather-controlled regressions.
     
@@ -321,6 +321,10 @@ def run_weather_regressions(df: pd.DataFrame) -> Dict[str, Dict]:
     print("\n" + "=" * 60)
     print("WEATHER-CONTROLLED PRODUCTIVITY REGRESSIONS")
     print("=" * 60)
+
+    if df is None:
+        loaded = load_analysis_data_with_weather()
+        df, _ = prepare_regression_sample(loaded)
     
     results = {}
     

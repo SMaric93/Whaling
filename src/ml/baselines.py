@@ -99,6 +99,7 @@ def fit_logistic_baseline(
         multi_class=multi_class,
         solver="lbfgs",
         random_state=ML_CFG.random_seed,
+        n_jobs=-1,
     )
 
     t0 = time.time()

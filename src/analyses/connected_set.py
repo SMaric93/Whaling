@@ -83,9 +83,28 @@ def find_leave_one_out_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
     """
     Find leave-one-out connected set for KSS estimation.
     
-    An observation is in the LOO set if removing it does not disconnect
-    the captain-agent graph. This requires that each edge appears at
-    least twice OR both endpoints have multiple edges.
+    Implements the algorithm from KSS (2020) Appendix B, matching the
+    reference MATLAB code ``pruning_unbal_v3.m`` from the LeaveOutTwoWay
+    package (Saggio, 2020).
+    
+    The LOO connected set is defined as the largest subset of observations
+    such that removing the **entire history of any single captain (worker)**
+    does not disconnect the bipartite graph. This is a vertex-connectivity
+    condition on the movers-only subgraph.
+    
+    Algorithm
+    ---------
+    1. Identify movers (captains observed with 2+ distinct agents).
+    2. Build the bipartite graph of unique (mover, agent) pairs.
+    3. Find articulation points (cut vertices) via biconnected component
+       decomposition.
+    4. Identify captains that are articulation points — their removal
+       would disconnect the graph.
+    5. Drop **all observations** of those captains.
+    6. Re-find the largest connected component.
+    7. Iterate until no articulation-point captains remain.
+    8. Drop stayers (single-agent captains) with only 1 observation
+       (not identified in the LOO sense).
     
     Parameters
     ----------
@@ -104,43 +123,67 @@ def find_leave_one_out_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
     df_loo = df.copy()
     initial_n = len(df_loo)
     
-    # Count articulation edges (pairs appearing only once)
-    initial_pairs = df_loo.groupby(["captain_id", "agent_id"]).size()
-    single_pairs = (initial_pairs == 1).sum()
-    total_pairs = len(initial_pairs)
+    # Initial mobility summary
+    captain_agent_counts = df_loo.groupby("captain_id")["agent_id"].nunique()
+    n_movers_initial = (captain_agent_counts >= 2).sum()
+    n_stayers_initial = (captain_agent_counts == 1).sum()
     
-    print(f"Initial captain-agent pairs: {total_pairs:,}")
-    print(f"Single-appearance pairs (articulation edges): {single_pairs:,} ({100*single_pairs/total_pairs:.1f}%)")
+    print(f"Initial sample: {initial_n:,} voyages")
+    print(f"  Movers (2+ agents): {n_movers_initial:,} captains")
+    print(f"  Stayers (1 agent):  {n_stayers_initial:,} captains")
     
-    # Iteratively prune until stable
-    prev_n = 0
+    # Iteratively prune articulation-point captains until stable
+    n_bad_captains = 1  # sentinel to enter loop
     iteration = 0
+    total_pruned = 0
     
-    while len(df_loo) != prev_n:
-        prev_n = len(df_loo)
+    while n_bad_captains >= 1:
         iteration += 1
         
-        # Pair counts
-        pair_counts = df_loo.groupby(["captain_id", "agent_id"]).size()
-        df_loo["_pair"] = list(zip(df_loo["captain_id"], df_loo["agent_id"]))
-        df_loo["_pair_count"] = df_loo["_pair"].map(pair_counts)
+        # Step 1: Identify movers (captains with 2+ distinct agents)
+        captain_agents = df_loo.groupby("captain_id")["agent_id"].nunique()
+        mover_captains = set(captain_agents[captain_agents >= 2].index)
+        df_movers = df_loo[df_loo["captain_id"].isin(mover_captains)]
         
-        # Captain and agent connectivity
-        captain_n_agents = df_loo.groupby("captain_id")["agent_id"].transform("nunique")
-        agent_n_captains = df_loo.groupby("agent_id")["captain_id"].transform("nunique")
+        if len(df_movers) == 0:
+            print(f"  Iteration {iteration}: No movers remain, stopping.")
+            break
         
-        # Keep if: pair appears >1 OR (captain has >1 agent AND agent has >1 captain)
-        keep_mask = (df_loo["_pair_count"] > 1) | ((captain_n_agents > 1) & (agent_n_captains > 1))
-        df_loo = df_loo[keep_mask].copy()
+        # Step 2: Build bipartite graph of unique (mover, agent) pairs
+        # Nodes: captain IDs (prefixed C_) and agent IDs (prefixed A_)
+        unique_pairs = df_movers[["captain_id", "agent_id"]].drop_duplicates()
         
-        # Ensure still in largest connected component
+        G = nx.Graph()
+        for _, row in unique_pairs.iterrows():
+            G.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
+        
+        # Step 3: Find articulation points (cut vertices)
+        artic_points = set(nx.articulation_points(G))
+        
+        # Step 4: Identify captains that are articulation points
+        bad_captains = {node[2:] for node in artic_points if node.startswith("C_")}
+        n_bad_captains = len(bad_captains)
+        
+        print(f"  Iteration {iteration}: {n_bad_captains} articulation-point captains found")
+        
+        if n_bad_captains == 0:
+            break
+        
+        total_pruned += n_bad_captains
+        
+        # Step 5: Drop ALL observations of bad captains
+        df_loo = df_loo[~df_loo["captain_id"].isin(bad_captains)].copy()
+        
+        # Step 6: Re-find largest connected component
         if len(df_loo) > 0:
-            G = nx.Graph()
-            for _, row in df_loo[["captain_id", "agent_id"]].drop_duplicates().iterrows():
-                G.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
+            pairs_remaining = df_loo[["captain_id", "agent_id"]].drop_duplicates()
+            G_remaining = nx.Graph()
+            for _, row in pairs_remaining.iterrows():
+                G_remaining.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
             
-            if len(G) > 0:
-                largest_cc = max(nx.connected_components(G), key=len)
+            if len(G_remaining) > 0:
+                # Reset IDs and find largest connected component
+                largest_cc = max(nx.connected_components(G_remaining), key=len)
                 connected_captains = {n[2:] for n in largest_cc if n.startswith("C_")}
                 connected_agents = {n[2:] for n in largest_cc if n.startswith("A_")}
                 df_loo = df_loo[
@@ -148,8 +191,16 @@ def find_leave_one_out_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
                     df_loo["agent_id"].isin(connected_agents)
                 ].copy()
     
-    # Clean up
-    df_loo = df_loo.drop(columns=["_pair", "_pair_count"], errors="ignore")
+    # Step 8: Drop stayers with only 1 observation (not identified)
+    obs_per_captain = df_loo.groupby("captain_id").size()
+    captain_agents_final = df_loo.groupby("captain_id")["agent_id"].nunique()
+    stayers = set(captain_agents_final[captain_agents_final == 1].index)
+    single_obs_stayers = set(obs_per_captain[obs_per_captain <= 1].index) & stayers
+    
+    if single_obs_stayers:
+        n_dropped_stayers = len(single_obs_stayers)
+        df_loo = df_loo[~df_loo["captain_id"].isin(single_obs_stayers)].copy()
+        print(f"  Dropped {n_dropped_stayers} single-observation stayers")
     
     # Diagnostics
     diagnostics = {
@@ -159,13 +210,15 @@ def find_leave_one_out_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
         "loo_captains": df_loo["captain_id"].nunique(),
         "loo_agents": df_loo["agent_id"].nunique(),
         "coverage": len(df_loo) / initial_n if initial_n > 0 else 0,
-        "initial_pairs": total_pairs,
-        "articulation_edges": single_pairs,
-        "articulation_rate": single_pairs / total_pairs if total_pairs > 0 else 0,
+        "n_movers_initial": int(n_movers_initial),
+        "n_stayers_initial": int(n_stayers_initial),
+        "articulation_captains_pruned": total_pruned,
+        "single_obs_stayers_dropped": len(single_obs_stayers) if single_obs_stayers else 0,
     }
     
-    print(f"\nLOO pruning complete:")
+    print(f"\nLOO pruning complete (KSS articulation-point algorithm):")
     print(f"  Iterations: {diagnostics['iterations']}")
+    print(f"  Articulation-point captains removed: {diagnostics['articulation_captains_pruned']}")
     print(f"  Voyages: {diagnostics['loo_voyages']:,} / {diagnostics['initial_voyages']:,} ({100*diagnostics['coverage']:.1f}%)")
     print(f"  Captains: {diagnostics['loo_captains']:,}")
     print(f"  Agents: {diagnostics['loo_agents']:,}")
@@ -348,13 +401,14 @@ def save_diagnostics_report(diagnostics: Dict, output_path: str) -> None:
         f.write(f"- Agents in largest: {cc['largest_component_agents']:,} ({100*cc['coverage_agents']:.1f}%)\n")
         f.write(f"- Voyages in largest: {cc['voyages_in_connected_set']:,} ({100*cc['coverage_voyages']:.1f}%)\n\n")
         
-        f.write("## Leave-One-Out Set (KSS)\n")
+        f.write("## Leave-One-Out Set (KSS Articulation-Point Algorithm)\n")
         loo = diagnostics["loo_set"]
         f.write(f"- Iterations: {loo['iterations']}\n")
         f.write(f"- Voyages: {loo['loo_voyages']:,} ({100*loo['coverage']:.1f}%)\n")
         f.write(f"- Captains: {loo['loo_captains']:,}\n")
         f.write(f"- Agents: {loo['loo_agents']:,}\n")
-        f.write(f"- Articulation edges: {loo['articulation_edges']:,} ({100*loo['articulation_rate']:.1f}%)\n\n")
+        f.write(f"- Articulation-point captains pruned: {loo.get('articulation_captains_pruned', 'N/A')}\n")
+        f.write(f"- Single-obs stayers dropped: {loo.get('single_obs_stayers_dropped', 'N/A')}\n\n")
         
         f.write("## Mobility Diagnostics\n")
         mob = diagnostics["mobility"]

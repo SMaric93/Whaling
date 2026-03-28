@@ -5,7 +5,7 @@ Generates all publication-ready outputs in both MD and TEX formats.
 
 Outputs:
     - Main text tables (Tables 1-6)
-    - Appendix tables (Tables A1-A8)
+    - Appendix tables (Tables A1-A9)
     - All tables combined (all_tables.md, all_tables.tex)
     - Figures (PNG format)
     - Summary documents
@@ -69,7 +69,7 @@ def generate_appendix_tables_md() -> list:
     from src.analyses.paper_tables import (
         generate_table_a1, generate_table_a2, generate_table_a3,
         generate_table_a4, generate_table_a5, generate_table_a6,
-        generate_table_a7, generate_table_a8,
+        generate_table_a7, generate_table_a8, generate_table_a9,
     )
     
     logger.info("Generating appendix tables (MD)...")
@@ -85,6 +85,7 @@ def generate_appendix_tables_md() -> list:
         ('table_a6.md', generate_table_a6, "Optimal Foraging Stopping Rule"),
         ('table_a7.md', generate_table_a7, "Weather and Mechanism Tests"),
         ('table_a8.md', generate_table_a8, "Context-Dependent Matching"),
+        ('table_a9.md', generate_table_a9, "First Mate Effects"),
     ]
     
     for filename, generator, title in table_generators:
@@ -222,6 +223,17 @@ def run_output(include_figures: bool = True) -> dict:
     logger.info("=" * 60)
     logger.info("STAGE 5: WRITE OUTPUT (MD + TEX)")
     logger.info("=" * 60)
+    
+    # Load dynamic table values from analysis results
+    try:
+        from src.analyses.paper_tables import try_load_dynamic_tables
+        loaded = try_load_dynamic_tables()
+        if loaded:
+            logger.info("Loaded dynamic table values from analysis_results.json")
+        else:
+            logger.info("Using hardcoded table values (no analysis_results.json found)")
+    except Exception as e:
+        logger.warning(f"Dynamic table loading failed, using defaults: {e}")
     
     ensure_output_dirs()
     

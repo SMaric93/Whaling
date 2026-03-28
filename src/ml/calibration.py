@@ -98,7 +98,7 @@ def calibration_metrics(
     # Calibration slope & intercept via logistic regression
     try:
         from sklearn.linear_model import LogisticRegression
-        lr = LogisticRegression(penalty=None, max_iter=1000)
+        lr = LogisticRegression(penalty=None, max_iter=1000, n_jobs=-1)
         lr.fit(y_prob.reshape(-1, 1), y_true)
         results["calibration_slope"] = float(lr.coef_[0, 0])
         results["calibration_intercept"] = float(lr.intercept_[0])

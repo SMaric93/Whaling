@@ -239,7 +239,9 @@ def generate_connected_set_diagnostics(
             f.write(f"- **Voyages**: {loo.get('loo_voyages', 'N/A'):,} ({100*loo.get('coverage', 0):.1f}%)\n")
             f.write(f"- **Captains**: {loo.get('loo_captains', 'N/A'):,}\n")
             f.write(f"- **Agents**: {loo.get('loo_agents', 'N/A'):,}\n")
-            f.write(f"- **Articulation edges**: {loo.get('articulation_edges', 'N/A'):,} ({100*loo.get('articulation_rate', 0):.1f}%)\n\n")
+            f.write(f"- **Iterations**: {loo.get('iterations', 'N/A')}\n")
+            f.write(f"- **Articulation-point captains pruned**: {loo.get('articulation_captains_pruned', loo.get('articulation_edges', 'N/A'))}\n")
+            f.write(f"- **Single-obs stayers dropped**: {loo.get('single_obs_stayers_dropped', 'N/A')}\n\n")
         
         # Mobility
         if "mobility" in diagnostics:

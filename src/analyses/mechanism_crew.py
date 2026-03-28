@@ -644,9 +644,20 @@ def run_full_mechanism_analysis(df: pd.DataFrame, save_outputs: bool = True) -> 
     return results
 
 
+def run_crew_mechanism_analysis(
+    df: pd.DataFrame = None,
+    save_outputs: bool = True,
+) -> Dict:
+    """Backward-compatible wrapper for the stage runner."""
+    if df is None:
+        from .data_loader import prepare_analysis_sample
+
+        df = prepare_analysis_sample()
+    return run_full_mechanism_analysis(df, save_outputs=save_outputs)
+
+
 if __name__ == "__main__":
     from .data_loader import prepare_analysis_sample
     
     df = prepare_analysis_sample()
     results = run_full_mechanism_analysis(df)
-

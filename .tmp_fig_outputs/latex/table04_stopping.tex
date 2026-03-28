@@ -1,0 +1,33 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\begin{document}
+\section*{Table 4. State-Contingent Stopping Rules}
+\begin{tabular}{lrrrrrrrr}
+\hline
+panel & row_label & model & coefficient & std_error & p_value & marginal_effect & n_obs & note \\
+\hline
+Panel A & psi\_hat & Exported logit hazard & -0.0078855022694269 & 0.0049352125419012 & 0.1100866073629505 & -0.0014919032901444574 & 159457 & Average-slope marginal effect proxy uses p(1-p) from the exported survival sample. \\
+Panel A & negative signal & Exported logit hazard & -1.0313524559555964 & 0.0513172162502675 & 7.746271718345068e-90 & -0.19512747188018356 & 159457 & Average-slope marginal effect proxy uses p(1-p) from the exported survival sample. \\
+Panel A & psi\_hat × negative signal & Exported logit hazard & 0.0588737241710762 & 0.0091632402708031 & 1.3187846427705366e-10 & 0.011138656713654008 & 159457 & Average-slope marginal effect proxy uses p(1-p) from the exported survival sample. \\
+Panel A & positive signal & Exported logit hazard & -0.3957731615324674 & 0.0577865524146448 & 7.443041094927459e-12 & -0.0748785887907778 & 159457 & Average-slope marginal effect proxy uses p(1-p) from the exported survival sample. \\
+Panel A & psi\_hat × positive signal & Exported logit hazard & -0.0394680545632027 & 0.0108670999724946 & 0.0002813587903516 & -0.007467187053732536 & 159457 & Average-slope marginal effect proxy uses p(1-p) from the exported survival sample. \\
+Panel A & psi\_hat & Clustered LPM supplement & 0.007605975470345467 & 0.014098693088354899 & 0.5895550807554882 & 0.007605975470345467 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & negative signal & Clustered LPM supplement & 0.08075471021962669 & 0.01632205659959471 & 7.514112893753665e-07 & 0.08075471021962669 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & psi\_hat × negative signal & Clustered LPM supplement & 0.011111412871500784 & 0.030084686146066356 & 0.7118759271363986 & 0.011111412871500784 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & positive signal & Clustered LPM supplement & -0.0576443176754469 & 0.010899076550633864 & 1.2304230863815981e-07 & -0.0576443176754469 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & psi\_hat × positive signal & Clustered LPM supplement & -0.034901057778388665 & 0.021507110292475734 & 0.104638934972337 & -0.034901057778388665 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & scarcity & Clustered LPM supplement & -0.020666666497273705 & 0.00632842251843082 & 0.0010919769898567282 & -0.020666666497273705 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & theta\_hat & Clustered LPM supplement & -0.005835063061180289 & 0.0104395378404355 & 0.5762034681222368 & -0.005835063061180289 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel A & experience & Clustered LPM supplement & -7.785138594580067e-05 & 0.0022173544912639427 & 0.9719920023970126 & -7.785138594580067e-05 & 24403 & Linear-probability fallback used because statsmodels logit is not installed in the repository venv. \\
+Panel B & consecutive empty days & Clustered LPM robustness & 2.1683718418072498e-05 & 2.6267774363611165e-05 & 0.4090948974627169 & 2.1683718418072498e-05 & 266729 & Day-level robustness from the action dataset. \\
+Panel B & days since last success & Clustered LPM robustness & -1.3016770240530618e-05 & 4.8678835398223915e-05 & 0.7891604141367089 & -1.3016770240530618e-05 & 243598 & Day-level robustness from the action dataset. \\
+Panel B & barren-search-state indicator & Clustered LPM robustness & 0.003145797806247757 & 0.005317743374003986 & 0.5541410418203385 & 0.003145797806247757 & 266729 & Day-level robustness from the action dataset. \\
+Panel B & leave-one-out local quality & Clustered LPM robustness & -9.854088013888775e-07 & 1.2657982031387603e-06 & 0.43628133643269384 & -9.854088013888775e-07 & 161693 & Day-level robustness from the action dataset. \\
+Panel B & recent failure streak & Clustered LPM robustness & 0.0027104201175763803 & 0.0046929729064251295 & 0.5635688910300024 & 0.0027104201175763803 & 266729 & Day-level robustness from the action dataset. \\
+Panel C & active search & Clustered LPM placebo & 0.003145797806247757 & 0.005317743374003986 & 0.5541410418203385 & 0.003145797806247757 & 266729 & Day-level placebo sample. \\
+Panel C & transit & Clustered LPM placebo & nan & nan & nan & nan & 0 & Existing next-round transit exit rate = 0.625. \\
+Panel C & homebound & Clustered LPM placebo & -0.016130141822140367 & 0.021677710758631438 & 0.45682275359473523 & -0.016130141822140367 & 30108 & Day-level placebo sample. \\
+Panel C & productive/exploitation state & Clustered LPM placebo & 1.3010426069826053e-17 & 1.4441599803962095e-18 & 2.0795858442711354e-19 & 1.3010426069826053e-17 & 51587 & Day-level placebo sample. \\
+\hline
+\end{tabular}
+\end{document}

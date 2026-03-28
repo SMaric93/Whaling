@@ -30,14 +30,21 @@ from typing import Dict, Any, List
 
 import os
 
-# Must set BEFORE any library loads to prevent dual-OpenMP segfault
-# (Intel MKL + LLVM libomp conflict on macOS/conda Python 3.11)
+# Prevent dual-OpenMP segfault (Intel MKL + LLVM libomp on macOS/conda).
+# Setting KMP_DUPLICATE_LIB_OK is the minimal fix — do NOT cap thread counts
+# to 1, as that cripples BLAS performance for all sklearn/scipy operations.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "8"  # NumExpr is safe, keep parallel
+
+# Let BLAS/OpenMP use a reasonable number of threads.
+# sklearn's n_jobs=-1 handles process-level parallelism via joblib;
+# within each process, BLAS threads handle matrix ops.
+import multiprocessing as _mp
+_n_cores = str(min(_mp.cpu_count(), 8))  # Cap at 8 to avoid oversubscription
+os.environ.setdefault("OMP_NUM_THREADS", _n_cores)
+os.environ.setdefault("MKL_NUM_THREADS", _n_cores)
+os.environ.setdefault("OPENBLAS_NUM_THREADS", _n_cores)
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", _n_cores)
+os.environ.setdefault("NUMEXPR_NUM_THREADS", _n_cores)
 
 try:
     import threadpoolctl

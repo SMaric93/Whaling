@@ -213,6 +213,14 @@ def download_aowv_data(
     return voyages, crews, logbooks
 
 
+def download_all_aowv_data(
+    manifest: Optional[ManifestManager] = None,
+    force: bool = False,
+) -> Tuple[List[Path], List[Path], List[Path]]:
+    """Backward-compatible wrapper for the legacy pipeline API."""
+    return download_aowv_data(manifest=manifest, force=force)
+
+
 if __name__ == "__main__":
     import argparse
     

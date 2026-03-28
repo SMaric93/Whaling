@@ -98,22 +98,27 @@ def build_embeddings(
     # ── Cluster motifs ──────────────────────────────────────────────
     from sklearn.cluster import KMeans
 
-    best_k = None
-    best_silhouette = -1
-    for k in range(3, 8):
+    # Use inertia elbow (O(n)) instead of silhouette (O(n²)) to pick k.
+    k_range = list(range(3, 8))
+    inertias = []
+    km_models = {}
+    for k in k_range:
         km = KMeans(n_clusters=k, random_state=ML_CFG.random_seed, n_init=10)
-        cluster_labels = km.fit_predict(embeddings)
-        try:
-            from sklearn.metrics import silhouette_score
-            sil = silhouette_score(embeddings, cluster_labels)
-            if sil > best_silhouette:
-                best_silhouette = sil
-                best_k = k
-        except Exception:
-            best_k = k if best_k is None else best_k
+        km.fit(embeddings)
+        inertias.append(km.inertia_)
+        km_models[k] = km
 
-    km_best = KMeans(n_clusters=best_k, random_state=ML_CFG.random_seed, n_init=10)
-    motif_labels = km_best.fit_predict(embeddings)
+    # Elbow = k with largest inertia drop (second derivative)
+    if len(inertias) >= 3:
+        drops = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
+        second_diff = [drops[i] - drops[i + 1] for i in range(len(drops) - 1)]
+        best_k = k_range[np.argmax(second_diff) + 1]
+    else:
+        best_k = k_range[0]
+    logger.info("Elbow selection: best k=%d (inertias: %s)", best_k,
+                [f"{x:.0f}" for x in inertias])
+
+    motif_labels = km_models[best_k].predict(embeddings)
 
     df_result = df.copy()
     for i in range(n_components):

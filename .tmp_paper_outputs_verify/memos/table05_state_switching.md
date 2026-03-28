@@ -1,0 +1,8 @@
+# table05_state_switching
+
+Sample: Panel A uses the state dataset merged to connected-set voyage types; Panels B and C use action-level switcher observations merged to connected-set voyage histories.. Unit: State transition in Panel A, action-day in Panel B, and voyage-relative event time in Panel C.. Types: theta_hat and psi_hat are connected-set AKM estimates merged at the voyage level; switch direction is defined using the change in voyage-level psi across agents.. FE: Captain fixed effects in Panel B; Panels A and C are transition and event-time summaries without additional fixed effects.. Clustering: Captain clustering throughout.. Controls: Scarcity, theta_hat, novice status, captain experience, and within-ground duration where available.. Interpretation: The switching evidence in this repository is about policy changes under uncertainty: higher-psi organizations alter how captains leave barren states and how state transitions evolve after an agent change.. Caution: If the latent-state model cannot be fit in the current environment, the paper layer falls back to deterministic movement-based states and records that fact in the table notes..
+
+Implementation notes:
+- State labels rebuilt with the repository's GMM latent-state model and rule-based labeler.
+- Panel B uses a first-switch design: captains are tagged as post-switch from the first observed agent change onward, with higher- and lower-psi switch directions defined relative to the previous agent.
+- Panel C is a within-captain voyage-event summary around the first switch and uses the voyage-level barren-state exit rate when available.

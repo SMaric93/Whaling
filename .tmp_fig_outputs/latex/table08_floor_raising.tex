@@ -1,0 +1,30 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\begin{document}
+\section*{Table 8. Floor-Raising and Downside-Risk Reduction}
+\begin{tabular}{lrrrrrrrrr}
+\hline
+panel & row_label & marginal_effect_of_high_psi & std_error & p_value & baseline_prevalence & n_obs & note & marginal_effect_of_psi & effect_of_psi \\
+\hline
+Panel A & bottom decile output & -0.03263096624332581 & 0.008709635914378195 & 0.0001792931401666776 & 0.20825801541242508 & 6510 & High-psi is defined as above-median agent capability in the connected voyage sample. & nan & nan \\
+Panel A & bottom 5\% output & 0.044520436225128086 & 0.006339542506156218 & 2.176872672869922e-12 & 0.11635429549995244 & 6510 & High-psi is defined as above-median agent capability in the connected voyage sample. & nan & nan \\
+Panel A & catastrophic voyage & 0.005579334295702275 & 0.0026335719054862597 & 0.03412914032276119 & 0.011321472742840833 & 6510 & High-psi is defined as above-median agent capability in the connected voyage sample. & nan & nan \\
+Panel A & long dry spell & 0.008183869561059112 & 0.003158374830684022 & 0.009565168476607116 & 0.011702026448482542 & 6510 & High-psi is defined as above-median agent capability in the connected voyage sample. & nan & nan \\
+Panel A & expected shortfall proxy & 1.4426826237229498 & 1.0074460372823284 & 0.15213816880495673 & 0.20245457140138903 & 6510 & High-psi is defined as above-median agent capability in the connected voyage sample. & nan & nan \\
+Panel B & novice & nan & 0.014557610118555327 & 2.8705160932256328e-06 & nan & 3656 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.06812777760911373 & nan \\
+Panel B & expert & nan & 0.018752338637963658 & 5.67140308784608e-11 & nan & 2854 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.12286816022986004 & nan \\
+Panel B & low theta & nan & 0.01799917047039475 & 1.5018417778288232e-12 & nan & 2984 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.12733187812654995 & nan \\
+Panel B & high theta & nan & 0.019469252226733402 & 0.0009695285706731086 & nan & 3526 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.06423340485634306 & nan \\
+Panel B & high prior volatility & nan & 0.023235236775365625 & 1.064202875494256e-06 & nan & 1886 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.11337353073881015 & nan \\
+Panel B & low prior volatility & nan & 0.02381822640586747 & 6.554110194947118e-08 & nan & 1790 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.1286895096069607 & nan \\
+Panel B & sparse grounds & nan & 0.016644411167283924 & 3.518519195387139e-15 & nan & 3264 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.1310079574329004 & nan \\
+Panel B & rich grounds & nan & 0.01293581162960513 & 0.0001444695404820349 & nan & 3246 & Subgroup effect estimated on bottom-decile risk, the focal downside-risk outcome. & -0.04916110691479437 & nan \\
+Panel C & P10 & nan & 14.417848574210385 & 4.943586081076034e-07 & nan & 10511 & Effect is the high-psi minus low-psi quantile gap with nonparametric bootstrap uncertainty. & nan & 72.5 \\
+Panel C & P25 & nan & 28.692357011686507 & 5.554250517041491e-85 & nan & 10511 & Effect is the high-psi minus low-psi quantile gap with nonparametric bootstrap uncertainty. & nan & 560.5 \\
+Panel C & P50 & nan & 19.460628055123024 & 0.0 & nan & 10511 & Effect is the high-psi minus low-psi quantile gap with nonparametric bootstrap uncertainty. & nan & 1214.245 \\
+Panel C & P75 & nan & 39.47032526151766 & 2.5660033838813982e-182 & nan & 10511 & Effect is the high-psi minus low-psi quantile gap with nonparametric bootstrap uncertainty. & nan & 1136.5 \\
+Panel C & P90 & nan & 38.00804020873546 & 3.1333849742952244e-139 & nan & 10511 & Effect is the high-psi minus low-psi quantile gap with nonparametric bootstrap uncertainty. & nan & 954.6999999999989 \\
+Panel C & within-captain variance & nan & 30315.17356812599 & 1.382053617517205e-19 & nan & 6510 & Estimated as the psi slope in a regression for squared deviation from the captain-specific mean output. & nan & 274464.45820499514 \\
+\hline
+\end{tabular}
+\end{document}

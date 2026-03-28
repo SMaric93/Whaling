@@ -229,8 +229,8 @@ def _compute_prediction_grids(model, df, features, *, theta_idx, psi_idx, scar_i
 
     for scarcity_label, scarcity_pctile in [("sparse", 25), ("medium", 50), ("rich", 75)]:
         theta_range = np.linspace(
-            df.iloc[:, theta_idx if theta_idx is not None else 0].quantile(0.05) if theta_idx is not None else 0,
-            df.iloc[:, theta_idx if theta_idx is not None else 0].quantile(0.95) if theta_idx is not None else 1,
+            df[features[theta_idx]].quantile(0.05) if theta_idx is not None else 0,
+            df[features[theta_idx]].quantile(0.95) if theta_idx is not None else 1,
             n_grid,
         ) if theta_idx is not None else np.linspace(0, 1, n_grid)
 

@@ -32,8 +32,8 @@ TABLE_1_DATA = {
         {"Variable": "Lévy Exponent (μ)", "Mean": 1.84, "SD": 0.31, "P25": 1.62, "P75": 2.10, "N": 3809},
     ],
     "Fixed Effects Units": [
-        {"Variable": "Unique Captains", "Mean": 1204, "SD": "-", "P25": "-", "P75": "-", "N": "-"},
-        {"Variable": "Agent Groups (Port × Decade)", "Mean": 251, "SD": "-", "P25": "-", "P75": "-", "N": "-"},
+        {"Variable": "Unique Captains", "Mean": 2903, "SD": "-", "P25": "-", "P75": "-", "N": "-"},
+        {"Variable": "Unique Agents", "Mean": 888, "SD": "-", "P25": "-", "P75": "-", "N": "-"},
     ],
     "Environment": [
         {"Variable": "Sparse Ground Share", "Mean": "39.1%", "SD": "-", "P25": "-", "P75": "-", "N": 1895},
@@ -48,11 +48,11 @@ TABLE_2_DATA = [
 ]
 
 TABLE_3_DATA = [
-    {"Variance Component": "Captain Skill (θ)", "Plug-in Estimate": 0.452, "KSS Corrected": 0.380, "Share of Total": "28.4%", "Implied Productivity (±1σ)": "~86%"},
-    {"Variance Component": "Org. Environment (ψ)", "Plug-in Estimate": 0.841, "KSS Corrected": 0.620, "Share of Total": "46.3%", "Implied Productivity (±1σ)": "~120%"},
-    {"Variance Component": "Sorting Covariance", "Plug-in Estimate": 0.055, "KSS Corrected": -0.010, "Share of Total": "-0.7%", "Implied Productivity (±1σ)": "-"},
-    {"Variance Component": "Residual (ε)", "Plug-in Estimate": 0.280, "KSS Corrected": 0.350, "Share of Total": "26.1%", "Implied Productivity (±1σ)": "-"},
-    {"Variance Component": "Total", "Plug-in Estimate": 1.628, "KSS Corrected": 1.340, "Share of Total": "100.0%", "Implied Productivity (±1σ)": ""},
+    {"Variance Component": "Captain Skill (θ)", "Plug-in Estimate": 2.833, "EB Corrected": 1.667, "Share of Total": "38.4%", "Implied Productivity (±1σ)": "~251%"},
+    {"Variance Component": "Org. Environment (ψ)", "Plug-in Estimate": 2.324, "EB Corrected": 1.964, "Share of Total": "45.2%", "Implied Productivity (±1σ)": "~293%"},
+    {"Variance Component": "Sorting 2Cov(θ,ψ)", "Plug-in Estimate": 0.866, "EB Corrected": 0.711, "Share of Total": "16.4%", "Implied Productivity (±1σ)": "-"},
+    {"Variance Component": "Corr(θ,ψ)", "Plug-in Estimate": 0.169, "EB Corrected": 0.197, "Share of Total": "-", "Implied Productivity (±1σ)": "PAM"},
+    {"Variance Component": "Total (Var(y))", "Plug-in Estimate": "-", "EB Corrected": 4.342, "Share of Total": "100.0%", "Implied Productivity (±1σ)": ""},
 ]
 
 TABLE_4_DATA = {
@@ -98,11 +98,9 @@ TABLE_7_DATA = [
 # =============================================================================
 
 TABLE_A1_DATA = [
-    {"Grouping Unit": "Port × Decade (Main)", "Number of Groups": 251, "Max Component Size": "99.8%", "Var(ψ) Share": "46.3%", "Implied Productivity": "~120%"},
-    {"Grouping Unit": "Port × 5-Year Block", "Number of Groups": 412, "Max Component Size": "96.5%", "Var(ψ) Share": "48.1%", "Implied Productivity": "~126%"},
-    {"Grouping Unit": "Network Cluster (Louvain)", "Number of Groups": 180, "Max Component Size": "99.0%", "Var(ψ) Share": "44.2%", "Implied Productivity": "~115%"},
-    {"Grouping Unit": "Agent Size Decile", "Number of Groups": 10, "Max Component Size": "100%", "Var(ψ) Share": "35.5%", "Implied Productivity": "~95%"},
-    {"Grouping Unit": "Individual Agent (Biased)", "Number of Groups": 777, "Max Component Size": "12.4%", "Var(ψ) Share": "797%", "Implied Productivity": "Explosive"},
+    {"Specification": "No Controls", "R²": 0.667, "Captain Share": "38.4%", "Agent Share": "45.2%", "Sorting Share": "16.4%", "Mean λ (Captain)": 0.716, "Mean λ (Agent)": 0.795},
+    {"Specification": "Vessel Controls", "R²": 0.674, "Captain Share": "36.9%", "Agent Share": "48.5%", "Sorting Share": "14.6%", "Mean λ (Captain)": 0.716, "Mean λ (Agent)": 0.795},
+    {"Specification": "Full Controls", "R²": 0.674, "Captain Share": "37.1%", "Agent Share": "49.8%", "Sorting Share": "13.2%", "Mean λ (Captain)": 0.716, "Mean λ (Agent)": 0.795},
 ]
 
 TABLE_A2_DATA = [
@@ -165,7 +163,8 @@ TABLE_A6_DATA = {
 }
 
 # -----------------------------------------------------------------------------
-# Mechanism Tests Tables (A7-A8) - Weather, Crew, and Context-Dependent Matching
+# Mechanism Tests Tables (A7-A9) - Weather, Crew, First Mate Effects,
+# and Context-Dependent Matching
 # -----------------------------------------------------------------------------
 
 TABLE_A7_DATA = [
@@ -187,11 +186,36 @@ TABLE_A8_DATA = [
     {"Context": "Hurricane exposure", "Corr(θ,ψ)": "+0.11", "Sorting": "Weak PAM", "β₃": "−0.12", "Technology": "Substitutes", "Interpretation": "Adversity → agents more critical"},
 ]
 
+TABLE_A9_DATA = {
+    "panel_a": {
+        "title": "Panel A: Mate Fixed-Effect Variance Decomposition",
+        "rows": [
+            {"Component": "Between-Mate Variance", "Estimate": 0.0327, "Share": "7.8%"},
+            {"Component": "Within-Mate Variance", "Estimate": 0.3856, "Share": "92.2%"},
+            {"Component": "Mate Share of Total", "Estimate": "-", "Share": "7.8%"},
+        ],
+        "stats": {"N": 2841, "unique_mates": 612},
+    },
+    "panel_b": {
+        "title": "Panel B: Mate-to-Captain Career Paths",
+        "index_col": "Dep. Var: Log Output (y)",
+        "rows": [
+            {"index": "Same Agent (= Training Agent)", "Estimate": "0.0743**"},
+            {"index": "Standard Error", "Estimate": "(0.031)"},
+            {"index": "t-statistic", "Estimate": "2.40"},
+            {"index": "Promoted Mates", "Estimate": "189"},
+            {"index": "Captain Voyages (with known training agent)", "Estimate": "623"},
+            {"index": "  — With Training Agent", "Estimate": "217"},
+            {"index": "  — With Different Agent", "Estimate": "406"},
+        ],
+    },
+}
+
 TABLE_METADATA = {
     "table_1": {
         "id": "Table 1",
         "title": "Descriptive Statistics and Sample Composition",
-        "footer": "Notes: 'Agent Groups' (Port × Decade) represent the unit of analysis for Organizational Capability (ψ). Sparse grounds are defined ex-ante using 3-year lagged catch rates.",
+        "footer": "Notes: Individual agents (888) in the LOO connected set. Sparse grounds are defined ex-ante using 3-year lagged catch rates.",
     },
     "table_2": {
         "id": "Table 2",
@@ -200,8 +224,8 @@ TABLE_METADATA = {
     },
     "table_3": {
         "id": "Table 3",
-        "title": "Bias-Corrected Variance Decomposition (Grouped Agent KSS)",
-        "footer": "Notes: Estimates derived from the Grouped Agent (Port × Decade) specification using KSS bias correction. ψ captures the 'Organizational Environment Effect'.",
+        "title": "Variance Decomposition (LOO Connected Set + Empirical Bayes)",
+        "footer": "Notes: Estimates use 888 individual agents in the LOO connected set with Empirical Bayes shrinkage (mean λ_captain=0.72, λ_agent=0.80). Corr(θ,ψ)=+0.20 indicates positive assortative matching at the aggregate level.",
     },
     "table_4": {
         "id": "Table 4",
@@ -226,8 +250,8 @@ TABLE_METADATA = {
     # Online Appendix Tables
     "table_a1": {
         "id": "Table A1",
-        "title": "Robustness of Variance Decomposition to Grouping",
-        "footer": "Notes: 'Individual Agent (Biased)' exhibits the 'Exploding Variance' pathology due to weak connectivity. The 'Organizational Signal' is robustly between 35-50% regardless of grouping method.",
+        "title": "Robustness of Variance Decomposition Across Specifications",
+        "footer": "Notes: LOO connected set: 12,525 voyages, 2,903 captains, 888 agents. EB shrinkage reliabilities (λ) indicate signal-to-noise quality. Agent share is robust at 45-50% across specifications.",
     },
     "table_a2": {
         "id": "Table A2",
@@ -269,6 +293,11 @@ TABLE_METADATA = {
         "title": "Context-Dependent Matching: Sorting and Production Technology by Environment",
         "footer": "Notes: PAM = Positive Assortative Matching (high-θ with high-ψ), NAM = Negative Assortative Matching. β₃ from Route×Year FE specification. All correlation differences significant at p<0.001 via Fisher z-test. Matching regime shifts systematically with operational complexity.",
     },
+    "table_a9": {
+        "id": "Table A9",
+        "title": "First Mate Effects: Organizational Knowledge Transmission",
+        "footer": "Notes: Panel A decomposes outcome variance (log output) between and within first mates. Mate share = Var(between) / [Var(between) + Var(within)]. Panel B tests whether mates who became captains perform better when sailing with the agent under whom they originally served as mate. *** p<0.01, ** p<0.05, * p<0.10.",
+    },
 }
 
 
@@ -303,7 +332,7 @@ def generate_table_2_md() -> str:
     meta = TABLE_METADATA["table_2"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -314,7 +343,7 @@ def generate_table_3_md() -> str:
     meta = TABLE_METADATA["table_3"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -371,7 +400,7 @@ def generate_table_6_md() -> str:
     meta = TABLE_METADATA["table_6"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -382,7 +411,7 @@ def generate_table_7_md() -> str:
     meta = TABLE_METADATA["table_7"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -397,7 +426,7 @@ def generate_table_a1_md() -> str:
     meta = TABLE_METADATA["table_a1"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -408,7 +437,7 @@ def generate_table_a2_md() -> str:
     meta = TABLE_METADATA["table_a2"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -419,7 +448,7 @@ def generate_table_a3_md() -> str:
     meta = TABLE_METADATA["table_a3"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -453,7 +482,7 @@ def generate_table_a5_md() -> str:
     meta = TABLE_METADATA["table_a5"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -464,7 +493,7 @@ def generate_table_a5b_md() -> str:
     meta = TABLE_METADATA["table_a5b"]
     
     output = f"## {meta['id']}: {meta['title']}\n\n"
-    output += df.to_markdown(index=False)
+    output += _dataframe_to_markdown(df)
     output += f"\n\n*{meta['footer']}*\n"
     return output
 
@@ -522,6 +551,19 @@ def _escape_latex(text: str) -> str:
     for old, new in replacements:
         text = text.replace(old, new)
     return text
+
+
+def _dataframe_to_markdown(df: pd.DataFrame) -> str:
+    """Render a simple pipe table without requiring optional tabulate."""
+    columns = [str(col) for col in df.columns]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join(["---"] * len(columns)) + "|",
+    ]
+    for _, row in df.iterrows():
+        values = [str(row[col]) for col in df.columns]
+        lines.append("| " + " | ".join(values) + " |")
+    return "\n".join(lines)
 
 
 def generate_table_1_tex() -> str:
@@ -692,7 +734,7 @@ def generate_table_a7_md() -> str:
     df = pd.DataFrame(TABLE_A7_DATA)
     meta = TABLE_METADATA["table_a7"]
     md = f"## {meta['id']}: {meta['title']}\n\n"
-    md += df.to_markdown(index=False)
+    md += _dataframe_to_markdown(df)
     md += f"\n\n*{meta['footer']}*\n"
     return md
 
@@ -702,9 +744,39 @@ def generate_table_a8_md() -> str:
     df = pd.DataFrame(TABLE_A8_DATA)
     meta = TABLE_METADATA["table_a8"]
     md = f"## {meta['id']}: {meta['title']}\n\n"
-    md += df.to_markdown(index=False)
+    md += _dataframe_to_markdown(df)
     md += f"\n\n*{meta['footer']}*\n"
     return md
+
+
+def generate_table_a9_md() -> str:
+    """Generate Table A9: First Mate Effects."""
+    meta = TABLE_METADATA["table_a9"]
+    data = TABLE_A9_DATA
+
+    lines = []
+    lines.append(f"## {meta['id']}: {meta['title']}\n")
+
+    # Panel A: Variance decomposition
+    pa = data["panel_a"]
+    lines.append(f"### {pa['title']}\n")
+    lines.append("| Component | Estimate | Share |")
+    lines.append("|-----------|----------|-------|")
+    for row in pa["rows"]:
+        lines.append(f"| {row['Component']} | {row['Estimate']} | {row['Share']} |")
+    lines.append(f"\nN = {pa['stats']['N']:,} voyages, {pa['stats']['unique_mates']:,} unique mates\n")
+
+    # Panel B: Career path regression
+    pb = data["panel_b"]
+    lines.append(f"### {pb['title']}\n")
+    lines.append(f"*{pb['index_col']}*\n")
+    lines.append("| | Estimate |")
+    lines.append("|---|---|")
+    for row in pb["rows"]:
+        lines.append(f"| {row['index']} | {row['Estimate']} |")
+
+    lines.append(f"\n*{meta['footer']}*\n")
+    return "\n".join(lines)
 
 
 def generate_table_a7_tex() -> str:
@@ -713,6 +785,164 @@ def generate_table_a7_tex() -> str:
 
 def generate_table_a8_tex() -> str:
     return generate_flat_table_tex(TABLE_A8_DATA, TABLE_METADATA["table_a8"], "tableA8")
+
+
+def generate_table_a9_tex() -> str:
+    """Generate Table A9 in LaTeX format (two-panel)."""
+    meta = TABLE_METADATA["table_a9"]
+    data = TABLE_A9_DATA
+    pa = data["panel_a"]
+    pb = data["panel_b"]
+
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        rf"\caption{{{_escape_latex(meta['title'])}}}",
+        r"\label{tab:tableA9}",
+        "",
+        r"% Panel A",
+        rf"\textit{{{_escape_latex(pa['title'])}}}",
+        r"\vspace{4pt}",
+        r"\begin{tabular}{lcc}",
+        r"\toprule",
+        r"Component & Estimate & Share \\",
+        r"\midrule",
+    ]
+    for row in pa["rows"]:
+        lines.append(
+            f"{_escape_latex(row['Component'])} & {_escape_latex(str(row['Estimate']))} & {_escape_latex(row['Share'])} \\\\"
+        )
+    lines.extend([
+        r"\addlinespace",
+        rf"\multicolumn{{3}}{{l}}{{\footnotesize N = {pa['stats']['N']:,} voyages, {pa['stats']['unique_mates']:,} unique mates}}",
+        r"\bottomrule",
+        r"\end{tabular}",
+        "",
+        r"\vspace{12pt}",
+        "",
+        r"% Panel B",
+        rf"\textit{{{_escape_latex(pb['title'])}}}",
+        r"\vspace{4pt}",
+        r"\begin{tabular}{lc}",
+        r"\toprule",
+        rf"\multicolumn{{2}}{{l}}{{\textit{{{_escape_latex(pb['index_col'])}}}}}\\",
+        r"\midrule",
+    ])
+    for row in pb["rows"]:
+        lines.append(
+            f"{_escape_latex(row['index'])} & {_escape_latex(row['Estimate'])} \\\\"
+        )
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\begin{tablenotes}",
+        rf"\small \item {_escape_latex(meta['footer'])}",
+        r"\end{tablenotes}",
+        r"\end{table}",
+    ])
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Backward-Compatible Public API
+# =============================================================================
+
+def generate_table_1() -> str:
+    return generate_table_1_md()
+
+
+def generate_table_2() -> str:
+    return generate_table_2_md()
+
+
+def generate_table_3() -> str:
+    return generate_table_3_md()
+
+
+def generate_table_4() -> str:
+    return generate_table_4_md()
+
+
+def generate_table_5() -> str:
+    return generate_table_5_md()
+
+
+def generate_table_6() -> str:
+    return generate_table_6_md()
+
+
+def generate_table_7() -> str:
+    return generate_table_7_md()
+
+
+def generate_table_a1() -> str:
+    return generate_table_a1_md()
+
+
+def generate_table_a2() -> str:
+    return generate_table_a2_md()
+
+
+def generate_table_a3() -> str:
+    return generate_table_a3_md()
+
+
+def generate_table_a4() -> str:
+    return generate_table_a4_md()
+
+
+def generate_table_a5() -> str:
+    return generate_table_a5_md()
+
+
+def generate_table_a5b() -> str:
+    return generate_table_a5b_md()
+
+
+def generate_table_a6() -> str:
+    return generate_table_a6_md()
+
+
+def generate_table_a7() -> str:
+    return generate_table_a7_md()
+
+
+def generate_table_a8() -> str:
+    return generate_table_a8_md()
+
+
+def generate_table_a9() -> str:
+    return generate_table_a9_md()
+
+
+def generate_all_markdown_tables() -> str:
+    """Return the combined markdown document expected by the legacy pipeline."""
+    all_md = ["# Maps of the Sea: Publication Tables\n"]
+    for table_key in MARKDOWN_GENERATORS.keys():
+        all_md.append(MARKDOWN_GENERATORS[table_key]())
+        all_md.append("\n---\n")
+    return "\n".join(all_md)
+
+
+def generate_all_latex_tables() -> str:
+    """Return the combined LaTeX document expected by the legacy pipeline."""
+    all_tex = [
+        r"\documentclass{article}",
+        r"\usepackage{booktabs}",
+        r"\usepackage{threeparttable}",
+        r"\usepackage[margin=1in]{geometry}",
+        r"\newenvironment{tablenotes}{\begin{flushleft}\footnotesize}{\end{flushleft}}",
+        r"\begin{document}",
+        r"\title{Maps of the Sea: Publication Tables}",
+        r"\maketitle",
+        "",
+    ]
+    for table_key in LATEX_GENERATORS.keys():
+        all_tex.append(LATEX_GENERATORS[table_key]())
+        all_tex.append(r"\clearpage")
+        all_tex.append("")
+    all_tex.append(r"\end{document}")
+    return "\n".join(all_tex)
 
 
 # =============================================================================
@@ -739,6 +969,7 @@ MARKDOWN_GENERATORS = {
     # Mechanism Tests
     "table_a7": generate_table_a7_md,
     "table_a8": generate_table_a8_md,
+    "table_a9": generate_table_a9_md,
 }
 
 LATEX_GENERATORS = {
@@ -761,12 +992,13 @@ LATEX_GENERATORS = {
     # Mechanism Tests
     "table_a7": generate_table_a7_tex,
     "table_a8": generate_table_a8_tex,
+    "table_a9": generate_table_a9_tex,
 }
 
 
 def generate_all_tables(output_dir: Optional[Path] = None) -> Dict[str, Path]:
     """
-    Generate all 7 tables in both markdown and LaTeX formats.
+    Generate all tables in both markdown and LaTeX formats.
     
     Returns
     -------
@@ -782,45 +1014,27 @@ def generate_all_tables(output_dir: Optional[Path] = None) -> Dict[str, Path]:
     generated_files = {}
     
     # Generate individual table files
-    all_md = ["# Maps of the Sea: Publication Tables\n"]
-    all_tex = [
-        r"\documentclass{article}",
-        r"\usepackage{booktabs}",
-        r"\usepackage{threeparttable}",
-        r"\usepackage[margin=1in]{geometry}",
-        r"\newenvironment{tablenotes}{\begin{flushleft}\footnotesize}{\end{flushleft}}",
-        r"\begin{document}",
-        r"\title{Maps of the Sea: Publication Tables}",
-        r"\maketitle",
-        "",
-    ]
-    
     for table_key in MARKDOWN_GENERATORS.keys():
         # Markdown
         md_content = MARKDOWN_GENERATORS[table_key]()
         md_path = tables_dir / f"{table_key}.md"
         md_path.write_text(md_content)
         generated_files[f"{table_key}_md"] = md_path
-        all_md.append(md_content)
-        all_md.append("\n---\n")
         
         # LaTeX
-        tex_content = LATEX_GENERATORS[table_key]()
-        tex_path = tables_dir / f"{table_key}.tex"
-        tex_path.write_text(tex_content)
-        generated_files[f"{table_key}_tex"] = tex_path
-        all_tex.append(tex_content)
-        all_tex.append(r"\clearpage")
-        all_tex.append("")
+        if table_key in LATEX_GENERATORS:
+            tex_content = LATEX_GENERATORS[table_key]()
+            tex_path = tables_dir / f"{table_key}.tex"
+            tex_path.write_text(tex_content)
+            generated_files[f"{table_key}_tex"] = tex_path
     
     # Write combined files
     all_md_path = output_dir / "all_tables.md"
-    all_md_path.write_text("\n".join(all_md))
+    all_md_path.write_text(generate_all_markdown_tables())
     generated_files["all_tables_md"] = all_md_path
     
-    all_tex.append(r"\end{document}")
     all_tex_path = output_dir / "all_tables.tex"
-    all_tex_path.write_text("\n".join(all_tex))
+    all_tex_path.write_text(generate_all_latex_tables())
     generated_files["all_tables_tex"] = all_tex_path
     
     return generated_files
@@ -839,7 +1053,201 @@ def print_summary(generated_files: Dict[str, Path]) -> None:
     print("\n" + "=" * 60)
 
 
+def load_results_and_update_tables(results_path: Optional[Path] = None) -> None:
+    """
+    Dynamically update TABLE_3_DATA and TABLE_A1_DATA from analysis_results.json.
+    
+    This prevents hardcoded values from drifting when re-running analyses.
+    Falls back to the hardcoded defaults if the file doesn't exist.
+    """
+    import json
+    import math
+    
+    global TABLE_1_DATA, TABLE_3_DATA, TABLE_A1_DATA
+    
+    if results_path is None:
+        results_path = PROJECT_ROOT / "output" / "baseline_loo_eb" / "analysis_results.json"
+    
+    if not results_path.exists():
+        return  # Silently use hardcoded defaults
+    
+    with open(results_path) as f:
+        results = json.load(f)
+    
+    conn = results.get("connectivity", {})
+    r1 = results.get("r1", {})
+    noctl = r1.get("no_controls", {})
+    
+    if not noctl:
+        return
+    
+    # Helper: implied productivity ±1 SD in percent
+    def _implied_pct(var_eb: float) -> str:
+        if var_eb <= 0:
+            return "-"
+        sd = math.sqrt(var_eb)
+        pct = 100 * (math.exp(sd) - 1)
+        return f"~{pct:.0f}%"
+    
+    def _implied_pct_winsorized(key: str) -> str:
+        val = noctl.get(key)
+        if val is not None:
+            return f"~{val:.0f}%"
+        return "-"
+    
+    # --- Update Table 1: FE counts ---
+    TABLE_1_DATA["Fixed Effects Units"] = [
+        {"Variable": "Unique Captains", "Mean": conn.get("n_captains", noctl.get("n_captains", "-")),
+         "SD": "-", "P25": "-", "P75": "-", "N": "-"},
+        {"Variable": "Unique Agents", "Mean": conn.get("n_agents", noctl.get("n_agents", "-")),
+         "SD": "-", "P25": "-", "P75": "-", "N": "-"},
+    ]
+    
+    # --- Update Table 3: Variance Decomposition ---
+    var_alpha_eb = noctl.get("var_alpha_eb", 0)
+    var_gamma_eb = noctl.get("var_gamma_eb", 0)
+    cov_eb = noctl.get("cov_eb", 0)
+    eb_total = noctl.get("eb_total", 0)
+    corr_eb = noctl.get("corr_eb", 0)
+    
+    # Use winsorized implied productivity if available, else full
+    captain_implied = _implied_pct_winsorized("captain_implied_pct_winsorized")
+    if captain_implied == "-":
+        captain_implied = _implied_pct(var_alpha_eb)
+    agent_implied = _implied_pct_winsorized("agent_implied_pct_winsorized")
+    if agent_implied == "-":
+        agent_implied = _implied_pct(var_gamma_eb)
+
+    TABLE_3_DATA = [
+        {
+            "Variance Component": "Captain Skill (θ)",
+            "Plug-in Estimate": round(noctl.get("var_alpha_plugin", 0), 3),
+            "EB Corrected": round(var_alpha_eb, 3),
+            "Share of Total": f"{100*noctl.get('share_alpha', 0):.1f}%",
+            "Implied Productivity (±1σ)": captain_implied,
+        },
+        {
+            "Variance Component": "Org. Environment (ψ)",
+            "Plug-in Estimate": round(noctl.get("var_gamma_plugin", 0), 3),
+            "EB Corrected": round(var_gamma_eb, 3),
+            "Share of Total": f"{100*noctl.get('share_gamma', 0):.1f}%",
+            "Implied Productivity (±1σ)": agent_implied,
+        },
+        {
+            "Variance Component": "Sorting 2Cov(θ,ψ)",
+            "Plug-in Estimate": round(2 * noctl.get("cov_plugin", 0), 3),
+            "EB Corrected": round(2 * cov_eb, 3),
+            "Share of Total": f"{100*noctl.get('share_cov', 0):.1f}%",
+            "Implied Productivity (±1σ)": "-",
+        },
+        {
+            "Variance Component": "Corr(θ,ψ)",
+            "Plug-in Estimate": round(noctl.get("cov_plugin", 0) / (
+                max(noctl.get("var_alpha_plugin", 0), 1e-9)**0.5 *
+                max(noctl.get("var_gamma_plugin", 0), 1e-9)**0.5
+            ), 3) if noctl.get("var_alpha_plugin", 0) > 0 else "-",
+            "EB Corrected": round(corr_eb, 3),
+            "Share of Total": "-",
+            "Implied Productivity (±1σ)": "PAM" if corr_eb > 0.05 else "NAM" if corr_eb < -0.05 else "~0",
+        },
+        {
+            "Variance Component": "Total (Var(y))",
+            "Plug-in Estimate": "-",
+            "EB Corrected": round(eb_total, 3),
+            "Share of Total": "100.0%",
+            "Implied Productivity (±1σ)": "",
+        },
+    ]
+    
+    # --- Update Table A1: Robustness across specifications ---
+    a1_rows = []
+    for spec_name, spec_label in [
+        ("no_controls", "No Controls"),
+        ("vessel_controls", "Vessel Controls"),
+        ("full_controls", "Full Controls"),
+    ]:
+        spec = r1.get(spec_name, {})
+        if spec:
+            a1_rows.append({
+                "Specification": spec_label,
+                "R²": round(spec.get("r2", 0), 3),
+                "Captain Share": f"{100*spec.get('share_alpha', 0):.1f}%",
+                "Agent Share": f"{100*spec.get('share_gamma', 0):.1f}%",
+                "Sorting Share": f"{100*spec.get('share_cov', 0):.1f}%",
+                "Mean λ (Captain)": round(spec.get("mean_lambda_captain", 0), 3),
+                "Mean λ (Agent)": round(spec.get("mean_lambda_agent", 0), 3),
+            })
+    
+    if a1_rows:
+        TABLE_A1_DATA = a1_rows
+    
+    # --- Update Table 6: CATE from analysis results ---
+    cate_list = results.get("cate", [])
+    if cate_list:
+        method_used = cate_list[0].get("method", "OLS")
+        
+        def _cate_label(row):
+            stars = row.get("stars", "")
+            return f"{row['cate']:.3f}{stars}"
+        
+        def _mechanism(q_label, cate_val):
+            if "Q1" in q_label or "Novice" in q_label:
+                return "Insurance / Floor Raising"
+            elif "Q4" in q_label or "Expert" in q_label:
+                return "Diminishing Returns"
+            else:
+                return "Transition"
+        
+        TABLE_6_DATA = []
+        for row in cate_list:
+            TABLE_6_DATA.append({
+                "Captain Skill Quartile (θ)": row["quartile"],
+                "Mean θ": round(row["mean_theta"], 2),
+                "CATE of Agent Capability (ψ)": _cate_label(row),
+                "Mechanism": _mechanism(row["quartile"], row["cate"]),
+            })
+        
+        # Update footer to reflect actual method used
+        if method_used == "CausalForest":
+            q1_cate = cate_list[0].get("cate", 0)
+            q4_cate = cate_list[-1].get("cate", 0) if len(cate_list) >= 4 else 0
+            diff = q1_cate - q4_cate
+            TABLE_METADATA["table_6"]["footer"] = (
+                f"Notes: CATE estimated via CausalForestDML (econml) with "
+                f"RandomForest nuisance models (200 trees, min_leaf=20). "
+                f"Difference (Q1 − Q4) = {diff:.3f}. "
+                f"The marginal benefit is largest for novice captains."
+            )
+        else:
+            TABLE_METADATA["table_6"]["footer"] = (
+                "Notes: CATE estimated via OLS-by-quartile. "
+                "Install econml for CausalForestDML estimation."
+            )
+    
+    # Update the module-level globals
+    import sys
+    module = sys.modules[__name__]
+    module.TABLE_3_DATA = TABLE_3_DATA
+    module.TABLE_A1_DATA = TABLE_A1_DATA
+    module.TABLE_6_DATA = TABLE_6_DATA
+
+
+def try_load_dynamic_tables() -> bool:
+    """
+    Attempt to load dynamic table values from analysis results.
+    
+    Returns True if successful, False if falling back to hardcoded defaults.
+    """
+    try:
+        load_results_and_update_tables()
+        return True
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     print("Generating paper tables for 'Maps of the Sea' manuscript...")
+    try_load_dynamic_tables()
     files = generate_all_tables()
     print_summary(files)
+

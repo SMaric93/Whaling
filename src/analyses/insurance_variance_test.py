@@ -651,6 +651,14 @@ def run_insurance_variance_tests(
     return results
 
 
+def run_insurance_variances(
+    df: pd.DataFrame = None,
+    save_outputs: bool = True,
+) -> Dict:
+    """Backward-compatible wrapper for the stage runner."""
+    return run_insurance_variance_tests(df=df, save_outputs=save_outputs)
+
+
 def save_insurance_outputs(results: Dict, df_cells: pd.DataFrame) -> None:
     """Save insurance variance test outputs."""
     INSURANCE_DIR.mkdir(parents=True, exist_ok=True)

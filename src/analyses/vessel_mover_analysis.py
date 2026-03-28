@@ -632,6 +632,14 @@ def run_vessel_mover_analysis(
     return results
 
 
+def run_vessel_mover_robustness(
+    df: pd.DataFrame = None,
+    save_outputs: bool = True,
+) -> Dict:
+    """Backward-compatible wrapper for the stage runner."""
+    return run_vessel_mover_analysis(df=df, save_outputs=save_outputs)
+
+
 def save_vessel_mover_outputs(results: Dict, df_multi: pd.DataFrame) -> None:
     """Save vessel mover analysis outputs."""
     VESSEL_MOVER_DIR.mkdir(parents=True, exist_ok=True)

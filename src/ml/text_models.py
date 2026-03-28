@@ -64,7 +64,7 @@ def fit_text_classifier(
 
     model = Pipeline([
         ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_features=5000)),
-        ("clf", LogisticRegression(max_iter=1000, random_state=seed)),
+        ("clf", LogisticRegression(max_iter=1000, random_state=seed, n_jobs=-1)),
     ])
     model.fit(pd.Series(text_values)[keep], label_values[keep].astype(str))
 

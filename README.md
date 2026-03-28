@@ -47,8 +47,11 @@ The analyses module implements a 17-regression empirical suite (R1–R17) for es
 ## Quick Start
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Create the repo virtualenv and install dependencies
+./setup.sh
+
+# Activate it in your shell
+. venv/bin/activate
 
 # Run the complete 5-stage pipeline
 python run_pipeline.py all
@@ -70,7 +73,7 @@ The project includes additional exploratory analyses beyond the core regression 
 
 ```bash
 # Quick analysis scripts (run from project root with venv activated)
-source venv/bin/activate
+. venv/bin/activate
 
 # Load and explore data interactively
 python -c "
