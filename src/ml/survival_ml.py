@@ -167,7 +167,7 @@ def run_survival_models(
             max_depth=ML_CFG.rf_max_depth,
             min_samples_leaf=ML_CFG.rf_min_samples_leaf,
             random_state=ML_CFG.random_seed,
-            n_jobs=-1,
+            n_jobs=1,
         )
         rf.fit(X_train, y_train)
         results["random_forest"] = _evaluate_clf(rf, X_val, y_val, X_test, y_test, "random_forest")

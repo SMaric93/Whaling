@@ -20,46 +20,78 @@ String-Based Entity Matching:
 """
 
 import logging
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def compute_labor_metrics() -> None:
+def _write_output_variants(df, primary_path, *alias_paths) -> None:
+    """Persist canonical pipeline outputs alongside legacy compatibility names."""
+    primary_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(primary_path, index=False)
+    df.to_csv(primary_path.with_suffix(".csv"), index=False)
+    for alias_path in alias_paths:
+        df.to_parquet(alias_path, index=False)
+        df.to_csv(alias_path.with_suffix(".csv"), index=False)
+
+
+def compute_labor_metrics() -> bool:
     """Compute crew count, desertion rate, and role composition."""
-    from src.aggregation.labor_metrics import compute_all_labor_metrics
+    import pandas as pd
+    from src.aggregation.labor_metrics import compute_voyage_labor_metrics
     from src.config import STAGING_DIR
     
     logger.info("Computing labor metrics...")
     
-    crew_path = STAGING_DIR / 'crew_parsed.parquet'
-    if crew_path.exists():
-        df = compute_all_labor_metrics(crew_path)
-        output_path = STAGING_DIR / 'labor_metrics.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Computed labor metrics for {len(df):,} voyages → {output_path}")
-    else:
-        logger.warning(f"Crew file not found: {crew_path}")
+    crew_candidates = [
+        STAGING_DIR / 'crew_roster.parquet',
+        STAGING_DIR / 'crew_parsed.parquet',
+    ]
+    crew_path = next((path for path in crew_candidates if path.exists()), None)
+    if crew_path is None:
+        logger.warning("Crew file not found - skipping labor metrics")
+        return False
+
+    crew_df = pd.read_parquet(crew_path)
+    df = compute_voyage_labor_metrics(crew_df)
+    output_path = STAGING_DIR / 'voyage_labor_metrics.parquet'
+    _write_output_variants(df, output_path, STAGING_DIR / 'labor_metrics.parquet')
+    logger.info(f"Computed labor metrics for {len(df):,} voyages → {output_path}")
+    return output_path.exists()
 
 
-def compute_route_exposure() -> None:
+def compute_route_exposure() -> bool:
     """Compute Arctic exposure, mean lat/lon, and voyage duration."""
-    from src.aggregation.route_exposure import compute_route_metrics
+    import pandas as pd
+    from src.aggregation.route_exposure import (
+        compute_route_exposure as compute_voyage_routes,
+        compute_whaling_ground_exposure,
+    )
     from src.config import STAGING_DIR
     
     logger.info("Computing route exposure metrics...")
     
-    logbooks_path = STAGING_DIR / 'logbooks_parsed.parquet'
-    if logbooks_path.exists():
-        df = compute_route_metrics(logbooks_path)
-        output_path = STAGING_DIR / 'route_metrics.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Computed route metrics for {len(df):,} voyages → {output_path}")
-    else:
-        logger.warning(f"Logbooks file not found: {logbooks_path}")
+    logbook_candidates = [
+        STAGING_DIR / 'logbook_positions.parquet',
+        STAGING_DIR / 'logbooks_parsed.parquet',
+    ]
+    logbooks_path = next((path for path in logbook_candidates if path.exists()), None)
+    if logbooks_path is None:
+        logger.warning("Logbooks file not found - skipping route exposure")
+        return False
+
+    logbook_df = pd.read_parquet(logbooks_path)
+    df = compute_voyage_routes(logbook_df)
+    ground_df = compute_whaling_ground_exposure(logbook_df)
+    if len(ground_df) > 0:
+        df = df.merge(ground_df, on='voyage_id', how='left')
+
+    output_path = STAGING_DIR / 'voyage_routes.parquet'
+    _write_output_variants(df, output_path, STAGING_DIR / 'route_metrics.parquet')
+    logger.info(f"Computed route metrics for {len(df):,} voyages → {output_path}")
+    return output_path.exists()
 
 
-def resolve_entities() -> None:
+def resolve_entities() -> bool:
     """
     Resolve vessel, captain, and agent entities using string-based matching.
     
@@ -69,69 +101,119 @@ def resolve_entities() -> None:
         - Configurable similarity thresholds (default 0.85)
     """
     from src.entities.entity_resolver import EntityResolver
-    from src.parsing.string_normalizer import normalize_name, jaro_winkler_similarity
-    from src.config import STAGING_DIR, CROSSWALK_DIR
+    from src.config import CROSSWALKS_DIR, STAGING_DIR
     import pandas as pd
     
     logger.info("Resolving entities with string-based matching...")
     
-    voyages_path = STAGING_DIR / 'voyages_parsed.parquet'
-    if not voyages_path.exists():
-        logger.warning(f"Voyages file not found: {voyages_path}")
-        return
+    voyage_candidates = [
+        STAGING_DIR / 'voyages_master.parquet',
+        STAGING_DIR / 'voyages_parsed.parquet',
+    ]
+    voyages_path = next((path for path in voyage_candidates if path.exists()), None)
+    if voyages_path is None:
+        logger.warning("Voyages file not found - skipping entity resolution")
+        return False
     
     voyages = pd.read_parquet(voyages_path)
     resolver = EntityResolver()
+    resolved_voyages = resolver.resolve_voyages_df(voyages, ml_refine=True)
+    _write_output_variants(
+        resolved_voyages,
+        STAGING_DIR / 'voyages_master.parquet',
+        STAGING_DIR / 'voyages_parsed.parquet',
+    )
     
     # Resolve vessels
     logger.info("  - Resolving vessel entities...")
-    vessel_crosswalk = resolver.resolve_vessels(voyages)
-    vessel_crosswalk.to_parquet(CROSSWALK_DIR / 'vessel_crosswalk.parquet', index=False)
+    CROSSWALKS_DIR.mkdir(parents=True, exist_ok=True)
+    vessel_crosswalk = resolver.resolve_vessels(resolved_voyages)
+    vessel_crosswalk.to_parquet(CROSSWALKS_DIR / 'vessel_crosswalk.parquet', index=False)
     logger.info(f"    → {len(vessel_crosswalk):,} unique vessels")
     
     # Resolve captains with string normalization
     logger.info("  - Resolving captain entities (string-based matching)...")
-    captain_crosswalk = resolver.resolve_captains(voyages)
-    captain_crosswalk.to_parquet(CROSSWALK_DIR / 'captain_crosswalk.parquet', index=False)
+    captain_crosswalk = resolver.resolve_captains(resolved_voyages)
+    captain_crosswalk.to_parquet(CROSSWALKS_DIR / 'captain_crosswalk.parquet', index=False)
     logger.info(f"    → {len(captain_crosswalk):,} unique captains")
     
     # Resolve agents with string normalization
     logger.info("  - Resolving agent entities (string-based matching)...")
-    agent_crosswalk = resolver.resolve_agents(voyages)
-    agent_crosswalk.to_parquet(CROSSWALK_DIR / 'agent_crosswalk.parquet', index=False)
+    agent_crosswalk = resolver.resolve_agents(resolved_voyages)
+    agent_crosswalk.to_parquet(CROSSWALKS_DIR / 'agent_crosswalk.parquet', index=False)
     logger.info(f"    → {len(agent_crosswalk):,} unique agents")
     
     logger.info("Entity resolution complete.")
+    return True
 
 
-def build_entity_crosswalks() -> None:
+def build_entity_crosswalks() -> bool:
     """Build crosswalks linking entities across different data sources."""
-    from src.entities.crosswalk_builder import build_all_crosswalks
-    from src.config import STAGING_DIR, CROSSWALK_DIR
+    import pandas as pd
+    from src.config import CROSSWALKS_DIR, STAGING_DIR
+    from src.entities.crosswalk_builder import CrosswalkBuilder
     
     logger.info("Building entity crosswalks across sources...")
-    
-    try:
-        build_all_crosswalks(STAGING_DIR, CROSSWALK_DIR)
-        logger.info("Entity crosswalks built successfully.")
-    except Exception as e:
-        logger.warning(f"Crosswalk building skipped: {e}")
+
+    voyages_path = STAGING_DIR / 'voyages_master.parquet'
+    if not voyages_path.exists():
+        logger.warning("Resolved voyage file not found - skipping crosswalks")
+        return False
+
+    builder = CrosswalkBuilder()
+    voyages_df = pd.read_parquet(voyages_path)
+    built_any = False
+
+    crew_path = STAGING_DIR / 'crew_roster.parquet'
+    if crew_path.exists():
+        crew_df = pd.read_parquet(crew_path)
+        if crew_df['voyage_id'].isna().any():
+            crosswalk = builder.build_crew_to_voyage_crosswalk(
+                crew_df,
+                voyages_df,
+                output_path=CROSSWALKS_DIR / 'crew_to_voyage_crosswalk.csv',
+            )
+            updated = builder.apply_crosswalk(crew_df, crosswalk, source_index_col='crew_index')
+            _write_output_variants(updated, crew_path, STAGING_DIR / 'crew_parsed.parquet')
+            built_any = built_any or len(crosswalk) > 0
+        else:
+            logger.info("  - Crew roster already contains voyage_id")
+            built_any = True
+
+    logbook_path = STAGING_DIR / 'logbook_positions.parquet'
+    if logbook_path.exists():
+        logbook_df = pd.read_parquet(logbook_path)
+        if logbook_df['voyage_id'].isna().any():
+            crosswalk = builder.build_logbook_to_voyage_crosswalk(
+                logbook_df,
+                voyages_df,
+                output_path=CROSSWALKS_DIR / 'logbook_to_voyage_crosswalk.csv',
+            )
+            updated = builder.apply_crosswalk(logbook_df, crosswalk, source_index_col='logbook_index')
+            _write_output_variants(updated, logbook_path, STAGING_DIR / 'logbooks_parsed.parquet')
+            built_any = built_any or len(crosswalk) > 0
+        else:
+            logger.info("  - Logbook positions already contain voyage_id")
+            built_any = True
+
+    return built_any
 
 
-def assemble_voyages() -> None:
+def assemble_voyages() -> bool:
     """Assemble the main voyage analysis dataset."""
-    from src.assembly.voyage_assembly import assemble_voyage_dataset
-    from src.config import STAGING_DIR, FINAL_DIR
+    from src.assembly.voyage_assembly import VoyageAssembler
+    from src.config import FINAL_DIR
     
     logger.info("Assembling voyage dataset...")
     
-    df = assemble_voyage_dataset(STAGING_DIR)
-    output_path = FINAL_DIR / 'analysis_voyage.parquet'
-    df.to_parquet(output_path, index=False)
+    assembler = VoyageAssembler()
+    df = assembler.assemble(force_reload=True)
+    output_path = assembler.save(FINAL_DIR / 'analysis_voyage.parquet')
     logger.info(f"Assembled {len(df):,} voyages → {output_path}")
+    return output_path.exists()
 
 
-def link_captains() -> None:
+def link_captains() -> bool:
     """
     Link captains to census records using probabilistic matching.
     
@@ -141,59 +223,73 @@ def link_captains() -> None:
                    Occupation (10%) + Spouse (5%)
         - String matching uses Jaro-Winkler similarity (threshold 0.85)
     """
+    import pandas as pd
+    from src.config import LINKAGE_CONFIG, RAW_IPUMS, STAGING_DIR
     from src.linkage.record_linker import RecordLinker
-    from src.linkage.captain_profiler import build_captain_profiles
-    from src.linkage.ipums_loader import load_ipums_extract
-    from src.config import STAGING_DIR, CROSSWALK_DIR, RAW_DIR
+    from src.linkage.captain_profiler import CaptainProfiler
+    from src.linkage.ipums_loader import IPUMSLoader
     
     logger.info("Linking captains to census records...")
-    
-    # Build captain profiles
-    captain_crosswalk = CROSSWALK_DIR / 'captain_crosswalk.parquet'
-    if not captain_crosswalk.exists():
-        logger.warning("Captain crosswalk not found - skipping linkage")
-        return
-    
-    profiles = build_captain_profiles(captain_crosswalk, STAGING_DIR / 'voyages_parsed.parquet')
-    
-    # Load IPUMS census data
-    ipums_path = RAW_DIR / 'ipums'
-    if not ipums_path.exists():
+
+    profiler = CaptainProfiler(STAGING_DIR / 'voyages_master.parquet')
+    profiles = profiler.build_profiles(force_reload=True)
+    if len(profiles) == 0:
+        logger.warning("No captain profiles available - skipping linkage")
+        return False
+    profiler.save()
+
+    if not RAW_IPUMS.exists():
         logger.warning("IPUMS data not found - skipping linkage")
-        return
-    
-    # Link for each census year
+        return False
+
+    loader = IPUMSLoader(RAW_IPUMS)
+    census_data = loader.parse(force_reload=True)
+    if len(census_data) == 0:
+        logger.warning("No IPUMS records loaded - skipping linkage")
+        return False
+    loader.save()
+
     linker = RecordLinker()
-    for target_year in [1850, 1860, 1870, 1880]:
-        census_path = ipums_path / f'census_{target_year}.parquet'
-        if census_path.exists():
-            logger.info(f"  - Linking to {target_year} census...")
-            census_data = load_ipums_extract(census_path)
-            linkage = linker.link_captains_to_census(profiles, census_data, target_year)
-            
-            output_path = CROSSWALK_DIR / f'captain_census_{target_year}.parquet'
-            linkage.to_parquet(output_path, index=False)
-            logger.info(f"    → {len(linkage):,} links → {output_path}")
-    
+    yearly_linkages = []
+    for target_year in LINKAGE_CONFIG.target_years:
+        candidates = profiler.get_linkage_candidates(target_year)
+        if len(candidates) == 0:
+            continue
+        logger.info(f"  - Linking to {target_year} census...")
+        linkage = linker.link_captains_to_census(candidates, census_data, target_year)
+        if len(linkage) > 0:
+            yearly_linkages.append(linkage)
+
+    if not yearly_linkages:
+        logger.warning("No captain-census matches found")
+        return False
+
+    linkage_df = pd.concat(yearly_linkages, ignore_index=True)
+    output_path = linker.save_linkage(linkage_df)
     logger.info("Captain-census linkage complete.")
+    return output_path.exists()
 
 
-def assemble_captains() -> None:
+def assemble_captains() -> bool:
     """Assemble the captain-year panel with census wealth data."""
-    from src.assembly.captain_assembly import assemble_captain_panel
-    from src.config import STAGING_DIR, CROSSWALK_DIR, FINAL_DIR
+    from src.assembly.captain_assembly import CaptainAssembler
+    from src.config import FINAL_DIR
     
     logger.info("Assembling captain-year panel...")
     
-    df = assemble_captain_panel(STAGING_DIR, CROSSWALK_DIR)
-    output_path = FINAL_DIR / 'analysis_captain_year.parquet'
-    df.to_parquet(output_path, index=False)
+    assembler = CaptainAssembler()
+    df = assembler.assemble(force_reload=True)
+    if len(df) == 0:
+        logger.warning("Captain panel is empty")
+        return False
+    output_path = assembler.save(FINAL_DIR / 'analysis_captain_year.parquet')
     logger.info(f"Assembled {len(df):,} captain-years → {output_path}")
+    return output_path.exists()
 
 
-def augment_voyages() -> None:
+def augment_voyages() -> bool:
     """Augment voyages with supplementary sources (Starbuck, Maury, WSL)."""
-    from src.assembly.voyage_augmentor import augment_voyage_dataset
+    from src.assembly.voyage_augmentor import run_voyage_augmentation
     from src.config import STAGING_DIR, FINAL_DIR
     
     logger.info("Augmenting voyage dataset...")
@@ -201,17 +297,18 @@ def augment_voyages() -> None:
     base_path = FINAL_DIR / 'analysis_voyage.parquet'
     if not base_path.exists():
         logger.warning("Base voyage file not found - skipping augmentation")
-        return
+        return False
     
-    df = augment_voyage_dataset(base_path, STAGING_DIR)
+    df = run_voyage_augmentation(base_path)
     output_path = FINAL_DIR / 'analysis_voyage_augmented.parquet'
-    df.to_parquet(output_path, index=False)
     logger.info(f"Augmented {len(df):,} voyages → {output_path}")
+    return output_path.exists()
 
 
-def merge_climate_data() -> None:
+def merge_climate_data() -> bool:
     """Merge climate/weather data with voyage dataset."""
-    from src.config import STAGING_DIR, FINAL_DIR
+    from src.config import FINAL_DIR
+    from src.download.weather_downloader import download_and_integrate_weather
     import pandas as pd
     
     logger.info("Merging climate data...")
@@ -222,35 +319,33 @@ def merge_climate_data() -> None:
     
     if not voyage_path.exists():
         logger.warning("Voyage file not found - skipping climate merge")
-        return
+        return False
     
     voyages = pd.read_parquet(voyage_path)
-    
-    # Merge climate sources
-    climate_files = [
-        ('weather_annual.parquet', 'year'),
-        ('hurricane_annual.parquet', 'year'),
-        ('sea_ice_annual.parquet', 'year'),
-    ]
-    
-    for filename, merge_key in climate_files:
-        climate_path = STAGING_DIR / filename
-        if climate_path.exists():
-            climate_df = pd.read_parquet(climate_path)
-            # Determine appropriate year column
-            if 'sail_year' in voyages.columns:
-                voyages = voyages.merge(
-                    climate_df, 
-                    left_on='sail_year', 
-                    right_on=merge_key,
-                    how='left',
-                    suffixes=('', f'_{filename.split(".")[0]}')
-                )
-                logger.info(f"  - Merged {filename}")
+    voyage_weather_path = FINAL_DIR / 'voyage_weather.parquet'
+
+    if not voyage_weather_path.exists():
+        try:
+            _, voyage_weather = download_and_integrate_weather(voyages_path=voyage_path, save_raw=True)
+        except Exception as exc:
+            logger.warning(f"Weather integration skipped: {exc}")
+            return False
+    else:
+        voyage_weather = pd.read_parquet(voyage_weather_path)
+
+    if len(voyage_weather) == 0:
+        logger.warning("No voyage weather data available")
+        return False
+
+    climate_df = voyage_weather.drop(columns=['year_out'], errors='ignore')
+    voyages = voyages.merge(climate_df, on='voyage_id', how='left')
+    logger.info("  - Merged voyage_weather controls")
     
     output_path = FINAL_DIR / 'analysis_voyage_with_climate.parquet'
     voyages.to_parquet(output_path, index=False)
+    voyages.to_csv(output_path.with_suffix('.csv'), index=False)
     logger.info(f"Climate merge complete → {output_path}")
+    return output_path.exists()
 
 
 def run_merge() -> dict:
@@ -278,58 +373,49 @@ def run_merge() -> dict:
     
     # Aggregation
     try:
-        compute_labor_metrics()
-        results['labor_metrics'] = True
+        results['labor_metrics'] = compute_labor_metrics()
     except Exception as e:
         logger.error(f"Labor metrics failed: {e}")
     
     try:
-        compute_route_exposure()
-        results['route_exposure'] = True
+        results['route_exposure'] = compute_route_exposure()
     except Exception as e:
         logger.error(f"Route exposure failed: {e}")
     
     # Entity resolution (with string-based matching)
     try:
-        resolve_entities()
-        results['entities'] = True
+        results['entities'] = resolve_entities()
     except Exception as e:
         logger.error(f"Entity resolution failed: {e}")
     
     try:
-        build_entity_crosswalks()
-        results['crosswalks'] = True
+        results['crosswalks'] = build_entity_crosswalks()
     except Exception as e:
         logger.warning(f"Crosswalk building skipped: {e}")
     
     # Assembly
     try:
-        assemble_voyages()
-        results['voyage_assembly'] = True
+        results['voyage_assembly'] = assemble_voyages()
     except Exception as e:
         logger.error(f"Voyage assembly failed: {e}")
     
     try:
-        link_captains()
-        results['captain_linkage'] = True
+        results['captain_linkage'] = link_captains()
     except Exception as e:
         logger.warning(f"Captain linkage skipped: {e}")
     
     try:
-        assemble_captains()
-        results['captain_assembly'] = True
+        results['captain_assembly'] = assemble_captains()
     except Exception as e:
         logger.warning(f"Captain assembly skipped: {e}")
     
     try:
-        augment_voyages()
-        results['augmentation'] = True
+        results['augmentation'] = augment_voyages()
     except Exception as e:
         logger.warning(f"Voyage augmentation skipped: {e}")
     
     try:
-        merge_climate_data()
-        results['climate_merge'] = True
+        results['climate_merge'] = merge_climate_data()
     except Exception as e:
         logger.warning(f"Climate merge skipped: {e}")
     

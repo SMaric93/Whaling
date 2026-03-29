@@ -81,7 +81,7 @@ def permutation_importance(
         scoring=scoring,
         n_repeats=n_repeats,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=1,
     )
 
     df = pd.DataFrame({

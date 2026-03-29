@@ -317,6 +317,7 @@ def download_wsl_pdfs(
     # Download PDFs
     downloaded = []
     index_rows = []
+    consecutive_failures = 0
     
     for i, pdf_info in enumerate(target_pdfs):
         logger.info(f"[{i+1}/{len(target_pdfs)}] {pdf_info['issue_id']}")
@@ -324,6 +325,7 @@ def download_wsl_pdfs(
         path = download_wsl_pdf(pdf_info, RAW_WSL)
         
         if path:
+            consecutive_failures = 0
             downloaded.append(path)
             
             # Build index row
@@ -336,6 +338,14 @@ def download_wsl_pdfs(
                 'local_path': str(path),
                 'sha256': compute_file_hash(path),
             })
+        else:
+            consecutive_failures += 1
+            if not downloaded and consecutive_failures >= 3:
+                logger.warning(
+                    "Stopping WSL download after repeated speculative URL failures "
+                    "with no successful PDFs."
+                )
+                break
     
     # Build issue index DataFrame
     issue_index = pd.DataFrame(index_rows)

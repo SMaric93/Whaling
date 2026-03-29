@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from compass.config import CompassConfig
+from .config import CompassConfig
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,27 @@ def merge_with_metadata(
 
 
 # ── aggregation ─────────────────────────────────────────────────────────────
+
+def _weighted_compass_means(
+    df: pd.DataFrame,
+    index_cols: list[str],
+    compass_cols: list[str],
+    weight_col: str,
+) -> pd.DataFrame:
+    """Compute weighted means for compass columns without per-column groupby.apply."""
+    weights = pd.to_numeric(df[weight_col], errors="coerce")
+    valid_weight = weights.where(np.isfinite(weights) & (weights > 0))
+    compass = df[compass_cols].apply(pd.to_numeric, errors="coerce")
+    valid_values = compass.where(np.isfinite(compass))
+
+    weighted_values = valid_values.mul(valid_weight, axis=0)
+    weight_contrib = valid_values.notna().mul(valid_weight, axis=0)
+
+    group_keys = [df[col] for col in index_cols]
+    weighted_sum = weighted_values.groupby(group_keys, sort=True).sum(min_count=1)
+    weight_sum = weight_contrib.groupby(group_keys, sort=True).sum(min_count=1)
+
+    return weighted_sum.div(weight_sum).add_suffix("_wtd").reset_index()
 
 def aggregate_captain_year(
     df: pd.DataFrame,
@@ -75,30 +96,15 @@ def aggregate_captain_year(
     for col in numeric:
         if col in index_cols:
             continue
-        if weight_col in df.columns and col != weight_col:
-            # weighted mean
-            agg[col] = "mean"
-        else:
-            agg[col] = "mean"
+        agg[col] = "mean"
 
     out = df.groupby(index_cols, as_index=False).agg(agg)
 
     # additionally, compute weighted means if weights are present
-    if weight_col in df.columns:
-        def _wmean(x, w):
-            mask = np.isfinite(x) & np.isfinite(w) & (w > 0)
-            if mask.sum() == 0:
-                return np.nan
-            return np.average(x[mask], weights=w[mask])
-
-        compass_cols = [c for c in numeric if c.startswith("Compass")]
-        for col in compass_cols:
-            weighted = (
-                df.groupby(index_cols)
-                .apply(lambda g: _wmean(g[col].values, g[weight_col].values))
-                .reset_index(name=f"{col}_wtd")
-            )
-            out = out.merge(weighted, on=index_cols, how="left")
+    compass_cols = [c for c in numeric if c.startswith("Compass")]
+    if weight_col in df.columns and compass_cols:
+        weighted = _weighted_compass_means(df, index_cols, compass_cols, weight_col)
+        out = out.merge(weighted, on=index_cols, how="left")
 
     logger.info(
         "Aggregated to captain×year: %d rows.", len(out),
@@ -115,22 +121,35 @@ def build_diagnostics(
     Build per-voyage diagnostic columns:
     ``n_steps_total, n_steps_search, missing_gap_share, regime_confidence``.
     """
-    records = []
-    for vid, sub in steps_df.groupby("voyage_id", sort=False):
-        n_total = len(sub)
-        n_search = (sub["regime_label"] == "search").sum() if "regime_label" in sub.columns else 0
-        gap_share = sub["gap_flag"].mean() if "gap_flag" in sub.columns else 0.0
-        conf = sub["p_search"].mean() if "p_search" in sub.columns else np.nan
+    if steps_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "voyage_id",
+                "n_steps_total",
+                "n_steps_search",
+                "missing_gap_share",
+                "regime_confidence",
+            ]
+        )
 
-        records.append({
-            "voyage_id": vid,
-            "n_steps_total": int(n_total),
-            "n_steps_search": int(n_search),
-            "missing_gap_share": float(gap_share),
-            "regime_confidence": float(conf) if np.isfinite(conf) else np.nan,
-        })
+    work = pd.DataFrame({"voyage_id": steps_df["voyage_id"], "n_steps_total": 1})
+    work["n_steps_search"] = (
+        steps_df["regime_label"].eq("search").astype("int64")
+        if "regime_label" in steps_df.columns
+        else 0
+    )
+    work["missing_gap_share"] = steps_df["gap_flag"] if "gap_flag" in steps_df.columns else 0.0
+    work["regime_confidence"] = steps_df["p_search"] if "p_search" in steps_df.columns else np.nan
 
-    return pd.DataFrame.from_records(records)
+    return (
+        work.groupby("voyage_id", sort=False, as_index=False)
+        .agg(
+            n_steps_total=("n_steps_total", "sum"),
+            n_steps_search=("n_steps_search", "sum"),
+            missing_gap_share=("missing_gap_share", "mean"),
+            regime_confidence=("regime_confidence", "mean"),
+        )
+    )
 
 
 # ── export orchestrator ─────────────────────────────────────────────────────

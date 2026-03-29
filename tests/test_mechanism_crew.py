@@ -142,6 +142,28 @@ class TestComputeCrewFeatures:
         n_unique = features["mate_id"].nunique()
         assert n_unique == 60, f"Expected 60 unique mates, got {n_unique}"
 
+    def test_exact_feature_aggregation(self):
+        crew = pd.DataFrame({
+            "voyage_id": ["V1", "V1", "V1", "V2", "V2"],
+            "crew_name_clean": ["Mate One", "Crew A", "Crew B", "Mate Two", "Crew C"],
+            "rank": ["1ST MATE", "GREENHAND", "SEAMAN", "MATE", "GREENHAND"],
+            "birthplace": ["Nantucket", "Boston", "Boston", "Nantucket", None],
+            "age": [30, 20, 40, 35, 18],
+            "is_deserted": [0, 1, 0, 0, 0],
+        })
+        voyages = pd.DataFrame({"voyage_id": ["V1", "V2"]})
+
+        from src.analyses.mechanism_crew import compute_crew_features
+
+        features = compute_crew_features(crew, voyages).set_index("voyage_id")
+
+        assert features.loc["V1", "crew_size"] == 3
+        assert features.loc["V1", "greenhand_ratio"] == pytest.approx(1 / 3)
+        assert features.loc["V1", "crew_diversity"] == 2
+        assert features.loc["V1", "avg_crew_age"] == pytest.approx(30.0)
+        assert features.loc["V1", "desertion_rate"] == pytest.approx(1 / 3)
+        assert features.loc["V1", "mate_id"] == "Mate One"
+
 
 # ---------------------------------------------------------------------------
 # Tests: track_crew_experience
@@ -170,6 +192,24 @@ class TestTrackCrewExperience:
 
         # avg_prior_voyages should be non-negative everywhere
         assert (exp["avg_prior_voyages"] >= 0).all()
+
+    def test_repeat_crew_ratio_exact(self):
+        crew = pd.DataFrame({
+            "voyage_id": ["V1", "V1", "V2", "V2", "V2"],
+            "crew_name_clean": ["Alice", "Bob", "Alice", "Bob", "Cara"],
+        })
+        voyages = pd.DataFrame({
+            "voyage_id": ["V1", "V2"],
+            "year_out": [1820, 1821],
+        })
+
+        from src.analyses.mechanism_crew import track_crew_experience
+
+        exp = track_crew_experience(crew, voyages).set_index("voyage_id")
+
+        assert exp.loc["V1", "avg_prior_voyages"] == pytest.approx(0.0)
+        assert exp.loc["V1", "repeat_crew_ratio"] == pytest.approx(0.0)
+        assert exp.loc["V2", "repeat_crew_ratio"] == pytest.approx(2 / 3)
 
 
 # ---------------------------------------------------------------------------

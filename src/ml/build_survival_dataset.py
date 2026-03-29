@@ -75,7 +75,7 @@ def build_survival_dataset(
     # ── Merge voyage-level features ─────────────────────────────────
     merge_cols = []
     for c in ["captain_id", "agent_id", "vessel_id",
-              "theta_heldout", "psi_heldout",
+              "theta", "psi", "theta_heldout", "psi_heldout",
               "captain_experience", "captain_voyage_num", "novice",
               "tonnage", "rig", "crew_count",
               "home_port", "year_out"]:
@@ -89,11 +89,40 @@ def build_survival_dataset(
             how="left",
         )
 
-    # Rename holdout columns
+    # Rename holdout columns (prefer heldout, fall back to in-sample)
     for old, new in [("theta_heldout", "theta_hat_holdout"),
                      ("psi_heldout", "psi_hat_holdout")]:
         if old in patch_days.columns and new not in patch_days.columns:
             patch_days.rename(columns={old: new}, inplace=True)
+
+    # Fall back to in-sample theta/psi if holdout not available
+    if "theta_hat_holdout" not in patch_days.columns or patch_days.get("theta_hat_holdout", pd.Series(dtype=float)).isna().all():
+        if "theta" in patch_days.columns and patch_days["theta"].notna().any():
+            patch_days["theta_hat_holdout"] = patch_days["theta"]
+            logger.warning("Survival dataset: using in-sample theta as holdout fallback")
+    if "psi_hat_holdout" not in patch_days.columns or patch_days.get("psi_hat_holdout", pd.Series(dtype=float)).isna().all():
+        if "psi" in patch_days.columns and patch_days["psi"].notna().any():
+            patch_days["psi_hat_holdout"] = patch_days["psi"]
+            logger.warning("Survival dataset: using in-sample psi as holdout fallback")
+
+    # ── Derive year column ──────────────────────────────────────────
+    if "year" not in patch_days.columns:
+        if "year_out" in patch_days.columns:
+            patch_days["year"] = patch_days["year_out"]
+        elif "obs_date" in patch_days.columns:
+            patch_days["year"] = pd.to_datetime(patch_days["obs_date"]).dt.year
+
+    # ── Season remaining (approximate) ─────────────────────────────
+    if "season_remaining" not in patch_days.columns and "duration_day" in patch_days.columns:
+        patch_days["season_remaining"] = np.clip(180 - patch_days.get("duration_day", 0), 0, 180)
+
+    # ── Median imputation for tonnage ───────────────────────────────
+    if "tonnage" in patch_days.columns:
+        tonnage_median = patch_days["tonnage"].median()
+        n_imp = patch_days["tonnage"].isna().sum()
+        if n_imp > 0 and pd.notna(tonnage_median):
+            patch_days["tonnage"] = patch_days["tonnage"].fillna(tonnage_median)
+            logger.info("Imputed %d missing tonnage values with median (%.1f)", n_imp, tonnage_median)
 
     # ── Construct patch spell id ────────────────────────────────────
     if "patch_spell_id" not in patch_days.columns:

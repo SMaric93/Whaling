@@ -170,14 +170,72 @@ def compute_expected_encounters(
     float
         Sum of expected encounters (production) along trajectory.
     """
-    total_encounters = 0.0
-    
-    for lat, lon in trajectory:
-        cell = lat_lon_to_grid(lat, lon, grid_size)
-        if cell in density_map:
-            total_encounters += density_map[cell]
-    
-    return total_encounters
+    if not trajectory:
+        return 0.0
+
+    lats, lons = zip(*trajectory)
+    return compute_expected_encounters_from_arrays(
+        np.asarray(lats, dtype=float),
+        np.asarray(lons, dtype=float),
+        density_map,
+        grid_size=grid_size,
+    )
+
+
+def compute_expected_encounters_from_arrays(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    density_map: Dict[Tuple[int, int], float],
+    grid_size: float = GRID_SIZE,
+) -> float:
+    """Fast path for encounter lookups on array-backed trajectories."""
+    if len(lats) == 0:
+        return 0.0
+
+    lat_bins = np.floor((lats + 90) / grid_size).astype(int)
+    lon_bins = np.floor((lons + 180) / grid_size).astype(int)
+    return float(
+        sum(
+            density_map.get((lat_bin, lon_bin), 0.0)
+            for lat_bin, lon_bin in zip(lat_bins, lon_bins)
+        )
+    )
+
+
+def build_voyage_position_lists(
+    positions_df: pd.DataFrame,
+    include_year: bool = False,
+) -> pd.DataFrame:
+    """Aggregate ordered voyage trajectories once for downstream analyses."""
+    sort_cols = ["voyage_id"]
+    if "obs_date" in positions_df.columns:
+        sort_cols.append("obs_date")
+
+    agg_kwargs = {
+        "lat": ("lat", list),
+        "lon": ("lon", list),
+        "n_positions": ("lat", "size"),
+    }
+    if include_year and "year" in positions_df.columns:
+        agg_kwargs["year"] = ("year", "first")
+
+    return (
+        positions_df.sort_values(sort_cols)
+        .groupby("voyage_id", sort=False)
+        .agg(**agg_kwargs)
+        .reset_index()
+    )
+
+
+def compute_step_lengths_array(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """Vectorized great-circle distances between consecutive positions."""
+    if len(lats) < 2:
+        return np.array([], dtype=float)
+
+    return np.asarray(
+        haversine_distance(lats[:-1], lons[:-1], lats[1:], lons[1:]),
+        dtype=float,
+    )
 
 
 # =============================================================================
@@ -214,12 +272,7 @@ def compute_placebo_skill_scores(
     print("=" * 60)
     
     # Get voyages with sufficient position data
-    voyage_positions = positions_df.groupby("voyage_id").agg({
-        "lat": list,
-        "lon": list,
-        "year": "first"
-    }).reset_index()
-    voyage_positions["n_positions"] = voyage_positions["lat"].apply(len)
+    voyage_positions = build_voyage_position_lists(positions_df, include_year=True)
     voyage_positions = voyage_positions[
         voyage_positions["n_positions"] >= MIN_POSITIONS_PER_VOYAGE
     ]
@@ -229,18 +282,21 @@ def compute_placebo_skill_scores(
     available_years = sorted(density_maps.keys())
     results = []
     
-    for _, row in voyage_positions.iterrows():
-        voyage_id = row["voyage_id"]
-        actual_year = int(row["year"])
-        trajectory = list(zip(row["lat"], row["lon"]))
+    for row in voyage_positions.itertuples(index=False):
+        voyage_id = row.voyage_id
+        actual_year = int(row.year)
+        lats = np.asarray(row.lat, dtype=float)
+        lons = np.asarray(row.lon, dtype=float)
         
         # Skip if actual year not in maps
         if actual_year not in density_maps:
             continue
             
         # Actual encounters
-        actual_encounters = compute_expected_encounters(
-            trajectory, density_maps[actual_year]
+        actual_encounters = compute_expected_encounters_from_arrays(
+            lats,
+            lons,
+            density_maps[actual_year],
         )
         
         # Placebo encounters (average over other years)
@@ -259,7 +315,11 @@ def compute_placebo_skill_scores(
         
         placebo_encounters = []
         for p_year in placebo_years:
-            enc = compute_expected_encounters(trajectory, density_maps[p_year])
+            enc = compute_expected_encounters_from_arrays(
+                lats,
+                lons,
+                density_maps[p_year],
+            )
             placebo_encounters.append(enc)
         
         mean_placebo = np.mean(placebo_encounters) if placebo_encounters else 0
@@ -273,7 +333,7 @@ def compute_placebo_skill_scores(
         results.append({
             "voyage_id": voyage_id,
             "year": actual_year,
-            "n_positions": len(trajectory),
+            "n_positions": len(lats),
             "actual_encounters": actual_encounters,
             "mean_placebo_encounters": mean_placebo,
             "skill_score": skill_score,
@@ -359,38 +419,43 @@ def compute_baseline_comparisons(
     
     # Sample a subset for computational efficiency
     sample_voyages = skill_df.dropna(subset=["skill_score"]).head(500)
+    voyage_positions = build_voyage_position_lists(positions_df).rename(
+        columns={"n_positions": "trajectory_positions"}
+    )
+    sample_voyages = sample_voyages.merge(voyage_positions, on="voyage_id", how="left")
     
     results = []
-    for _, row in sample_voyages.iterrows():
-        voyage_id = row["voyage_id"]
-        year = int(row["year"])
+    for row in sample_voyages.itertuples(index=False):
+        voyage_id = row.voyage_id
+        year = int(row.year)
         
         if year not in density_maps:
             continue
             
-        # Get actual trajectory
-        voyage_pos = positions_df[positions_df["voyage_id"] == voyage_id]
-        if len(voyage_pos) < MIN_POSITIONS_PER_VOYAGE:
+        if (
+            pd.isna(row.trajectory_positions)
+            or row.trajectory_positions < MIN_POSITIONS_PER_VOYAGE
+        ):
             continue
-            
-        trajectory = list(zip(voyage_pos["lat"], voyage_pos["lon"]))
+
+        lats = np.asarray(row.lat, dtype=float)
+        lons = np.asarray(row.lon, dtype=float)
+        trajectory = list(zip(lats, lons))
         
         # Compute step sizes for random walk
-        step_sizes = []
-        for i in range(len(trajectory) - 1):
-            d = haversine_distance(
-                trajectory[i][0], trajectory[i][1],
-                trajectory[i+1][0], trajectory[i+1][1]
-            )
-            step_sizes.append(d)
-        mean_step = np.mean(step_sizes) if step_sizes else 50
+        step_sizes = compute_step_lengths_array(lats, lons)
+        mean_step = float(step_sizes.mean()) if step_sizes.size else 50.0
         
         # Generate baselines
         random_traj = generate_random_walk(trajectory[0], len(trajectory), mean_step)
         direct_traj = generate_direct_route(trajectory[0], trajectory[-1], len(trajectory))
         
         # Compute encounters
-        actual_enc = compute_expected_encounters(trajectory, density_maps[year])
+        actual_enc = compute_expected_encounters_from_arrays(
+            lats,
+            lons,
+            density_maps[year],
+        )
         random_enc = compute_expected_encounters(random_traj, density_maps[year])
         direct_enc = compute_expected_encounters(direct_traj, density_maps[year])
         
@@ -427,29 +492,26 @@ def compute_step_lengths(positions_df: pd.DataFrame) -> pd.DataFrame:
     print("LF1: COMPUTING STEP-LENGTH DISTRIBUTIONS")
     print("=" * 60)
     
-    # Sort by voyage and date
-    positions_df = positions_df.sort_values(["voyage_id", "obs_date"])
-    
-    all_steps = []
-    
-    for voyage_id, group in positions_df.groupby("voyage_id"):
-        if len(group) < 2:
-            continue
-            
-        lats = group["lat"].values
-        lons = group["lon"].values
-        
-        for i in range(len(lats) - 1):
-            step_length = haversine_distance(
-                lats[i], lons[i], lats[i+1], lons[i+1]
-            )
-            if step_length > 0:  # Exclude zero-distance steps
-                all_steps.append({
-                    "voyage_id": voyage_id,
-                    "step_length": step_length,
-                })
-    
-    steps_df = pd.DataFrame(all_steps)
+    positions_df = positions_df.sort_values(["voyage_id", "obs_date"]).copy()
+    positions_df["prev_lat"] = positions_df.groupby("voyage_id")["lat"].shift(1)
+    positions_df["prev_lon"] = positions_df.groupby("voyage_id")["lon"].shift(1)
+
+    valid_steps = positions_df["prev_lat"].notna() & positions_df["prev_lon"].notna()
+    step_rows = positions_df.loc[valid_steps, ["voyage_id", "prev_lat", "prev_lon", "lat", "lon"]].copy()
+
+    if step_rows.empty:
+        steps_df = pd.DataFrame(columns=["voyage_id", "step_length"])
+    else:
+        step_rows["step_length"] = haversine_distance(
+            step_rows["prev_lat"].to_numpy(dtype=float),
+            step_rows["prev_lon"].to_numpy(dtype=float),
+            step_rows["lat"].to_numpy(dtype=float),
+            step_rows["lon"].to_numpy(dtype=float),
+        )
+        steps_df = step_rows.loc[
+            step_rows["step_length"] > 0,
+            ["voyage_id", "step_length"],
+        ].reset_index(drop=True)
     
     print(f"\nTotal steps: {len(steps_df):,}")
     print(f"Voyages with steps: {steps_df['voyage_id'].nunique():,}")
@@ -516,34 +578,57 @@ def compute_levy_metrics(
         how="left"
     )
     
-    # Compute voyage-level μ
+    step_counts = steps_with_captain.groupby("voyage_id")["step_length"].size()
+    eligible_voyages = step_counts[step_counts >= MIN_STEPS_FOR_LEVY].index
+    voyage_info = (
+        steps_with_captain.groupby("voyage_id", as_index=False)
+        .agg(
+            captain_id=("captain_id", "first"),
+            alpha_hat=("alpha_hat", "first"),
+        )
+        .set_index("voyage_id")
+    )
+
     voyage_levy = []
-    for voyage_id, group in steps_with_captain.groupby("voyage_id"):
-        steps = group["step_length"].values
-        captain_id = group["captain_id"].iloc[0]
-        alpha_hat = group["alpha_hat"].iloc[0]
-        
-        if len(steps) >= MIN_STEPS_FOR_LEVY:
-            mu, se = fit_power_law_exponent(steps)
-            voyage_levy.append({
-                "voyage_id": voyage_id,
-                "captain_id": captain_id,
-                "alpha_hat": alpha_hat,
-                "n_steps": len(steps),
-                "mu": mu,
-                "mu_se": se,
-            })
+    for voyage_id, steps in (
+        steps_with_captain[steps_with_captain["voyage_id"].isin(eligible_voyages)]
+        .groupby("voyage_id", sort=False)["step_length"]
+    ):
+        mu, se = fit_power_law_exponent(steps.to_numpy())
+        voyage_levy.append({
+            "voyage_id": voyage_id,
+            "captain_id": voyage_info.at[voyage_id, "captain_id"],
+            "alpha_hat": voyage_info.at[voyage_id, "alpha_hat"],
+            "n_steps": int(step_counts.at[voyage_id]),
+            "mu": mu,
+            "mu_se": se,
+        })
     
     voyage_levy_df = pd.DataFrame(voyage_levy)
+
+    if voyage_levy_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "captain_id",
+                "alpha_hat",
+                "total_steps",
+                "mean_mu",
+                "n_voyages",
+                "is_levy",
+                "mu_deviation",
+            ]
+        )
     
     # Aggregate to captain level
-    captain_levy = voyage_levy_df.groupby("captain_id").agg({
-        "alpha_hat": "first",
-        "n_steps": "sum",
-        "mu": "mean",
-        "voyage_id": "count",
-    }).reset_index()
-    captain_levy.columns = ["captain_id", "alpha_hat", "total_steps", "mean_mu", "n_voyages"]
+    captain_levy = (
+        voyage_levy_df.groupby("captain_id", as_index=False)
+        .agg(
+            alpha_hat=("alpha_hat", "first"),
+            total_steps=("n_steps", "sum"),
+            mean_mu=("mu", "mean"),
+            n_voyages=("voyage_id", "count"),
+        )
+    )
     
     # Filter to captains with sufficient data
     captain_levy = captain_levy[captain_levy["n_voyages"] >= MIN_VOYAGES_PER_CAPTAIN]
@@ -692,18 +777,14 @@ def compute_sinuosity_index(trajectory: List[Tuple[float, float]]) -> float:
     """
     if len(trajectory) < 2:
         return np.nan
-    
-    # Compute path length (sum of step distances)
-    path_length = 0.0
-    for i in range(len(trajectory) - 1):
-        lat1, lon1 = trajectory[i]
-        lat2, lon2 = trajectory[i + 1]
-        path_length += haversine_distance(lat1, lon1, lat2, lon2)
+
+    coords = np.asarray(trajectory, dtype=float)
+    path_length = compute_step_lengths_array(coords[:, 0], coords[:, 1]).sum()
     
     # Compute beeline distance
     beeline = haversine_distance(
-        trajectory[0][0], trajectory[0][1],
-        trajectory[-1][0], trajectory[-1][1]
+        coords[0, 0], coords[0, 1],
+        coords[-1, 0], coords[-1, 1]
     )
     
     if beeline <= 0:
@@ -739,15 +820,15 @@ def compute_fractal_dimension(
     
     if box_sizes is None:
         box_sizes = [0.5, 1.0, 2.0, 5.0, 10.0]
-    
+
+    coords = np.asarray(trajectory, dtype=float)
     counts = []
     for eps in box_sizes:
-        # Discretize to grid
-        grid_cells = set()
-        for lat, lon in trajectory:
-            cell = (int(np.floor(lat / eps)), int(np.floor(lon / eps)))
-            grid_cells.add(cell)
-        counts.append(len(grid_cells))
+        cells = np.column_stack((
+            np.floor(coords[:, 0] / eps).astype(int),
+            np.floor(coords[:, 1] / eps).astype(int),
+        ))
+        counts.append(len(np.unique(cells, axis=0)))
     
     # Fit log-log slope
     log_eps = np.log(box_sizes)
@@ -788,7 +869,8 @@ def compute_msd_exponent(trajectory: List[Tuple[float, float]]) -> float:
     if len(trajectory) < 20:
         return np.nan
     
-    n = len(trajectory)
+    coords = np.asarray(trajectory, dtype=float)
+    n = len(coords)
     tau_values = [1, 2, 5, 10, 20]
     tau_values = [t for t in tau_values if t < n // 2]
     
@@ -797,14 +879,13 @@ def compute_msd_exponent(trajectory: List[Tuple[float, float]]) -> float:
     
     msd_values = []
     for tau in tau_values:
-        displacements_sq = []
-        for i in range(n - tau):
-            d = haversine_distance(
-                trajectory[i][0], trajectory[i][1],
-                trajectory[i + tau][0], trajectory[i + tau][1]
-            )
-            displacements_sq.append(d ** 2)
-        msd_values.append(np.mean(displacements_sq))
+        displacements = haversine_distance(
+            coords[:-tau, 0],
+            coords[:-tau, 1],
+            coords[tau:, 0],
+            coords[tau:, 1],
+        )
+        msd_values.append(np.mean(np.square(displacements)))
     
     # Fit log-log slope
     log_tau = np.log(tau_values)
@@ -829,22 +910,21 @@ def compute_alternative_metrics(positions_df: pd.DataFrame) -> pd.DataFrame:
     print("=" * 60)
     
     results = []
-    
-    for voyage_id, group in positions_df.groupby("voyage_id"):
-        if len(group) < MIN_POSITIONS_PER_VOYAGE:
+    voyage_positions = build_voyage_position_lists(positions_df)
+
+    for row in voyage_positions.itertuples(index=False):
+        if row.n_positions < MIN_POSITIONS_PER_VOYAGE:
             continue
-        
-        # Sort by date
-        group = group.sort_values("obs_date")
-        trajectory = list(zip(group["lat"].values, group["lon"].values))
+
+        trajectory = list(zip(row.lat, row.lon))
         
         sinuosity = compute_sinuosity_index(trajectory)
         fractal_D = compute_fractal_dimension(trajectory)
         msd_alpha = compute_msd_exponent(trajectory)
         
         results.append({
-            "voyage_id": voyage_id,
-            "n_positions": len(trajectory),
+            "voyage_id": row.voyage_id,
+            "n_positions": row.n_positions,
             "sinuosity": sinuosity,
             "fractal_D": fractal_D,
             "msd_alpha": msd_alpha,
@@ -1258,26 +1338,15 @@ def compute_patch_yield_loo(
     # Extract patch year from entry_date
     patches["patch_year"] = pd.to_datetime(patches["entry_date"]).dt.year
 
-    hist_densities = []
-    for _, patch in patches.iterrows():
-        cell = patch["cell"]
-        patch_year = patch["patch_year"]
-        patch_vid = patch["voyage_id"]
+    patch_lookup = patches[["cell", "patch_year", "voyage_id"]].reset_index()
+    patch_history = patch_lookup.merge(cell_voyage, on="cell", how="left")
+    patch_history = patch_history[
+        (patch_history["year"] < patch_history["patch_year"])
+        & (patch_history["voyage_id_y"] != patch_history["voyage_id_x"])
+    ]
 
-        # All OTHER voyages in this cell in PRIOR years
-        mask = (
-            (cell_voyage["cell"] == cell)
-            & (cell_voyage["year"] < patch_year)
-            & (cell_voyage["voyage_id"] != patch_vid)
-        )
-        prior = cell_voyage.loc[mask, "log_q"]
-
-        if len(prior) > 0:
-            hist_densities.append(prior.mean())
-        else:
-            hist_densities.append(np.nan)
-
-    patches["hist_density"] = hist_densities
+    hist_density = patch_history.groupby("index")["log_q"].mean()
+    patches["hist_density"] = patches.index.to_series().map(hist_density)
 
     # --- Classify ---
     has_history = patches["hist_density"].notna()

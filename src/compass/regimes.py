@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from compass.config import CompassConfig
+from .config import CompassConfig
 
 logger = logging.getLogger(__name__)
 

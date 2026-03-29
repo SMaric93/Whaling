@@ -58,6 +58,17 @@ def load_voyage_data(
         data_path = DATA_DIR / "analysis_voyage.parquet"
     
     df = pd.read_parquet(data_path)
+
+    # If the parquet has clean names but no hashed entity IDs,
+    # rename to the canonical id columns expected downstream.
+    for name_col, id_col in [
+        ("captain_name_clean", "captain_id"),
+        ("agent_name_clean", "agent_id"),
+        ("vessel_name_clean", "vessel_id"),
+    ]:
+        if id_col not in df.columns and name_col in df.columns:
+            df = df.rename(columns={name_col: id_col})
+
     print(f"Raw data: {len(df):,} voyages from {data_path.name}")
     
     # Apply year filter
@@ -384,6 +395,20 @@ def prepare_analysis_sample(
     print(f"Columns: {len(df.columns)}")
     
     return df
+
+
+def load_analysis_data(
+    config: Optional[SampleConfig] = None,
+    use_climate_data: bool = False,
+) -> pd.DataFrame:
+    """
+    Backwards-compatible loader for pipeline stage imports.
+
+    Historically the pipeline imported ``load_analysis_data`` directly.
+    The analysis prep flow now lives in ``prepare_analysis_sample``, so this
+    wrapper keeps older callers working without duplicating logic.
+    """
+    return prepare_analysis_sample(config=config, use_climate_data=use_climate_data)
 
 
 def split_train_test(

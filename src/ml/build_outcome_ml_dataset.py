@@ -47,12 +47,16 @@ def build_outcome_ml_dataset(
 
     from src.reinforcement.data_builder import build_analysis_panel
 
-    df = build_analysis_panel(require_akm=True, require_logbook=False)
+    # Use require_akm=False to keep all voyages; theta/psi availability
+    # is handled below via cross-fitting.  The fixed merge_akm_effects()
+    # now loads from output/tables/r1_*_effects.csv.
+    df = build_analysis_panel(require_akm=False, require_logbook=False)
 
     # ── Cross-fitted type estimation ────────────────────────────────
     # Produce held-out theta/psi via time-split cross-fitting to avoid
     # leaking in-sample information into downstream ML models.
-    if "theta_heldout" not in df.columns:
+    has_theta = "theta" in df.columns and df["theta"].notna().sum() > 50
+    if has_theta and "theta_heldout" not in df.columns:
         try:
             from src.reinforcement.type_estimation import run_type_estimation
             logger.info("Running cross-fitted type estimation (time_split)...")
@@ -60,10 +64,14 @@ def build_outcome_ml_dataset(
         except Exception as e:
             logger.warning(
                 "Cross-fitted type estimation failed (%s); "
-                "theta_hat_holdout will be NaN — do NOT fall back to "
-                "in-sample theta, as that leaks information.",
-                e,
+                "theta_hat_holdout will be NaN.", e,
             )
+    elif not has_theta:
+        logger.warning(
+            "In-sample theta not available (merged %d non-null). "
+            "Cross-fitting cannot run — theta_hat_holdout will be NaN.",
+            df["theta"].notna().sum() if "theta" in df.columns else 0,
+        )
 
     # ── Standardize column names ────────────────────────────────────
     # Rename cross-fitted columns to the ML-standard names.
@@ -117,6 +125,18 @@ def build_outcome_ml_dataset(
             df["scarcity"] = -gy_mean  # Lower average output = more scarce
         else:
             df["scarcity"] = np.nan
+
+    # ── Median imputation for continuous features ───────────────────
+    for impute_col in ["tonnage", "scarcity"]:
+        if impute_col in df.columns:
+            col_median = df[impute_col].median()
+            n_imp = df[impute_col].isna().sum()
+            if n_imp > 0 and pd.notna(col_median):
+                df[impute_col] = df[impute_col].fillna(col_median)
+                logger.info(
+                    "Imputed %d missing %s values with median (%.3f)",
+                    n_imp, impute_col, col_median,
+                )
 
     # ── Select and order columns ────────────────────────────────────
     desired_cols = [

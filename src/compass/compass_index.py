@@ -17,9 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
-from compass.config import CompassConfig
+from .config import CompassConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,20 +66,23 @@ def standardize_features(
     stats: Dict[str, Tuple[float, float]] = {}
 
     if group_col and group_col in df.columns:
-        for col in fcols:
-            grp = df.groupby(group_col)[col]
-            mu = grp.transform("mean")
-            sd = grp.transform("std").replace(0, 1)
-            df[col] = (df[col] - mu) / sd
-            stats[col] = (float(df[col].mean()), float(df[col].std()))
+        grouped = df.groupby(group_col)[fcols]
+        means = grouped.transform("mean")
+        stds = grouped.transform("std").replace(0, 1)
+        df[fcols] = (df[fcols] - means) / stds
+        stats_frame = df[fcols].agg(["mean", "std"]).T
+        stats = {
+            col: (float(stats_frame.loc[col, "mean"]), float(stats_frame.loc[col, "std"]))
+            for col in fcols
+        }
     else:
-        for col in fcols:
-            mu = df[col].mean()
-            sd = df[col].std()
-            if sd == 0:
-                sd = 1.0
-            df[col] = (df[col] - mu) / sd
-            stats[col] = (float(mu), float(sd))
+        means = df[fcols].mean()
+        stds = df[fcols].std().replace(0, 1)
+        df[fcols] = (df[fcols] - means) / stds
+        stats = {
+            col: (float(means[col]), float(stds[col]))
+            for col in fcols
+        }
 
     return df, stats
 
@@ -186,13 +188,14 @@ def _first_n_search_steps(
             search["timestamp_utc"] >= search[arrival_col]
         ]
 
-    parts: list[pd.DataFrame] = []
-    for _vid, sub in search.groupby("voyage_id", sort=False):
-        parts.append(sub.sort_values("timestamp_utc").head(n))
-
-    if not parts:
+    if search.empty:
         return pd.DataFrame(columns=search.columns)
-    return pd.concat(parts, ignore_index=True)
+    return (
+        search.sort_values(["voyage_id", "timestamp_utc"])
+        .groupby("voyage_id", sort=False)
+        .head(n)
+        .reset_index(drop=True)
+    )
 
 
 def compute_early_window(
@@ -211,7 +214,7 @@ def compute_early_window(
     pd.DataFrame
         One row per (voyage_id × window_size) with suffix columns.
     """
-    from compass.features import compute_compass_features
+    from .features import compute_compass_features
 
     # optionally merge arrival time
     df = steps_df.copy()
@@ -234,8 +237,7 @@ def compute_early_window(
             continue
 
         # re-index
-        _, loadings = compute_compass_index(feats, cfg)
-        feats = compute_compass_index(feats, cfg)[0]  # need the actual df
+        feats, _ = compute_compass_index(feats, cfg)
         feats["early_window_n"] = n
         parts.append(feats)
 

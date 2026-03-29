@@ -88,6 +88,43 @@ def classify_ground(ground_str: str) -> str:
     return "unknown"
 
 
+def classify_ground_series(ground_values: pd.Series) -> pd.Series:
+    """Vectorized ground classification for large voyage panels."""
+    normalized = ground_values.fillna("").str.lower()
+    classified = pd.Series("unknown", index=ground_values.index, dtype=object)
+
+    rich_mask = pd.Series(False, index=ground_values.index)
+    for pattern in RICH_GROUNDS:
+        rich_mask |= normalized.str.contains(pattern, regex=False)
+
+    sparse_mask = pd.Series(False, index=ground_values.index)
+    for pattern in SPARSE_GROUNDS:
+        sparse_mask |= normalized.str.contains(pattern, regex=False)
+
+    classified.loc[rich_mask] = "rich"
+    classified.loc[sparse_mask] = "sparse"
+    classified.loc[ground_values.isna()] = "unknown"
+    return classified
+
+
+def map_shifted_group_mean(
+    df: pd.DataFrame,
+    group_col: str,
+    period_col: str,
+    value_col: str,
+    shift: int,
+) -> np.ndarray:
+    """Map group-period means from a prior period without a merge."""
+    means = df.groupby([group_col, period_col], sort=False)[value_col].mean()
+    shifted_index = pd.MultiIndex.from_arrays([
+        means.index.get_level_values(0),
+        means.index.get_level_values(1) + shift,
+    ])
+    lookup = pd.Series(means.to_numpy(), index=shifted_index)
+    keys = pd.MultiIndex.from_arrays([df[group_col], df[period_col]])
+    return lookup.reindex(keys).to_numpy()
+
+
 def classify_ground_ex_ante(df: pd.DataFrame, method: str = "lagged_year") -> pd.DataFrame:
     """
     Classify grounds using EX-ANTE productivity data to avoid endogeneity.
@@ -121,24 +158,18 @@ def classify_ground_ex_ante(df: pd.DataFrame, method: str = "lagged_year") -> pd
     
     if method == "name_based":
         # Original static classification (for robustness comparison)
-        df["ground_type_ex_ante"] = df[ground_col].apply(classify_ground)
+        df["ground_type_ex_ante"] = classify_ground_series(df[ground_col])
         
     elif method == "lagged_year":
         # Compute previous year's average catch by ground
         df["ground_normalized"] = df[ground_col].str.lower().str.strip()
-        
-        # Lag productivity: for year t, use year t-1 average
-        ground_year_avg = df.groupby(["ground_normalized", year_col])["log_q"].mean().reset_index()
-        ground_year_avg.columns = ["ground_normalized", "year_lag_source", "lagged_avg_catch"]
-        ground_year_avg["year_for_merge"] = ground_year_avg["year_lag_source"] + 1
-        
-        df = df.merge(
-            ground_year_avg[["ground_normalized", "year_for_merge", "lagged_avg_catch"]],
-            left_on=["ground_normalized", year_col],
-            right_on=["ground_normalized", "year_for_merge"],
-            how="left"
+        df["lagged_avg_catch"] = map_shifted_group_mean(
+            df,
+            "ground_normalized",
+            year_col,
+            "log_q",
+            shift=1,
         )
-        df.drop(columns=["year_for_merge"], errors="ignore", inplace=True)
         
         # Classify based on lagged catch: below median = sparse, above = rich
         median_catch = df["lagged_avg_catch"].median()
@@ -155,19 +186,13 @@ def classify_ground_ex_ante(df: pd.DataFrame, method: str = "lagged_year") -> pd
         # Use prior decade's average catch by ground
         df["ground_normalized"] = df[ground_col].str.lower().str.strip()
         df["decade"] = (df[year_col] // 10) * 10
-        
-        # Compute decade-level averages
-        decade_avg = df.groupby(["ground_normalized", "decade"])["log_q"].mean().reset_index()
-        decade_avg.columns = ["ground_normalized", "decade_lag_source", "decadal_avg_catch"]
-        decade_avg["decade_for_merge"] = decade_avg["decade_lag_source"] + 10  # Prior decade
-        
-        df = df.merge(
-            decade_avg[["ground_normalized", "decade_for_merge", "decadal_avg_catch"]],
-            left_on=["ground_normalized", "decade"],
-            right_on=["ground_normalized", "decade_for_merge"],
-            how="left"
+        df["decadal_avg_catch"] = map_shifted_group_mean(
+            df,
+            "ground_normalized",
+            "decade",
+            "log_q",
+            shift=10,
         )
-        df.drop(columns=["decade_for_merge"], errors="ignore", inplace=True)
         
         # Classify
         median_catch = df["decadal_avg_catch"].median()
@@ -256,7 +281,7 @@ def prepare_counterfactual_data(df: pd.DataFrame) -> pd.DataFrame:
     # Ensure ground classification
     ground_col = "ground_or_route" if "ground_or_route" in df.columns else "route_or_ground"
     if ground_col in df.columns:
-        df["ground_type"] = df[ground_col].apply(classify_ground)
+        df["ground_type"] = classify_ground_series(df[ground_col])
     else:
         df["ground_type"] = "unknown"
     
@@ -306,7 +331,12 @@ def prepare_counterfactual_data(df: pd.DataFrame) -> pd.DataFrame:
                        "beaufort_ice_mean", "frac_days_in_arctic_polygon", "arctic_days"]
             ice_subset = climate_df[[c for c in ice_cols if c in climate_df.columns]]
             df = df.merge(ice_subset, on="voyage_id", how="left", suffixes=("", "_climate"))
-            print(f"  Merged ice data: {df['bering_ice_mean'].notna().sum():,} voyages with data")
+            if "bering_ice_mean" in df.columns:
+                print(f"  Merged ice data: {df['bering_ice_mean'].notna().sum():,} voyages with data")
+            elif "nh_ice_extent_mean" in df.columns:
+                print(f"  Merged NH ice data: {df['nh_ice_extent_mean'].notna().sum():,} voyages with data")
+            else:
+                print("  Climate merge did not provide voyage-level ice metrics; using fallback risk proxies")
     
     # =========================================================================
     # Compute derived risk indicators

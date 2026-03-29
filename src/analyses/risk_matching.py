@@ -47,6 +47,14 @@ def _safe_r_squared(y: np.ndarray, residuals: np.ndarray) -> float:
     return float(1 - np.var(residuals) / y_var)
 
 
+def _standardize_or_zero(series: pd.Series) -> pd.Series:
+    """Return a z-score, falling back to zeros when there is no variation."""
+    std = series.std()
+    if pd.isna(std) or np.isclose(std, 0):
+        return pd.Series(0.0, index=series.index)
+    return (series - series.mean()) / std
+
+
 # =============================================================================
 # RM1: Captain Variance Decomposition
 # =============================================================================
@@ -84,43 +92,37 @@ def compute_captain_variance_decomposition(
         df = r1_results["df"]
     
     # Filter to captains with sufficient voyages
-    captain_voyages = df.groupby("captain_id").size()
+    captain_voyages = df.groupby("captain_id", sort=False).size()
     valid_captains = captain_voyages[captain_voyages >= min_voyages].index
-    df_valid = df[df["captain_id"].isin(valid_captains)].copy()
+    df_valid = df[df["captain_id"].isin(valid_captains)]
     
     print(f"\nCaptains with ≥{min_voyages} voyages: {len(valid_captains):,}")
     print(f"Voyages in sample: {len(df_valid):,}")
     
     # Compute captain-level statistics
-    captain_stats = df_valid.groupby("captain_id").agg({
-        "alpha_hat": "first",           # Captain FE (mean skill)
-        "residuals": ["mean", "var"],   # Within-captain residual stats
-        "log_q": ["mean", "var"],       # Raw output stats
-        "voyage_id": "count",           # Number of voyages
-    }).reset_index()
-    
-    captain_stats.columns = [
-        "captain_id", 
-        "alpha_hat",          # μ_α: Mean skill (FE estimate)
-        "resid_mean",         # Should be ~0
-        "sigma_sq_alpha",     # σ²_α: Within-captain variance
-        "output_mean",        # Mean log output
-        "output_var",         # Total output variance
-        "n_voyages",          # Sample size
-    ]
+    captain_stats = (
+        df_valid.groupby("captain_id", sort=False, as_index=False)
+        .agg(
+            alpha_hat=("alpha_hat", "first"),
+            resid_mean=("residuals", "mean"),
+            sigma_sq_alpha=("residuals", "var"),
+            output_mean=("log_q", "mean"),
+            output_var=("log_q", "var"),
+            n_voyages=("voyage_id", "count"),
+        )
+    )
     
     # Handle NaN variances (captains with exactly min_voyages, var requires >1)
     captain_stats["sigma_sq_alpha"] = captain_stats["sigma_sq_alpha"].fillna(0)
     
     # Standardize variance for interpretability
-    captain_stats["sigma_alpha_std"] = (
-        (captain_stats["sigma_sq_alpha"] - captain_stats["sigma_sq_alpha"].mean()) /
-        captain_stats["sigma_sq_alpha"].std()
+    captain_stats["sigma_alpha_std"] = _standardize_or_zero(
+        captain_stats["sigma_sq_alpha"]
     )
     
     # Identify "Variance Creators" (top tertile of σ²_α)
     captain_stats["variance_tertile"] = pd.qcut(
-        captain_stats["sigma_sq_alpha"], 
+        captain_stats["sigma_sq_alpha"].rank(method="first"),
         q=3, 
         labels=["Low", "Medium", "High"]
     )
@@ -136,8 +138,9 @@ def compute_captain_variance_decomposition(
         "median_sigma_sq": captain_stats["sigma_sq_alpha"].median(),
         "std_sigma_sq": captain_stats["sigma_sq_alpha"].std(),
         "n_variance_creators": captain_stats["is_variance_creator"].sum(),
-        "corr_skill_variance": captain_stats["alpha_hat"].corr(
-            captain_stats["sigma_sq_alpha"]
+        "corr_skill_variance": _safe_corr(
+            captain_stats["alpha_hat"],
+            captain_stats["sigma_sq_alpha"],
         ),
     }
     
@@ -192,48 +195,32 @@ def compute_agent_portfolio_breadth(
     port_col = "home_port" if "home_port" in df.columns else "port"
     
     # Filter to agents with sufficient voyages
-    agent_voyages = df.groupby("agent_id").size()
+    agent_voyages = df.groupby("agent_id", sort=False).size()
     valid_agents = agent_voyages[agent_voyages >= min_voyages].index
-    df_valid = df[df["agent_id"].isin(valid_agents)].copy()
+    df_valid = df[df["agent_id"].isin(valid_agents)]
     
     print(f"\nAgents with ≥{min_voyages} voyages: {len(valid_agents):,}")
     print(f"Voyages in sample: {len(df_valid):,}")
     
     # Compute agent-level portfolio metrics
-    agg_dict = {
-        "voyage_id": "count",          # Number of voyages
-        "captain_id": "nunique",       # Captain diversity
+    agg_kwargs = {
+        "n_voyages": ("voyage_id", "count"),
+        "n_captains": ("captain_id", "nunique"),
     }
-    
     if route_col and route_col in df_valid.columns:
-        agg_dict[route_col] = "nunique"  # Route diversity
+        agg_kwargs["n_routes"] = (route_col, "nunique")
     if port_col in df_valid.columns:
-        agg_dict[port_col] = "nunique"   # Port diversity
+        agg_kwargs["n_ports"] = (port_col, "nunique")
     if "log_q" in df_valid.columns:
-        agg_dict["log_q"] = ["mean", "var"]  # Output stats
+        agg_kwargs["output_mean"] = ("log_q", "mean")
+        agg_kwargs["output_var"] = ("log_q", "var")
     if "gamma_hat" in df_valid.columns:
-        agg_dict["gamma_hat"] = "first"   # Agent FE
-    
-    agent_stats = df_valid.groupby("agent_id").agg(agg_dict).reset_index()
-    
-    # Flatten column names
-    agent_stats.columns = [
-        "_".join(col).strip("_") if isinstance(col, tuple) else col 
-        for col in agent_stats.columns
-    ]
-    
-    # Standardize column names
-    col_renames = {
-        "voyage_id_count": "n_voyages",
-        "captain_id_nunique": "n_captains",
-        f"{route_col}_nunique": "n_routes" if route_col else None,
-        f"{port_col}_nunique": "n_ports",
-        "log_q_mean": "output_mean",
-        "log_q_var": "output_var",
-        "gamma_hat_first": "gamma_hat",
-    }
-    col_renames = {k: v for k, v in col_renames.items() if k in agent_stats.columns and v}
-    agent_stats = agent_stats.rename(columns=col_renames)
+        agg_kwargs["gamma_hat"] = ("gamma_hat", "first")
+
+    agent_stats = (
+        df_valid.groupby("agent_id", sort=False, as_index=False)
+        .agg(**agg_kwargs)
+    )
     
     # Compute portfolio breadth = routes + ports (diversification score)
     n_routes = agent_stats.get("n_routes", pd.Series(0, index=agent_stats.index))
@@ -241,9 +228,8 @@ def compute_agent_portfolio_breadth(
     agent_stats["portfolio_breadth"] = n_routes.fillna(0) + n_ports.fillna(0)
     
     # Standardize for regression
-    agent_stats["portfolio_breadth_std"] = (
-        (agent_stats["portfolio_breadth"] - agent_stats["portfolio_breadth"].mean()) /
-        agent_stats["portfolio_breadth"].std()
+    agent_stats["portfolio_breadth_std"] = _standardize_or_zero(
+        agent_stats["portfolio_breadth"]
     )
     
     # Identify "Variance Absorbers" (top tertile of portfolio breadth)
@@ -318,18 +304,14 @@ def run_risk_sorting_regression(
     )
     
     # Compute agent-level weighted average of captain variance
-    agent_captain_variance = df_merged.groupby("agent_id").agg({
-        "sigma_sq_alpha": "mean",     # Mean σ²_α of captains hired
-        "sigma_alpha_std": "mean",    # Standardized version
-        "alpha_hat": "mean",          # Mean skill of captains hired (for comparison)
-    }).reset_index()
-    
-    agent_captain_variance.columns = [
-        "agent_id", 
-        "captain_variance_mean",
-        "captain_variance_std_mean", 
-        "captain_skill_mean",
-    ]
+    agent_captain_variance = (
+        df_merged.groupby("agent_id", sort=False, as_index=False)
+        .agg(
+            captain_variance_mean=("sigma_sq_alpha", "mean"),
+            captain_variance_std_mean=("sigma_alpha_std", "mean"),
+            captain_skill_mean=("alpha_hat", "mean"),
+        )
+    )
     
     # Merge with agent portfolio
     analysis_df = agent_portfolio.merge(

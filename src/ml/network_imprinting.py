@@ -59,15 +59,20 @@ def analyze_network_imprinting(
         left_on="person_id_2", right_index=True, how="left",
     )
 
-    # Exposure-weighted psi for each captain
+    def _weighted_psi(g):
+        mask = g["agent_psi"].notna()
+        if not mask.any():
+            return np.nan
+        return np.average(g.loc[mask, "agent_psi"], weights=g.loc[mask, "exposure_count"])
+
     cap_exposure = ca_edges.groupby("person_id_1").apply(
-        lambda g: np.average(g["agent_psi"].dropna(), weights=g["exposure_count"]) if g["agent_psi"].notna().any() else np.nan
+        _weighted_psi
     ).rename("exposure_psi")
 
     # Early-career exposure
     early_edges = ca_edges[ca_edges["early_career_flag"] == 1]
     cap_early_exposure = early_edges.groupby("person_id_1").apply(
-        lambda g: np.average(g["agent_psi"].dropna(), weights=g["exposure_count"]) if g["agent_psi"].notna().any() else np.nan
+        _weighted_psi
     ).rename("early_exposure_psi")
 
     # ── Merge with outcomes ─────────────────────────────────────────

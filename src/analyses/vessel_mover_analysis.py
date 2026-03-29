@@ -63,7 +63,7 @@ def build_vessel_ownership_panel(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     
     # Sort by vessel and time
-    df = df.sort_values(["vessel_id", "year_out"])
+    df = df.sort_values(["vessel_id", "year_out", "voyage_id"], kind="stable")
     
     # Compute previous agent for each vessel
     df["prev_agent"] = df.groupby("vessel_id")["agent_id"].shift(1)
@@ -104,8 +104,8 @@ def build_vessel_ownership_panel(df: pd.DataFrame) -> pd.DataFrame:
         transfer_pairs = transfer_pairs.sort_values("count", ascending=False).head(10)
         
         print(f"\nTop 10 Agent-to-Agent Transfer Pairs:")
-        for _, row in transfer_pairs.iterrows():
-            print(f"  {row['from_agent']} → {row['to_agent']}: {row['count']:,}")
+        for row in transfer_pairs.itertuples(index=False):
+            print(f"  {row.from_agent} → {row.to_agent}: {row.count:,}")
     
     return df
 
@@ -350,12 +350,10 @@ def run_within_vessel_regression(
     
     # Demean by vessel (fixed effects transformation)
     sample_multi = sample_multi.copy()
-    sample_multi["mu_demeaned"] = sample_multi.groupby("vessel_id")[outcome].transform(
-        lambda x: x - x.mean()
-    )
-    sample_multi["psi_demeaned"] = sample_multi.groupby("vessel_id")["psi_hat"].transform(
-        lambda x: x - x.mean()
-    )
+    vessel_outcome_mean = sample_multi.groupby("vessel_id")[outcome].transform("mean")
+    vessel_psi_mean = sample_multi.groupby("vessel_id")["psi_hat"].transform("mean")
+    sample_multi["mu_demeaned"] = sample_multi[outcome] - vessel_outcome_mean
+    sample_multi["psi_demeaned"] = sample_multi["psi_hat"] - vessel_psi_mean
     
     # Filter to non-zero variation
     sample_fe = sample_multi.dropna(subset=["mu_demeaned", "psi_demeaned"])
@@ -495,58 +493,43 @@ def run_vessel_transfer_event_study(
     
     print(f"Transfer events: {len(transfers):,}")
     
-    # For each transfer, build event-time panel
-    event_data = []
-    
-    for _, transfer in transfers.iterrows():
-        vessel_id = transfer["vessel_id"]
-        transfer_year = transfer["year_out"]
-        
-        # Get all voyages for this vessel
-        vessel_voyages = df[df["vessel_id"] == vessel_id].copy()
-        vessel_voyages = vessel_voyages.sort_values("year_out")
-        
-        # Find transfer position
-        transfer_idx = vessel_voyages[
-            vessel_voyages["year_out"] == transfer_year
-        ].index[0]
-        vessel_voyages = vessel_voyages.reset_index(drop=True)
-        transfer_pos = vessel_voyages.index[
-            vessel_voyages["voyage_id"] == transfer["voyage_id"]
-        ][0]
-        
-        # Compute event time
-        vessel_voyages["event_time"] = vessel_voyages.index - transfer_pos
-        
-        # Keep window
-        in_window = vessel_voyages[
-            (vessel_voyages["event_time"] >= -window) & 
-            (vessel_voyages["event_time"] <= window)
-        ]
-        
-        for _, row in in_window.iterrows():
-            event_data.append({
-                "vessel_id": vessel_id,
-                "event_time": row["event_time"],
-                "levy_mu": row.get("levy_mu"),
-                "psi_hat": row.get("psi_hat"),
-                "log_q": row.get("log_q"),
-            })
-    
-    event_df = pd.DataFrame(event_data)
+    if "vessel_voyage_num" not in df.columns:
+        df = df.sort_values(["vessel_id", "year_out", "voyage_id"], kind="stable").copy()
+        df["vessel_voyage_num"] = df.groupby("vessel_id").cumcount()
+
+    transfer_events = transfers[["voyage_id", "vessel_id", "vessel_voyage_num"]].rename(
+        columns={
+            "voyage_id": "transfer_voyage_id",
+            "vessel_voyage_num": "transfer_voyage_num",
+        }
+    )
+    event_df = df.merge(transfer_events, on="vessel_id", how="inner")
+    event_df["event_time"] = (
+        event_df["vessel_voyage_num"] - event_df["transfer_voyage_num"]
+    )
+    for col in ("levy_mu", "psi_hat", "log_q"):
+        if col not in event_df.columns:
+            event_df[col] = np.nan
+    event_df = event_df[
+        (event_df["event_time"] >= -window)
+        & (event_df["event_time"] <= window)
+    ][["vessel_id", "transfer_voyage_id", "event_time", "levy_mu", "psi_hat", "log_q"]]
     
     if len(event_df) == 0:
         print("No event-time observations")
         return {"error": "no_event_obs"}
     
     # Compute mean μ by event time
-    event_means = event_df.groupby("event_time").agg({
-        "levy_mu": ["mean", "std", "count"],
-        "psi_hat": "mean",
-        "log_q": "mean",
-    })
-    event_means.columns = ["mu_mean", "mu_std", "n", "psi_mean", "logq_mean"]
-    event_means = event_means.reset_index()
+    event_means = (
+        event_df.groupby("event_time", as_index=False)
+        .agg(
+            mu_mean=("levy_mu", "mean"),
+            mu_std=("levy_mu", "std"),
+            n=("levy_mu", "count"),
+            psi_mean=("psi_hat", "mean"),
+            logq_mean=("log_q", "mean"),
+        )
+    )
     
     print("\nμ by Event Time:")
     print(event_means.to_string(index=False))

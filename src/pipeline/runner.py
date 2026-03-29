@@ -15,7 +15,24 @@ import logging
 import time
 from pathlib import Path
 
+from tqdm import tqdm
+
 logger = logging.getLogger(__name__)
+
+
+def _stage_has_success(value) -> bool:
+    """Recursively determine whether a stage returned any successful work."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        return any(_stage_has_success(v) for v in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_stage_has_success(v) for v in value)
+    if hasattr(value, 'empty'):
+        return not value.empty
+    return bool(value)
 
 
 def run_full_pipeline(
@@ -57,45 +74,29 @@ def run_full_pipeline(
         'stage5_output': None,
     }
     
-    # Stage 1: Data Pull
-    if not skip_pull:
-        from .stage1_pull import run_pull
-        logger.info("\n" + "=" * 70)
-        results['stage1_pull'] = run_pull(force=force_pull)
-    else:
-        logger.info("Skipping Stage 1: Data Pull")
+    stages = [
+        ('stage1_pull', 'Stage 1: Pull', skip_pull,
+         lambda: __import__('src.pipeline.stage1_pull', fromlist=['run_pull']).run_pull(force=force_pull)),
+        ('stage2_clean', 'Stage 2: Clean', skip_clean,
+         lambda: __import__('src.pipeline.stage2_clean', fromlist=['run_clean']).run_clean()),
+        ('stage3_merge', 'Stage 3: Merge', skip_merge,
+         lambda: __import__('src.pipeline.stage3_merge', fromlist=['run_merge']).run_merge()),
+        ('stage4_analyze', 'Stage 4: Analyze', skip_analyze,
+         lambda: __import__('src.pipeline.stage4_analyze', fromlist=['run_analyze']).run_analyze(quick=quick_analyze)),
+        ('stage5_output', 'Stage 5: Output', skip_output,
+         lambda: __import__('src.pipeline.stage5_output', fromlist=['run_output']).run_output()),
+    ]
     
-    # Stage 2: Data Cleaning
-    if not skip_clean:
-        from .stage2_clean import run_clean
-        logger.info("\n" + "=" * 70)
-        results['stage2_clean'] = run_clean()
-    else:
-        logger.info("Skipping Stage 2: Data Cleaning")
-    
-    # Stage 3: Data Merging
-    if not skip_merge:
-        from .stage3_merge import run_merge
-        logger.info("\n" + "=" * 70)
-        results['stage3_merge'] = run_merge()
-    else:
-        logger.info("Skipping Stage 3: Data Merging")
-    
-    # Stage 4: Full Analyses
-    if not skip_analyze:
-        from .stage4_analyze import run_analyze
-        logger.info("\n" + "=" * 70)
-        results['stage4_analyze'] = run_analyze(quick=quick_analyze)
-    else:
-        logger.info("Skipping Stage 4: Full Analyses")
-    
-    # Stage 5: Write Output
-    if not skip_output:
-        from .stage5_output import run_output
-        logger.info("\n" + "=" * 70)
-        results['stage5_output'] = run_output()
-    else:
-        logger.info("Skipping Stage 5: Write Output")
+    pbar = tqdm(stages, desc="Pipeline", unit="stage", ncols=80,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+    for key, label, skip, func in pbar:
+        pbar.set_postfix_str(label)
+        if skip:
+            logger.info("Skipping %s", label)
+        else:
+            logger.info("\n" + "=" * 70)
+            results[key] = func()
+    pbar.close()
     
     # Final summary
     elapsed = time.time() - start_time
@@ -107,7 +108,9 @@ def run_full_pipeline(
     
     # Count successes
     stages_run = sum(1 for v in results.values() if v is not None)
-    logger.info(f"Stages completed: {stages_run}/5")
+    stages_successful = sum(1 for v in results.values() if _stage_has_success(v))
+    logger.info(f"Stages run: {stages_run}/5")
+    logger.info(f"Stages with successful outputs: {stages_successful}/5")
     
     return results
 

@@ -29,6 +29,28 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Output directory
 INSURANCE_DIR = OUTPUT_DIR / "insurance_variance"
+LEFT_TAIL_QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90)
+
+
+def ensure_agent_psi_hat(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill in agent capability scores when only outcomes are available."""
+    if "psi_hat" not in df.columns:
+        df = df.copy()
+        df["psi_hat"] = df.groupby("agent_id")["log_q"].transform("mean")
+    return df
+
+
+def summarize_treatment_cells(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute shared treatment-cell moments and quantiles once."""
+    grouped = df.groupby("treatment_cell")["log_q"]
+    summary = grouped.agg(Mean="mean", Std="std", N="size")
+    quantiles = grouped.quantile(LEFT_TAIL_QUANTILES).unstack()
+    quantiles.columns = [f"P{int(q * 100)}" for q in quantiles.columns]
+    return (
+        summary.join(quantiles)
+        .reset_index()
+        .rename(columns={"treatment_cell": "Treatment Cell"})
+    )
 
 
 # =============================================================================
@@ -110,12 +132,7 @@ def classify_agent_capability(
     print("IV2: CLASSIFYING AGENT CAPABILITY")
     print("=" * 60)
     
-    df = df.copy()
-    
-    # Compute psi_hat if not present
-    if "psi_hat" not in df.columns:
-        agent_means = df.groupby("agent_id")["log_q"].mean()
-        df["psi_hat"] = df["agent_id"].map(agent_means)
+    df = ensure_agent_psi_hat(df.copy())
     
     # Get agent-level ψ
     agent_psi = df.groupby("agent_id")["psi_hat"].first()
@@ -204,13 +221,10 @@ def run_heteroskedasticity_test(df: pd.DataFrame) -> Dict:
     theta_col = "alpha_hat" if "alpha_hat" in df.columns else "theta_hat"
     if theta_col not in df.columns:
         print("No captain FE found. Creating from data...")
-        captain_means = df.groupby("captain_id")["log_q"].mean()
-        df["theta_hat"] = df["captain_id"].map(captain_means)
+        df["theta_hat"] = df.groupby("captain_id")["log_q"].transform("mean")
         theta_col = "theta_hat"
     
-    if "psi_hat" not in df.columns:
-        agent_means = df.groupby("agent_id")["log_q"].mean()
-        df["psi_hat"] = df["agent_id"].map(agent_means)
+    df = ensure_agent_psi_hat(df)
     
     # Filter to valid observations
     sample = df.dropna(subset=["log_q", theta_col, "psi_hat"]).copy()
@@ -353,23 +367,7 @@ def run_left_tail_analysis(df: pd.DataFrame) -> Dict:
         print("Treatment cells not defined")
         return {"error": "no_treatment_cells"}
     
-    # Compute quantiles by cell
-    quantiles = [0.10, 0.25, 0.50, 0.75, 0.90]
-    
-    results = []
-    for cell in df["treatment_cell"].unique():
-        cell_data = df[df["treatment_cell"] == cell]["log_q"]
-        
-        row = {"Treatment Cell": cell, "N": len(cell_data)}
-        row["Mean"] = cell_data.mean()
-        row["Std"] = cell_data.std()
-        
-        for q in quantiles:
-            row[f"P{int(q*100)}"] = cell_data.quantile(q)
-        
-        results.append(row)
-    
-    results_df = pd.DataFrame(results)
+    results_df = summarize_treatment_cells(df)
     
     print("\nQuantile Distribution by Treatment Cell:")
     print(results_df.to_string(index=False))
@@ -445,9 +443,7 @@ def run_quantile_regression(
     
     df = df.copy()
     
-    if "psi_hat" not in df.columns:
-        agent_means = df.groupby("agent_id")["log_q"].mean()
-        df["psi_hat"] = df["agent_id"].map(agent_means)
+    df = ensure_agent_psi_hat(df)
     
     sample = df.dropna(subset=["log_q", "psi_hat"]).copy()
     
@@ -665,13 +661,10 @@ def save_insurance_outputs(results: Dict, df_cells: pd.DataFrame) -> None:
     
     # Save cell analysis
     if "treatment_cell" in df_cells.columns:
-        cell_summary = df_cells.groupby("treatment_cell").agg({
-            "log_q": ["mean", "std", "count", 
-                      lambda x: x.quantile(0.10), 
-                      lambda x: x.quantile(0.25)],
-        })
-        cell_summary.columns = ["Mean", "Std", "N", "P10", "P25"]
-        cell_summary.to_csv(INSURANCE_DIR / "treatment_cell_summary.csv")
+        cell_summary = summarize_treatment_cells(df_cells).set_index("Treatment Cell")
+        cell_summary[["Mean", "Std", "N", "P10", "P25"]].to_csv(
+            INSURANCE_DIR / "treatment_cell_summary.csv"
+        )
     
     # Generate markdown summary
     md_lines = [

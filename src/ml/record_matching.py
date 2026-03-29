@@ -153,9 +153,20 @@ def fit_match_probability_model(
         max_depth=8,
         min_samples_leaf=4,
         random_state=seed,
-        n_jobs=-1,
+        # Restricted sandboxes can block joblib's worker initialization.
+        n_jobs=1,
     )
-    model.fit(labeled, y)
+    try:
+        model.fit(labeled, y)
+    except (PermissionError, OSError):
+        return MatchModelBundle(
+            trained=False,
+            feature_names=list(clean.columns),
+            training_rows=int(len(labeled)),
+            positive_rows=int(pos.sum()),
+            negative_rows=int(neg.sum()),
+            notes="fit_blocked_by_environment",
+        )
 
     return MatchModelBundle(
         trained=True,

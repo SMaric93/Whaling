@@ -11,6 +11,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,6 +34,28 @@ def _try_import(module: str) -> bool:
         return True
     except ImportError:
         return False
+
+
+def _assert_subprocess_import(module: str, pythonpath: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(pythonpath)
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module}; print({module}.__file__)"],
+        capture_output=True,
+        check=False,
+        cwd=repo_root,
+        env=env,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "compass/__init__.py" in result.stdout
+
+
+def test_compass_imports_work_in_both_supported_layouts():
+    repo_root = Path(__file__).resolve().parents[1]
+    _assert_subprocess_import("compass", repo_root / "src")
+    _assert_subprocess_import("src.compass", repo_root)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -264,6 +288,44 @@ class TestFeatures:
             assert numeric.notna().sum().sum() > 0
 
 
+class TestExport:
+    def test_aggregate_captain_year_weighted_means(self):
+        from compass.export import aggregate_captain_year
+
+        df = pd.DataFrame({
+            "captain_id": ["C1", "C1", "C2"],
+            "year": [1800, 1800, 1800],
+            "n_search_steps": [1, 3, 2],
+            "CompassIndex1": [1.0, 3.0, 5.0],
+            "CompassIndex2": [np.nan, 4.0, 8.0],
+            "other_metric": [10.0, 30.0, 50.0],
+        })
+
+        aggregated = aggregate_captain_year(df)
+        c1 = aggregated.loc[aggregated["captain_id"] == "C1"].iloc[0]
+
+        assert c1["CompassIndex1"] == pytest.approx(2.0)
+        assert c1["CompassIndex1_wtd"] == pytest.approx(2.5)
+        assert c1["CompassIndex2_wtd"] == pytest.approx(4.0)
+
+    def test_build_diagnostics(self):
+        from compass.export import build_diagnostics
+
+        steps_df = pd.DataFrame({
+            "voyage_id": ["V1", "V1", "V2", "V2", "V2"],
+            "regime_label": ["search", "transit", "search", pd.NA, "search"],
+            "gap_flag": [False, True, False, False, True],
+            "p_search": [0.9, 0.1, 0.8, np.nan, 0.6],
+        })
+
+        diagnostics = build_diagnostics(steps_df).set_index("voyage_id")
+
+        assert diagnostics.loc["V1", "n_steps_total"] == 2
+        assert diagnostics.loc["V1", "n_steps_search"] == 1
+        assert diagnostics.loc["V1", "missing_gap_share"] == pytest.approx(0.5)
+        assert diagnostics.loc["V1", "regime_confidence"] == pytest.approx(0.5)
+
+
 class TestIndex:
     def test_pca_explained_variance(self):
         from compass.compass_index import fit_pca
@@ -281,6 +343,21 @@ class TestIndex:
         })
         std_df, stats = standardize_features(df)
         assert abs(std_df["hill_tail_index"].mean()) < 1e-10
+
+    def test_standardize_grouped(self):
+        from compass.compass_index import standardize_features
+
+        df = pd.DataFrame({
+            "group": ["a", "a", "b", "b"],
+            "hill_tail_index": [1.0, 3.0, 10.0, 14.0],
+            "mean_resultant_length": [2.0, 4.0, 20.0, 24.0],
+        })
+        std_df, _ = standardize_features(df, group_col="group")
+
+        grouped_means = std_df.groupby("group")[
+            ["hill_tail_index", "mean_resultant_length"]
+        ].mean()
+        assert np.allclose(grouped_means.values, 0.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

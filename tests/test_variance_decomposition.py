@@ -5,9 +5,14 @@ These tests address reviewer critiques about statistical anomalies
 in Table 7 variance components (Issue: identical Var(ψ) = Var(θ) values).
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def make_synthetic_voyage_data(n_voyages: int = 500) -> pd.DataFrame:
@@ -91,6 +96,40 @@ class TestVarianceDecompositionDistinctness:
             f"In large matched employer-employee data, this is statistically improbable "
             f"and suggests a coding error (see Table 7 reviewer critique)."
         )
+
+
+class TestBaselineProductionDesign:
+    """Pin the sparse design matrix layout used by the AKM baseline."""
+
+    def test_build_sparse_design_matrix_exact_blocks(self):
+        """Each FE block should preserve first-seen order and dropped references."""
+        df = pd.DataFrame({
+            "captain_id": ["C1", "C2", "C1", "C2"],
+            "agent_id": ["A1", "A2", "A2", "A1"],
+            "vessel_period": ["V1", "V2", "V1", "V2"],
+            "route_time": ["R1", "R2", "R1", "R2"],
+            "port_time": ["P1", "P2", "P2", "P1"],
+            "log_tonnage": [5.0, 6.0, 7.0, 8.0],
+            "log_duration": [10.0, 11.0, 12.0, 13.0],
+            "_fe_year_1820": [1.0, 0.0, 1.0, 0.0],
+        })
+
+        from src.analyses.baseline_production import build_sparse_design_matrix
+
+        X, index_maps = build_sparse_design_matrix(df)
+        dense = X.toarray()
+        expected = np.array([
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 10.0, 1.0],
+            [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 6.0, 11.0, 0.0],
+            [1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 7.0, 12.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 8.0, 13.0, 0.0],
+        ])
+
+        assert X.shape == (4, 9)
+        assert list(index_maps["captain"]["ids"]) == ["C1", "C2"]
+        assert list(index_maps["agent"]["ids"]) == ["A1", "A2"]
+        assert index_maps["controls"]["names"] == ["log_tonnage", "log_duration", "_fe_year_1820"]
+        np.testing.assert_allclose(dense, expected)
 
 
 class TestCF_F15_InequalityDecomposition:

@@ -17,6 +17,26 @@ from .data import (
 )
 
 
+def _voyage_lookup(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Return a voyage-indexed lookup table for the requested columns."""
+    available = [c for c in columns if c in frame.columns]
+    if frame.empty or "voyage_id" not in frame.columns or not available:
+        return pd.DataFrame(columns=available)
+    return frame.loc[frame["voyage_id"].notna(), ["voyage_id", *available]].drop_duplicates("voyage_id").set_index("voyage_id")
+
+
+def _voyage_counts(frame: pd.DataFrame, output_col: str) -> pd.Series:
+    """Count voyage-level observations without building an intermediate frame."""
+    if frame.empty or "voyage_id" not in frame.columns:
+        return pd.Series(dtype=float, name=output_col)
+    return (
+        frame.loc[frame["voyage_id"].notna()]
+        .groupby("voyage_id", sort=False)
+        .size()
+        .rename(output_col)
+    )
+
+
 def build_master_sample_lineage(context: BuildContext) -> Path:
     out = context.outputs / "manifests" / "master_sample_lineage.parquet"
 
@@ -48,7 +68,6 @@ def build_master_sample_lineage(context: BuildContext) -> Path:
     df["in_universe"] = True
 
     connected_cols = [
-        "voyage_id",
         "theta",
         "psi",
         "switch_agent",
@@ -60,68 +79,32 @@ def build_master_sample_lineage(context: BuildContext) -> Path:
         "has_logbook_data",
         "logbook_source_count",
     ]
-    connected_cols = [c for c in connected_cols if c in connected.columns]
-    connected_flags = connected[connected_cols].copy()
+    connected_flags = _voyage_lookup(connected, connected_cols)
     connected_flags["in_connected_set"] = True
-    df = df.merge(connected_flags, on="voyage_id", how="left", suffixes=("", "_connected"))
+    df = df.join(connected_flags, on="voyage_id", rsuffix="_connected")
 
     if "ground_or_route_connected" in df.columns:
-        df["ground_or_route"] = df["ground_or_route"].fillna(df["ground_or_route_connected"])
+        df["ground_or_route"] = df["ground_or_route"].combine_first(df["ground_or_route_connected"])
         df = df.drop(columns=["ground_or_route_connected"])
     if "has_logbook_data_connected" in df.columns:
-        df["has_logbook_data"] = df["has_logbook_data"].fillna(df["has_logbook_data_connected"])
+        df["has_logbook_data"] = df["has_logbook_data"].combine_first(df["has_logbook_data_connected"])
         df = df.drop(columns=["has_logbook_data_connected"])
     if "logbook_source_count_connected" in df.columns:
-        df["logbook_source_count"] = df["logbook_source_count"].fillna(df["logbook_source_count_connected"])
+        df["logbook_source_count"] = df["logbook_source_count"].combine_first(df["logbook_source_count_connected"])
         df = df.drop(columns=["logbook_source_count_connected"])
 
-    position_counts = (
-        positions[positions["voyage_id"].notna()]
-        .groupby("voyage_id")
-        .size()
-        .rename("coordinate_observations")
-        .reset_index()
-    )
-    df = df.merge(position_counts, on="voyage_id", how="left")
+    df["coordinate_observations"] = df["voyage_id"].map(_voyage_counts(positions, "coordinate_observations"))
 
     if not logbook_features.empty:
-        logbook_subset = logbook_features[
-            [c for c in ["voyage_id", "n_positions", "primary_ground"] if c in logbook_features.columns]
-        ]
-        df = df.merge(logbook_subset, on="voyage_id", how="left", suffixes=("", "_logbook"))
+        logbook_subset = _voyage_lookup(logbook_features, ["n_positions", "primary_ground"])
+        df = df.join(logbook_subset, on="voyage_id", rsuffix="_logbook")
         if "n_positions_logbook" in df.columns:
-            df["n_positions"] = df["n_positions"].fillna(df["n_positions_logbook"])
+            df["n_positions"] = df["n_positions"].combine_first(df["n_positions_logbook"])
             df = df.drop(columns=["n_positions_logbook"])
 
-    patch_counts = (
-        patches.groupby("voyage_id")
-        .size()
-        .rename("patch_observations")
-        .reset_index()
-        if not patches.empty
-        else pd.DataFrame(columns=["voyage_id", "patch_observations"])
-    )
-    df = df.merge(patch_counts, on="voyage_id", how="left")
-
-    patch_day_counts = (
-        survival.groupby("voyage_id")
-        .size()
-        .rename("patch_day_observations")
-        .reset_index()
-        if not survival.empty
-        else pd.DataFrame(columns=["voyage_id", "patch_day_observations"])
-    )
-    df = df.merge(patch_day_counts, on="voyage_id", how="left")
-
-    encounter_counts = (
-        action.groupby("voyage_id")
-        .size()
-        .rename("encounter_observations")
-        .reset_index()
-        if not action.empty
-        else pd.DataFrame(columns=["voyage_id", "encounter_observations"])
-    )
-    df = df.merge(encounter_counts, on="voyage_id", how="left")
+    df["patch_observations"] = df["voyage_id"].map(_voyage_counts(patches, "patch_observations"))
+    df["patch_day_observations"] = df["voyage_id"].map(_voyage_counts(survival, "patch_day_observations"))
+    df["encounter_observations"] = df["voyage_id"].map(_voyage_counts(action, "encounter_observations"))
 
     df["in_connected_set"] = df["in_connected_set"].fillna(False).astype(bool)
     df["has_coordinates"] = (

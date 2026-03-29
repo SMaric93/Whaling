@@ -54,39 +54,157 @@ def load_voyage_panel(
         path = DATA_DIR / "analysis_voyage.parquet"
 
     df = pd.read_parquet(path)
+    # If the parquet already has hashed entity IDs (from Stage 3
+    # entity resolution), use them directly.  Only rename clean
+    # names → id columns for *legacy* data files that pre-date
+    # the entity-resolution stage.
+    rename_cols = {}
+    for name_col, id_col in [
+        ("captain_name_clean", "captain_id"),
+        ("agent_name_clean", "agent_id"),
+        ("vessel_name_clean", "vessel_id"),
+    ]:
+        if id_col not in df.columns and name_col in df.columns:
+            rename_cols[name_col] = id_col
+    if rename_cols:
+        df = df.rename(columns=rename_cols)
+    
     logger.info("Loaded %d voyages from %s", len(df), path.name)
     return df
 
 
 def merge_akm_effects(df: pd.DataFrame) -> pd.DataFrame:
-    """Merge in-sample AKM captain (theta) and agent (psi) effects."""
-    # Captain effects
-    captain_path = DATA_DIR / "akm_captain_effects.csv"
-    if captain_path.exists():
-        akm_c = pd.read_csv(captain_path)
-        df = df.merge(
-            akm_c[[COLS.captain_id, "theta", "theta_quintile"]],
-            on=COLS.captain_id,
-            how="left",
-        )
-        n_matched = df["theta"].notna().sum()
-        logger.info("Merged captain theta: %d / %d matched", n_matched, len(df))
-    else:
-        logger.warning("AKM captain effects not found at %s", captain_path)
+    """Merge in-sample AKM captain (theta) and agent (psi) effects.
 
-    # Agent effects
-    agent_path = DATA_DIR / "akm_agent_effects.csv"
-    if agent_path.exists():
-        akm_a = pd.read_csv(agent_path)
-        df = df.merge(
-            akm_a[[COLS.agent_id, "psi", "psi_quintile"]],
-            on=COLS.agent_id,
-            how="left",
+    Handles two ID formats transparently:
+    - **Fresh pipeline**: Panel has hashed entity IDs (e.g. ``C0001c827f8f0``)
+      from Stage 3 entity resolution → matches R1 effects directly.
+    - **Legacy data**: Panel has raw clean names (e.g. ``FREEMAN BENJAMIN``)
+      renamed to ``captain_id`` → needs crosswalk bridge to R1 effects.
+    """
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    CROSSWALK_DIR = PROJECT_ROOT / "data" / "crosswalks"
+
+    def _try_direct_merge(df, effects_path, id_col, effect_col, target_col, quintile_col):
+        """Try merging effects directly on the ID column."""
+        if not effects_path.exists():
+            return df, False
+        akm = pd.read_csv(effects_path)
+        if id_col not in akm.columns or effect_col not in akm.columns:
+            return df, False
+        akm = akm.rename(columns={effect_col: target_col})
+        if quintile_col not in akm.columns:
+            akm[quintile_col] = pd.qcut(
+                akm[target_col].rank(method="first"), q=5, labels=False
+            ) + 1
+        merge_cols = [id_col, target_col, quintile_col]
+        merge_cols = [c for c in merge_cols if c in akm.columns]
+        merged = df.merge(
+            akm[merge_cols].drop_duplicates(id_col),
+            on=id_col, how="left",
         )
-        n_matched = df["psi"].notna().sum()
-        logger.info("Merged agent psi: %d / %d matched", n_matched, len(df))
-    else:
-        logger.warning("AKM agent effects not found at %s", agent_path)
+        n = merged[target_col].notna().sum()
+        if n > 0:
+            return merged, True
+        return df, False
+
+    def _try_crosswalk_merge(df, effects_path, crosswalk_path,
+                              id_col, name_col, effect_col, target_col, quintile_col):
+        """Merge effects through a crosswalk (hashed ID → clean name)."""
+        if not effects_path.exists() or not crosswalk_path.exists():
+            return df, False
+        akm = pd.read_csv(effects_path)
+        cw = pd.read_parquet(crosswalk_path)
+        if id_col not in akm.columns or effect_col not in akm.columns:
+            return df, False
+        if name_col not in cw.columns:
+            return df, False
+        akm = akm.rename(columns={effect_col: target_col})
+        # Bridge: hashed id → clean name
+        cw_dedup = cw[[id_col, name_col]].drop_duplicates(id_col)
+        akm_named = akm.merge(cw_dedup, on=id_col, how="left")
+        akm_named = akm_named.dropna(subset=[name_col])
+        if quintile_col not in akm_named.columns:
+            akm_named[quintile_col] = pd.qcut(
+                akm_named[target_col].rank(method="first"), q=5, labels=False
+            ) + 1
+        akm_named = akm_named.rename(columns={name_col: "_merge_key"})
+        akm_merge = akm_named[["_merge_key", target_col, quintile_col]].drop_duplicates("_merge_key")
+        merged = df.merge(
+            akm_merge,
+            left_on=COLS.captain_id if target_col == "theta" else COLS.agent_id,
+            right_on="_merge_key",
+            how="left",
+        ).drop(columns=["_merge_key"], errors="ignore")
+        n = merged[target_col].notna().sum()
+        if n > 0:
+            return merged, True
+        return df, False
+
+    # ── Captain effects ─────────────────────────────────────────────
+    r1_captain = PROJECT_ROOT / "output" / "tables" / "r1_captain_effects.csv"
+    direct_captain = DATA_DIR / "akm_captain_effects.csv"
+
+    # Try direct merge (works when panel has hashed IDs)
+    df, captain_loaded = _try_direct_merge(
+        df, r1_captain, COLS.captain_id, "alpha_hat", "theta", "theta_quintile",
+    )
+    if captain_loaded:
+        logger.info("Merged captain theta (direct R1): %d / %d",
+                     df["theta"].notna().sum(), len(df))
+
+    # Try legacy direct-name file
+    if not captain_loaded:
+        df, captain_loaded = _try_direct_merge(
+            df, direct_captain, COLS.captain_id, "theta", "theta", "theta_quintile",
+        )
+        if captain_loaded:
+            logger.info("Merged captain theta (direct legacy): %d / %d",
+                         df["theta"].notna().sum(), len(df))
+
+    # Fall back to crosswalk bridge (legacy panel with raw names)
+    if not captain_loaded:
+        df, captain_loaded = _try_crosswalk_merge(
+            df, r1_captain, CROSSWALK_DIR / "captain_crosswalk.parquet",
+            "captain_id", "captain_name_clean", "alpha_hat", "theta", "theta_quintile",
+        )
+        if captain_loaded:
+            logger.info("Merged captain theta via crosswalk: %d / %d",
+                         df["theta"].notna().sum(), len(df))
+
+    if not captain_loaded:
+        logger.warning("AKM captain effects could not be merged")
+
+    # ── Agent effects ───────────────────────────────────────────────
+    r1_agent = PROJECT_ROOT / "output" / "tables" / "r1_agent_effects.csv"
+    direct_agent = DATA_DIR / "akm_agent_effects.csv"
+
+    df, agent_loaded = _try_direct_merge(
+        df, r1_agent, COLS.agent_id, "gamma_hat", "psi", "psi_quintile",
+    )
+    if agent_loaded:
+        logger.info("Merged agent psi (direct R1): %d / %d",
+                     df["psi"].notna().sum(), len(df))
+
+    if not agent_loaded:
+        df, agent_loaded = _try_direct_merge(
+            df, direct_agent, COLS.agent_id, "psi", "psi", "psi_quintile",
+        )
+        if agent_loaded:
+            logger.info("Merged agent psi (direct legacy): %d / %d",
+                         df["psi"].notna().sum(), len(df))
+
+    if not agent_loaded:
+        df, agent_loaded = _try_crosswalk_merge(
+            df, r1_agent, CROSSWALK_DIR / "agent_crosswalk.parquet",
+            "agent_id", "agent_name_clean", "gamma_hat", "psi", "psi_quintile",
+        )
+        if agent_loaded:
+            logger.info("Merged agent psi via crosswalk: %d / %d",
+                         df["psi"].notna().sum(), len(df))
+
+    if not agent_loaded:
+        logger.warning("AKM agent effects could not be merged")
 
     return df
 
@@ -238,7 +356,10 @@ def apply_sample_restrictions(
 
     # AKM effects
     if require_akm:
-        df = df[df["theta"].notna() & df["psi"].notna()]
+        if "theta" in df.columns and "psi" in df.columns:
+            df = df[df["theta"].notna() & df["psi"].notna()]
+        else:
+            logger.warning("require_akm=True, but theta/psi not found in df. Skipping filter.")
 
     # Logbook data
     if require_logbook:

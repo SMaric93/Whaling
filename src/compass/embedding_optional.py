@@ -18,13 +18,13 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from compass.config import CompassConfig
-from torch_device import (
+from ._torch_compat import (
     configure_torch_runtime,
     get_torch_device,
     tensor_to_numpy,
     torch_is_available,
 )
+from .config import CompassConfig
 
 logger = logging.getLogger(__name__)
 

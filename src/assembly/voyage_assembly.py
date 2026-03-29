@@ -239,6 +239,15 @@ class VoyageAssembler:
         )
         result["has_vqi_data"] = result["vqi_proxy"].notna()
         
+        # Ensure canonical ID columns exist for downstream ML and Stage 4 analysis loaders
+        for name_col, id_col in [
+            ("captain_name_clean", "captain_id"),
+            ("agent_name_clean", "agent_id"),
+            ("vessel_name_clean", "vessel_id"),
+        ]:
+            if id_col not in result.columns and name_col in result.columns:
+                result[id_col] = result[name_col]
+        
         return result
     
     def save(self, output_path: Optional[Path] = None) -> Path:

@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from compass.config import CompassConfig
+from .config import CompassConfig
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,8 @@ def split_half_reliability(
     -------
     dict with ``icc``, ``pearson_r``, ``spearman_r``, ``n_voyages``.
     """
-    from compass.features import compute_compass_features
-    from compass.compass_index import compute_compass_index
+    from .compass_index import compute_compass_index
+    from .features import compute_compass_features
 
     search = steps_df.loc[steps_df["regime_label"] == "search"].copy()
 
@@ -119,8 +119,8 @@ def step_definition_robustness(
     -------
     dict of pairwise Spearman correlations.
     """
-    from compass.features import compute_compass_features
-    from compass.compass_index import compute_compass_index
+    from .compass_index import compute_compass_index
+    from .features import compute_compass_features
 
     indices: Dict[str, pd.DataFrame] = {}
     for name, sdf in variants.items():
@@ -165,7 +165,7 @@ def regime_placebo(
 
     Returns feature-level summary stats for comparison.
     """
-    from compass.features import compute_compass_features
+    from .features import compute_compass_features
 
     transit = steps_df.copy()
     transit["regime_label"] = np.where(
@@ -199,9 +199,9 @@ def hmm_k_sensitivity(
     Re-run regime segmentation with each K candidate, compare
     CompassIndex1 rank-correlations.
     """
-    from compass.regimes import segment_voyages
-    from compass.features import compute_compass_features
-    from compass.compass_index import compute_compass_index
+    from .compass_index import compute_compass_index
+    from .features import compute_compass_features
+    from .regimes import segment_voyages
     from copy import deepcopy
 
     indices: Dict[int, pd.DataFrame] = {}
@@ -247,8 +247,8 @@ def missingness_sensitivity(
     Returns Spearman correlation of CompassIndex1 between full and
     reduced samples.
     """
-    from compass.features import compute_compass_features
-    from compass.compass_index import compute_compass_index
+    from .compass_index import compute_compass_index
+    from .features import compute_compass_features
 
     # full sample
     feat_full = compute_compass_features(steps_df, cfg)

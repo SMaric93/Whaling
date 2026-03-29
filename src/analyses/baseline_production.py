@@ -20,6 +20,24 @@ from .connected_set import find_leave_one_out_connected_set
 from .parallel_akm import parallel_kss_leverage
 
 
+def build_fe_block(
+    values: pd.Series,
+    drop_first: bool = False,
+) -> Tuple[sp.csr_matrix, np.ndarray, Dict]:
+    """Build one sparse fixed-effect block using factorized codes."""
+    codes, ids = pd.factorize(values, sort=False)
+    offset = 1 if drop_first else 0
+    mask = codes >= offset
+    rows = np.flatnonzero(mask)
+    cols = codes[mask] - offset
+    matrix = sp.csr_matrix(
+        (np.ones(len(rows)), (rows, cols)),
+        shape=(len(values), max(len(ids) - offset, 0)),
+    )
+    index_map = {value: i for i, value in enumerate(ids)}
+    return matrix, ids, index_map
+
+
 def build_sparse_design_matrix(
     df: pd.DataFrame,
     include_vessel_period: bool = True,
@@ -50,64 +68,30 @@ def build_sparse_design_matrix(
     index_maps = {}
     
     # Captain FEs
-    captain_ids = df["captain_id"].unique()
-    captain_map = {c: i for i, c in enumerate(captain_ids)}
-    captain_idx = df["captain_id"].map(captain_map).values
-    X_captain = sp.csr_matrix(
-        (np.ones(n), (np.arange(n), captain_idx)),
-        shape=(n, len(captain_ids))
-    )
+    X_captain, captain_ids, captain_map = build_fe_block(df["captain_id"])
     matrices.append(X_captain)
     index_maps["captain"] = {"ids": captain_ids, "map": captain_map, "n": len(captain_ids)}
     
     # Agent FEs (drop first for identification)
-    agent_ids = df["agent_id"].unique()
-    agent_map = {a: i for i, a in enumerate(agent_ids)}
-    agent_idx = df["agent_id"].map(agent_map).values
-    X_agent_full = sp.csr_matrix(
-        (np.ones(n), (np.arange(n), agent_idx)),
-        shape=(n, len(agent_ids))
-    )
-    X_agent = X_agent_full[:, 1:]  # Drop first
+    X_agent, agent_ids, agent_map = build_fe_block(df["agent_id"], drop_first=True)
     matrices.append(X_agent)
     index_maps["agent"] = {"ids": agent_ids, "map": agent_map, "n": len(agent_ids)}
     
     # Vessel×period FEs (drop first)
     if include_vessel_period and "vessel_period" in df.columns:
-        vp_ids = df["vessel_period"].unique()
-        vp_map = {v: i for i, v in enumerate(vp_ids)}
-        vp_idx = df["vessel_period"].map(vp_map).values
-        X_vp_full = sp.csr_matrix(
-            (np.ones(n), (np.arange(n), vp_idx)),
-            shape=(n, len(vp_ids))
-        )
-        X_vp = X_vp_full[:, 1:]
+        X_vp, vp_ids, vp_map = build_fe_block(df["vessel_period"], drop_first=True)
         matrices.append(X_vp)
         index_maps["vessel_period"] = {"ids": vp_ids, "map": vp_map, "n": len(vp_ids)}
     
     # Route×time FEs (drop first)
     if include_route_time and "route_time" in df.columns:
-        rt_ids = df["route_time"].unique()
-        rt_map = {r: i for i, r in enumerate(rt_ids)}
-        rt_idx = df["route_time"].map(rt_map).values
-        X_rt_full = sp.csr_matrix(
-            (np.ones(n), (np.arange(n), rt_idx)),
-            shape=(n, len(rt_ids))
-        )
-        X_rt = X_rt_full[:, 1:]
+        X_rt, rt_ids, rt_map = build_fe_block(df["route_time"], drop_first=True)
         matrices.append(X_rt)
         index_maps["route_time"] = {"ids": rt_ids, "map": rt_map, "n": len(rt_ids)}
     
     # Port×time FEs (drop first) - home port × decade
     if include_port_time and "port_time" in df.columns:
-        pt_ids = df["port_time"].unique()
-        pt_map = {p: i for i, p in enumerate(pt_ids)}
-        pt_idx = df["port_time"].map(pt_map).values
-        X_pt_full = sp.csr_matrix(
-            (np.ones(n), (np.arange(n), pt_idx)),
-            shape=(n, len(pt_ids))
-        )
-        X_pt = X_pt_full[:, 1:]
+        X_pt, pt_ids, pt_map = build_fe_block(df["port_time"], drop_first=True)
         matrices.append(X_pt)
         index_maps["port_time"] = {"ids": pt_ids, "map": pt_map, "n": len(pt_ids)}
     
@@ -123,11 +107,11 @@ def build_sparse_design_matrix(
     # Additional controls: any column starting with '_fe_' (e.g. year dummies)
     for col in sorted(df.columns):
         if col.startswith("_fe_") and col not in control_names:
-            controls.append(df[col].values.astype(float))
+            controls.append(df[col].to_numpy(dtype=float, copy=False))
             control_names.append(col)
     
     if controls:
-        X_controls = sp.csr_matrix(np.column_stack(controls))
+        X_controls = sp.csr_matrix(df[control_names].to_numpy(dtype=float, copy=False))
         matrices.append(X_controls)
         index_maps["controls"] = {"names": control_names, "n": len(control_names)}
     
@@ -254,8 +238,10 @@ def estimate_r1(
     })
     
     # Merge FEs back to data
-    df_est = df_est.merge(captain_fe, on="captain_id", how="left")
-    df_est = df_est.merge(agent_fe, on="agent_id", how="left")
+    captain_lookup = pd.Series(theta, index=index_maps["captain"]["ids"])
+    agent_lookup = pd.Series(psi, index=index_maps["agent"]["ids"])
+    df_est["alpha_hat"] = df_est["captain_id"].map(captain_lookup)
+    df_est["gamma_hat"] = df_est["agent_id"].map(agent_lookup)
     df_est["residuals"] = residuals
     df_est["fitted"] = y_hat
     
@@ -393,14 +379,10 @@ def compute_kss_correction(
     psi_reduced = np.concatenate([[0], beta_reduced[cap_n:ca_end]])
     
     # Map to observation level
-    captain_map = idx_maps["captain"]["map"]
-    agent_map = idx_maps["agent"]["map"]
-    alpha_i = np.array([theta_reduced[captain_map[c]] for c in df["captain_id"]])
-    psi_j_est = beta_reduced[cap_n:ca_end]
-    gamma_j = np.array([
-        psi_j_est[agent_map[a] - 1] if agent_map[a] > 0 else 0.0 
-        for a in df["agent_id"]
-    ])
+    alpha_lookup = pd.Series(theta_reduced, index=idx_maps["captain"]["ids"])
+    gamma_lookup = pd.Series(psi_reduced, index=idx_maps["agent"]["ids"])
+    alpha_i = df["captain_id"].map(alpha_lookup).to_numpy(dtype=float, copy=False)
+    gamma_j = df["agent_id"].map(gamma_lookup).to_numpy(dtype=float, copy=False)
     
     # =========================================================================
     # Step 5: Compute KSS leverages on the reduced (well-conditioned) system

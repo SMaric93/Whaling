@@ -43,6 +43,72 @@ def test_master_sample_lineage_is_data_driven(tmp_path):
     assert lineage["in_connected_set"].sum() > 5000
 
 
+def test_master_sample_lineage_exact_flags(tmp_path, monkeypatch):
+    context = _context(tmp_path)
+    (context.outputs / "manifests").mkdir(parents=True, exist_ok=True)
+
+    import src.paper.sample_lineage as sample_lineage_mod
+
+    universe = pd.DataFrame({
+        "voyage_id": ["V1", "V2"],
+        "captain_id": ["C1", "C2"],
+        "agent_id": ["A1", "A2"],
+        "vessel_id": ["S1", "S2"],
+        "year_out": [1820, 1821],
+        "ground_or_route": ["Pacific", None],
+        "has_labor_data": [True, False],
+        "has_route_data": [False, False],
+        "has_vqi_data": [False, False],
+        "has_logbook_data": [False, False],
+        "logbook_source_count": [0, 0],
+        "tonnage": [100.0, 110.0],
+        "crew_count": [20, 25],
+    })
+    connected = pd.DataFrame({
+        "voyage_id": ["V1"],
+        "theta": [0.2],
+        "psi": [0.4],
+        "switch_agent": [1],
+        "switch_vessel": [0],
+        "scarcity": [0.5],
+        "n_positions": [4],
+        "n_grounds_visited": [2],
+        "ground_or_route": ["Pacific"],
+        "has_logbook_data": [True],
+        "logbook_source_count": [2],
+    })
+    logbook = pd.DataFrame({
+        "voyage_id": ["V2"],
+        "n_positions": [3],
+        "primary_ground": ["Atlantic"],
+    })
+    positions = pd.DataFrame({"voyage_id": ["V2", "V2"]})
+    patches = pd.DataFrame({"voyage_id": ["V1", "V1"]})
+    survival = pd.DataFrame({"voyage_id": ["V1", "V1", "V1"]})
+    action = pd.DataFrame({"voyage_id": ["V1"]})
+
+    monkeypatch.setattr(sample_lineage_mod, "load_universe", lambda context: universe)
+    monkeypatch.setattr(sample_lineage_mod, "load_connected_sample", lambda context: connected)
+    monkeypatch.setattr(sample_lineage_mod, "load_logbook_features", lambda context: logbook)
+    monkeypatch.setattr(sample_lineage_mod, "load_positions", lambda context: positions)
+    monkeypatch.setattr(sample_lineage_mod, "load_patch_sample", lambda context: patches)
+    monkeypatch.setattr(sample_lineage_mod, "load_survival_dataset", lambda context: survival)
+    monkeypatch.setattr(sample_lineage_mod, "load_action_dataset", lambda context: action)
+
+    path = sample_lineage_mod.build_master_sample_lineage(context)
+    lineage = pd.read_parquet(path).set_index("voyage_id")
+
+    assert bool(lineage.loc["V1", "in_connected_set"])
+    assert bool(lineage.loc["V1", "used_in_table04"])
+    assert lineage.loc["V1", "patch_observations"] == 2
+    assert lineage.loc["V1", "primary_exclusion_reason"] == ""
+    assert not bool(lineage.loc["V2", "in_connected_set"])
+    assert bool(lineage.loc["V2", "has_coordinates"])
+    assert bool(lineage.loc["V2", "has_ground_labels"])
+    assert lineage.loc["V2", "coordinate_observations"] == 2
+    assert lineage.loc["V2", "primary_exclusion_reason"] == "missing_connected_set"
+
+
 def test_table01_sample_has_real_panels(tmp_path):
     context = _context(tmp_path)
     for subdir in ["tables", "appendix", "figures", "manifests", "memos", "latex"]:
@@ -115,6 +181,47 @@ def test_remaining_main_tables_are_data_driven(tmp_path):
 
     for name, table in built_tables.items():
         assert "mapped_integration" not in table.to_string(), name
+
+
+def test_table06_forward_metrics_exact():
+    from src.paper.tables.table06_search_execution_exitvalue import _compute_forward_metrics
+
+    connected = pd.DataFrame({
+        "voyage_id": ["V1"],
+        "captain_id": ["C1"],
+        "agent_id": ["A1"],
+        "theta": [0.2],
+        "psi": [0.4],
+        "scarcity": [0.5],
+        "captain_experience": [3.0],
+        "tonnage": [100.0],
+        "crew_count": [25.0],
+        "q_total_index": [10.0],
+    })
+    action = pd.DataFrame({
+        "voyage_id": ["V1", "V1", "V1", "V1"],
+        "voyage_day": [1, 2, 3, 4],
+        "obs_date": pd.to_datetime(["1820-01-01", "1820-01-02", "1820-01-03", "1820-01-04"]),
+        "days_since_last_success": [7, 8, 0, 1],
+        "consecutive_empty_days": [7, 8, 0, 1],
+        "days_in_patch": [1, 2, 3, 4],
+        "exit_patch_next": [0, 1, 0, 0],
+        "n_struck": [0, 0, 2, 0],
+        "active_search_flag": [1, 1, 1, 1],
+        "encounter": ["NoEnc", "NoEnc", "Strike", "NoEnc"],
+    })
+
+    barren = _compute_forward_metrics(action, connected).set_index("voyage_day")
+
+    assert list(barren.index) == [1, 2]
+    assert barren.loc[1, "future_exploitation_days_30d"] == 1
+    assert barren.loc[2, "future_exploitation_days_30d"] == 1
+    assert barren.loc[1, "future_output_30d"] == 2
+    assert barren.loc[2, "future_output_30d"] == 2
+    assert barren.loc[1, "remaining_voyage_output"] == 2
+    assert barren.loc[2, "remaining_voyage_output"] == 2
+    assert barren.loc[1, "time_to_next_encounter_30d"] == 2
+    assert barren.loc[2, "time_to_next_encounter_30d"] == 1
 
 
 def test_latex_outputs_do_not_render_literal_nan(tmp_path):

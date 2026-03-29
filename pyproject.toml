@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whaling-pipeline"
-version = "0.625"
+version = "0.626"
 description = "Venture Capital of the Sea: Whaling Data Pipeline"
 readme = "README.md"
 requires-python = ">=3.9"

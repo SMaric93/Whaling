@@ -28,6 +28,8 @@ import logging
 import time
 from typing import Dict, Any, List
 
+from tqdm import tqdm
+
 import os
 
 # Prevent dual-OpenMP segfault (Intel MKL + LLVM libomp on macOS/conda).
@@ -65,6 +67,18 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _purge_cached_datasets():
+    """Delete cached ML dataset .parquet files so they are rebuilt."""
+    from pathlib import Path
+    cache_dir = Path(__file__).resolve().parents[2] / "outputs" / "datasets" / "ml"
+    if not cache_dir.exists():
+        return
+    for pq in cache_dir.glob("*.parquet"):
+        logger.info("Deleting cached dataset: %s", pq.name)
+        pq.unlink()
+    logger.info("All cached ML datasets purged.")
 
 
 CORE_PHASES = {
@@ -119,7 +133,11 @@ def run_all(
 
     results = {}
 
-    for phase_num, (name, module_path, func_name) in sorted(all_phases.items()):
+    phase_items = sorted(all_phases.items())
+    pbar = tqdm(phase_items, desc="ML Phases", unit="phase", ncols=88,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+    for phase_num, (name, module_path, func_name) in pbar:
+        pbar.set_postfix_str(f"ML-{phase_num}: {name}")
         logger.info("=" * 70)
         logger.info("  PHASE ML-%d: %s", phase_num, name)
         logger.info("=" * 70)
@@ -134,6 +152,7 @@ def run_all(
         except Exception as e:
             logger.error("Phase ML-%d (%s) FAILED: %s", phase_num, name, e, exc_info=True)
             results[phase_num] = {"error": str(e)}
+    pbar.close()
 
     # ── Assignment optimizer (after production surface) ─────────────
     if 5 in results and "error" not in results.get(5, {}) and not skip_appendix:
@@ -177,7 +196,14 @@ def main():
         "--no-save", action="store_true",
         help="Don't save outputs to disk.",
     )
+    parser.add_argument(
+        "--force-rebuild", action="store_true",
+        help="Delete cached ML datasets and rebuild from scratch.",
+    )
     args = parser.parse_args()
+
+    if args.force_rebuild:
+        _purge_cached_datasets()
 
     run_all(
         phases=args.phases,

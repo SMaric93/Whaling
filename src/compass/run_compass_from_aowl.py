@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from torch_device import (
+from ._torch_compat import (
     configure_torch_runtime,
     get_torch_device,
     tensor_to_numpy,
@@ -65,16 +65,11 @@ SPECIES_GROUPS = {
     "small_cetacean": ["Pilot", "Grampus", "Blackfish", "Porpoise", "Dolphin",
                        "Killer", "Killers"],
 }
-
-
-def _map_species_group(species: str) -> str:
-    """Map raw species string to canonical group."""
-    if pd.isna(species) or species in ("NULL", ""):
-        return "none"
-    for group, members in SPECIES_GROUPS.items():
-        if species in members:
-            return group
-    return "other"
+SPECIES_TO_GROUP = {
+    member: group
+    for group, members in SPECIES_GROUPS.items()
+    for member in members
+}
 
 
 def parse_aowl_raw(raw_path: Optional[Path] = None) -> pd.DataFrame:
@@ -133,16 +128,12 @@ def parse_aowl_raw(raw_path: Optional[Path] = None) -> pd.DataFrame:
 
     # ── Build timestamp_utc from day/month/year ──
     # AOWL provides day-level resolution; set time to noon UTC
-    def _make_ts(row):
-        try:
-            return pd.Timestamp(
-                year=int(row["year"]), month=int(row["month"]),
-                day=int(row["day"]), hour=12, tz="UTC",
-            )
-        except (ValueError, TypeError):
-            return pd.NaT
-
-    df["timestamp_utc"] = df.apply(_make_ts, axis=1)
+    date_parts = df[["year", "month", "day"]].apply(pd.to_numeric, errors="coerce")
+    df["timestamp_utc"] = pd.to_datetime(
+        date_parts,
+        errors="coerce",
+        utc=True,
+    ) + pd.Timedelta(hours=12)
     n_nat = df["timestamp_utc"].isna().sum()
     if n_nat:
         logger.warning("  Dropping %d rows with invalid dates", n_nat)
@@ -150,7 +141,13 @@ def parse_aowl_raw(raw_path: Optional[Path] = None) -> pd.DataFrame:
 
     # ── Encounter enrichment ──
     df["encounter_type"] = df["encounter_type"].fillna("NoEnc")
-    df["species_group"] = df["species_raw"].apply(_map_species_group)
+    none_species = df["species_raw"].isna() | df["species_raw"].isin(["NULL", ""])
+    df["species_group"] = (
+        df["species_raw"]
+        .map(SPECIES_TO_GROUP)
+        .where(~none_species, "none")
+        .fillna("other")
+    )
 
     # Numeric strike/try columns
     for col in ("n_struck", "n_tried"):
@@ -581,14 +578,14 @@ def run_full_compass(
         output/compass/voyage_compass_embeddings.parquet
         output/compass/compass_pipeline_summary.json
     """
-    from compass.preprocess import project_all_voyages, smooth_positions
-    from compass.steps import compute_raw_steps
-    from compass.regimes import segment_voyages
-    from compass.features import compute_compass_features
-    from compass.compass_index import (
+    from .preprocess import project_all_voyages, smooth_positions
+    from .steps import compute_raw_steps
+    from .regimes import segment_voyages
+    from .features import compute_compass_features
+    from .compass_index import (
         compute_compass_index, compute_early_window, save_loadings,
     )
-    from compass.config import CompassConfig
+    from .config import CompassConfig
 
     t0 = time.time()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -632,7 +629,7 @@ def run_full_compass(
     print("═" * 70)
 
     # Validate
-    from compass.data_io import validate_trajectories
+    from .data_io import validate_trajectories
     traj = validate_trajectories(df_raw, cfg)
     traj = traj.reset_index(drop=True)
 

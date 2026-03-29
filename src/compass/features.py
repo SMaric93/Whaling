@@ -13,12 +13,12 @@ steps (or posterior-weighted steps).  The suite covers:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 
-from compass.config import CompassConfig
+from .config import CompassConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +51,10 @@ def _quantiles(x: np.ndarray) -> Dict[str, float]:
     """Compute p50, p75, p90, p95 of x."""
     if len(x) == 0:
         return {f"step_length_p{q}": np.nan for q in (50, 75, 90, 95)}
+    quantiles = np.nanpercentile(x, [50, 75, 90, 95])
     return {
-        f"step_length_p{q}": float(np.nanpercentile(x, q))
-        for q in (50, 75, 90, 95)
+        f"step_length_p{q}": float(value)
+        for q, value in zip((50, 75, 90, 95), quantiles)
     }
 
 
@@ -117,17 +118,12 @@ def _grid_visitation(
         return {"grid_cells_visited": np.nan, "recurrence_rate": np.nan}
     gx = np.floor(x / cell_m).astype(int)
     gy = np.floor(y / cell_m).astype(int)
-    cells = list(zip(gx, gy))
-    unique_cells = set()
-    revisits = 0
-    for c in cells:
-        if c in unique_cells:
-            revisits += 1
-        unique_cells.add(c)
-    n_unique = len(unique_cells)
+    cells = np.column_stack((gx, gy))
+    n_unique = len(np.unique(cells, axis=0))
+    revisits = len(cells) - n_unique
     return {
         "grid_cells_visited": float(n_unique),
-        "recurrence_rate": float(revisits / len(cells)) if len(cells) > 0 else np.nan,
+        "recurrence_rate": float(revisits / len(cells)),
     }
 
 
@@ -140,7 +136,7 @@ def _loiter_metrics(
         return {"loiter_fraction": np.nan, "median_speed_mps": np.nan}
     return {
         "loiter_fraction": float((speed < threshold_mps).mean()),
-        "median_speed_mps": float(np.median(speed)),
+        "median_speed_mps": float(np.nanmedian(speed)),
     }
 
 
@@ -151,11 +147,11 @@ def _features_for_group(
     cfg: CompassConfig,
 ) -> Dict[str, float]:
     """Compute the full feature dict for one voyage's search steps."""
-    sl = sub["step_length_m"].values.astype(float)
-    hd = sub["heading_rad"].values.astype(float)
-    sp = sub["speed_mps"].values.astype(float)
-    xm = sub["x_m"].values.astype(float)
-    ym = sub["y_m"].values.astype(float)
+    sl = sub["step_length_m"].to_numpy(dtype=float, copy=False)
+    hd = sub["heading_rad"].to_numpy(dtype=float, copy=False)
+    sp = sub["speed_mps"].to_numpy(dtype=float, copy=False)
+    xm = sub["x_m"].to_numpy(dtype=float, copy=False)
+    ym = sub["y_m"].to_numpy(dtype=float, copy=False)
 
     feat: Dict[str, float] = {}
 
@@ -171,8 +167,9 @@ def _features_for_group(
     # run-length proxy: mean consecutive steps in same 45° heading sector
     if len(hd) > 1:
         sector = (np.floor(hd / (np.pi / 4)) % 8).astype(int)
-        runs = np.split(sector, np.where(np.diff(sector) != 0)[0] + 1)
-        feat["heading_run_length_mean"] = float(np.mean([len(r) for r in runs]))
+        run_boundaries = np.flatnonzero(np.diff(sector) != 0) + 1
+        run_lengths = np.diff(np.r_[0, run_boundaries, len(sector)])
+        feat["heading_run_length_mean"] = float(run_lengths.mean())
     else:
         feat["heading_run_length_mean"] = np.nan
 
@@ -211,30 +208,35 @@ def compute_compass_features(
     """
     if use_posterior_weighting and "p_search" in steps_df.columns:
         # soft filter: keep all steps but weight by P(search)
-        search_df = steps_df.copy()
         # for feature computation we still need finite features
         has_feat = steps_df[["step_length_m", "heading_rad", "speed_mps"]].notna().all(axis=1)
-        search_df = search_df.loc[has_feat]
+        search_df = steps_df.loc[has_feat]
     else:
         # hard filter to search regime
-        search_df = steps_df.loc[
-            steps_df["regime_label"] == "search"
-        ].copy()
+        search_df = steps_df.loc[steps_df["regime_label"] == "search"]
+
+    if search_df.empty:
+        logger.warning("No voyages met the minimum search-step threshold.")
+        return pd.DataFrame()
+
+    voyage_counts = search_df.groupby("voyage_id", sort=False).size()
+    eligible_voyages = voyage_counts.index[
+        voyage_counts >= cfg.min_search_steps_for_features
+    ]
+    if len(eligible_voyages) == 0:
+        logger.warning("No voyages met the minimum search-step threshold.")
+        return pd.DataFrame()
+
+    search_df = search_df.loc[search_df["voyage_id"].isin(eligible_voyages)]
 
     records: list[dict] = []
 
     for vid, sub in search_df.groupby("voyage_id", sort=False):
         n_steps = len(sub)
-        if n_steps < cfg.min_search_steps_for_features:
-            continue
         feat = _features_for_group(sub, cfg)
         feat["voyage_id"] = vid
         feat["n_search_steps"] = n_steps
         records.append(feat)
-
-    if not records:
-        logger.warning("No voyages met the minimum search-step threshold.")
-        return pd.DataFrame()
 
     result = pd.DataFrame.from_records(records)
     logger.info(

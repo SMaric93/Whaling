@@ -34,14 +34,13 @@ def run_baseline_akm() -> dict:
         R2: Agent only
         R3: Captain only
     """
-    from src.analyses.run_full_baseline_loo_eb import run_r1_baseline
+    from src.analyses.run_full_baseline_loo_eb import get_loo_connected_set, run_r1_baseline
     from src.analyses.data_loader import load_analysis_data
-    from src.analyses.connected_set import get_loo_connected_set
     
     logger.info("Running baseline AKM (R1-R3)...")
     
     df = load_analysis_data()
-    df_loo = get_loo_connected_set(df)
+    df_loo, _ = get_loo_connected_set(df)
     results = run_r1_baseline(df_loo)
     
     logger.info(f"  → LOO connected set: {len(df_loo):,} voyages")
@@ -50,17 +49,17 @@ def run_baseline_akm() -> dict:
 
 def run_complementarity_analysis() -> dict:
     """Run complementarity analysis: θ × ψ interactions by ground type."""
-    from src.analyses.run_full_baseline_loo_eb import run_complementarity
+    from src.analyses.run_full_baseline_loo_eb import (
+        get_loo_connected_set,
+        run_akm_with_eb,
+        run_complementarity,
+    )
     from src.analyses.data_loader import load_analysis_data
-    from src.analyses.connected_set import get_loo_connected_set
     
     logger.info("Running complementarity analysis...")
     
     df = load_analysis_data()
-    df_loo = get_loo_connected_set(df)
-    
-    # Need AKM results first
-    from src.analyses.run_full_baseline_loo_eb import run_akm_with_eb
+    df_loo, _ = get_loo_connected_set(df)
     akm_results = run_akm_with_eb(df_loo)
     
     results = run_complementarity(df_loo, akm_results)

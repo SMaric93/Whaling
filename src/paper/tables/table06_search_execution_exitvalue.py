@@ -34,11 +34,11 @@ def _merge_voyage_info(df: pd.DataFrame, connected: pd.DataFrame) -> pd.DataFram
         "q_total_index",
     ]
     info = connected[[c for c in info_cols if c in connected.columns]].drop_duplicates("voyage_id")
-    merged = df.merge(info, on="voyage_id", how="left", suffixes=("", "_connected"))
+    merged = df.join(info.set_index("voyage_id"), on="voyage_id", rsuffix="_connected")
     for col in ["captain_id", "agent_id", "theta", "psi", "scarcity", "captain_experience", "tonnage", "crew_count"]:
         connected_col = f"{col}_connected"
         if connected_col in merged.columns:
-            merged[col] = merged[col].where(merged[col].notna(), merged[connected_col])
+            merged[col] = merged[col].combine_first(merged[connected_col])
     return merged
 
 
@@ -96,10 +96,11 @@ def _panel_a(action: pd.DataFrame, connected: pd.DataFrame) -> list[dict]:
         df.assign(n_struck_num=_numeric(df.get("n_struck"), df.index).fillna(0))
         .groupby("voyage_id")
         .agg(total_captures=("n_struck_num", "sum"))
-        .reset_index()
     )
-    voyage_yield = connected.merge(voyage_capture, on="voyage_id", how="left")
-    voyage_yield["total_captures"] = _numeric(voyage_yield.get("total_captures"), voyage_yield.index).fillna(0)
+    voyage_yield = connected.copy()
+    voyage_yield["total_captures"] = (
+        voyage_yield["voyage_id"].map(voyage_capture["total_captures"]).fillna(0.0)
+    )
     voyage_yield = voyage_yield[voyage_yield["total_captures"] > 0].copy()
     if not voyage_yield.empty:
         voyage_yield["yield_per_capture"] = _numeric(voyage_yield.get("q_total_index"), voyage_yield.index) / voyage_yield["total_captures"]
@@ -136,25 +137,38 @@ def _compute_forward_metrics(action: pd.DataFrame, connected: pd.DataFrame) -> p
     df["encounter_any"] = df.get("encounter", pd.Series("NoEnc", index=df.index)).fillna("NoEnc").astype(str).ne("NoEnc").astype(float)
     df["exploitation_day"] = df["encounter_any"]
 
-    frames = []
-    for _, group in df.groupby("voyage_id", sort=False):
-        g = group.copy()
-        n = len(g)
+    n_rows = len(df)
+    future_exploit = {30: np.zeros(n_rows, dtype=float), 60: np.zeros(n_rows, dtype=float), 90: np.zeros(n_rows, dtype=float)}
+    future_output = {30: np.zeros(n_rows, dtype=float), 60: np.zeros(n_rows, dtype=float), 90: np.zeros(n_rows, dtype=float)}
+    time_to_next = {30: np.full(n_rows, np.nan, dtype=float), 60: np.full(n_rows, np.nan, dtype=float), 90: np.full(n_rows, np.nan, dtype=float)}
+    remaining_output = np.zeros(n_rows, dtype=float)
+
+    day_values = df["voyage_day"].to_numpy(dtype=float)
+    encounter_values = df["encounter_any"].to_numpy(dtype=float)
+    exploit_values = df["exploitation_day"].to_numpy(dtype=float)
+    output_values = df["n_struck_num"].to_numpy(dtype=float)
+
+    for group_idx in df.groupby("voyage_id", sort=False).indices.values():
+        idx = np.asarray(group_idx, dtype=int)
+        n = len(idx)
         if n == 0:
             continue
-        days = g["voyage_day"].to_numpy(dtype=float)
+
+        days = day_values[idx].copy()
+        fallback = np.arange(1, n + 1, dtype=float)
         if np.isnan(days).all():
-            days = np.arange(1, n + 1, dtype=float)
+            days = fallback
         else:
-            fallback = np.arange(1, n + 1, dtype=float)
             days = np.where(np.isfinite(days), days, fallback)
-        encounters = g["encounter_any"].to_numpy(dtype=float)
-        exploit = g["exploitation_day"].to_numpy(dtype=float)
-        output = g["n_struck_num"].to_numpy(dtype=float)
+
+        encounters = encounter_values[idx]
+        exploit = exploit_values[idx]
+        output = output_values[idx]
 
         prefix_exploit = np.concatenate([[0.0], np.cumsum(exploit)])
         prefix_output = np.concatenate([[0.0], np.cumsum(output)])
-        remaining_output = prefix_output[-1] - prefix_output[np.arange(n) + 1]
+        start = np.arange(n) + 1
+        remaining_output[idx] = prefix_output[-1] - prefix_output[start]
 
         next_gap = np.full(n, np.nan, dtype=float)
         next_encounter_day = np.nan
@@ -165,19 +179,21 @@ def _compute_forward_metrics(action: pd.DataFrame, connected: pd.DataFrame) -> p
 
         for horizon in [30, 60, 90]:
             upper = np.searchsorted(days, days + horizon, side="right")
-            start = np.arange(n) + 1
-            g[f"future_exploitation_days_{horizon}d"] = prefix_exploit[upper] - prefix_exploit[start]
-            g[f"future_output_{horizon}d"] = prefix_output[upper] - prefix_output[start]
-            g[f"time_to_next_encounter_{horizon}d"] = np.where(
+            future_exploit[horizon][idx] = prefix_exploit[upper] - prefix_exploit[start]
+            future_output[horizon][idx] = prefix_output[upper] - prefix_output[start]
+            time_to_next[horizon][idx] = np.where(
                 np.isfinite(next_gap),
                 np.minimum(next_gap, float(horizon + 1)),
                 float(horizon + 1),
             )
 
-        g["remaining_voyage_output"] = remaining_output
-        frames.append(g)
+    enriched = df.copy()
+    for horizon in [30, 60, 90]:
+        enriched[f"future_exploitation_days_{horizon}d"] = future_exploit[horizon]
+        enriched[f"future_output_{horizon}d"] = future_output[horizon]
+        enriched[f"time_to_next_encounter_{horizon}d"] = time_to_next[horizon]
+    enriched["remaining_voyage_output"] = remaining_output
 
-    enriched = pd.concat(frames, ignore_index=True) if frames else df.iloc[0:0].copy()
     barren = (
         enriched["active_search_flag"].gt(0)
         & enriched["consecutive_empty_days"].ge(BARREN_THRESHOLD)

@@ -25,8 +25,8 @@ from typing import Optional, Set
 import numpy as np
 import pandas as pd
 
-from compass.config import CompassConfig, load_config, save_config
-from torch_device import get_torch_runtime_info
+from ._torch_compat import get_torch_runtime_info
+from .config import CompassConfig, load_config, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -88,21 +88,21 @@ def run_compass_pipeline(
     dict
         Intermediate/final DataFrames keyed by stage name.
     """
-    from compass.data_io import (
+    from .data_io import (
         load_trajectory_points,
         load_voyage_metadata,
         validate_trajectories,
     )
-    from compass.preprocess import project_all_voyages, smooth_positions
-    from compass.steps import build_all_step_variants, compute_raw_steps
-    from compass.regimes import segment_voyages
-    from compass.features import compute_compass_features
-    from compass.compass_index import (
+    from .preprocess import project_all_voyages, smooth_positions
+    from .steps import build_all_step_variants, compute_raw_steps
+    from .regimes import segment_voyages
+    from .features import compute_compass_features
+    from .compass_index import (
         compute_compass_index,
         compute_early_window,
         save_loadings,
     )
-    from compass.export import export_panels
+    from .export import export_panels
 
     all_steps = set(range(1, 11))
     run = steps if steps else all_steps
@@ -218,7 +218,7 @@ def run_compass_pipeline(
     if 8 in run and cfg.embedding_enabled:
         logger.info("═══ Step 8: Self-Supervised Embedding ═══")
         try:
-            from compass.embedding_optional import train_embedding, probe_dl_score
+            from .embedding_optional import train_embedding, probe_dl_score
 
             swr = results.get("steps_with_regimes") or pd.read_parquet(
                 out_dir / "steps_with_regimes.parquet",
@@ -240,7 +240,7 @@ def run_compass_pipeline(
     # ── Step 9: Robustness ───────────────────────────────────────────────
     if 9 in run and cfg.robustness_enabled:
         logger.info("═══ Step 9: Robustness Checks ═══")
-        from compass.robustness import run_all_robustness
+        from .robustness import run_all_robustness
 
         swr = results.get("steps_with_regimes") or pd.read_parquet(
             out_dir / "steps_with_regimes.parquet",

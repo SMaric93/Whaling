@@ -231,7 +231,6 @@ def run_compass_model(
         "env_state_captain": compass_features + CAPTAIN_FEATURES,
         "env_state_agent": compass_features + AGENT_FEATURES,
         "env_state_captain_agent": compass_features + CAPTAIN_FEATURES + AGENT_FEATURES,
-        "env_state_captain_agent_types": compass_features + CAPTAIN_FEATURES + AGENT_FEATURES + ["theta_hat_holdout", "psi_hat_holdout"],
     }
 
     all_results = {}

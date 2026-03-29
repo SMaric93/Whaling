@@ -63,7 +63,7 @@ def estimate_propensity(
     t = df[treatment_col].astype(int).values
 
     if method == "logistic":
-        lr = LogisticRegression(max_iter=2000, random_state=ML_CFG.random_seed, n_jobs=-1)
+        lr = LogisticRegression(max_iter=2000, random_state=ML_CFG.random_seed, n_jobs=1)
         lr.fit(X, t)
         ps = lr.predict_proba(X)[:, 1]
     elif method == "hist_gbt":

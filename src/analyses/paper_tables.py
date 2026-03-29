@@ -5,6 +5,7 @@ Generates the 7 definitive tables using hardcoded statistical values
 from the accepted empirical analysis. Outputs both markdown and LaTeX.
 """
 
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import pandas as pd
@@ -917,7 +918,8 @@ def generate_table_a9() -> str:
 
 def generate_all_markdown_tables() -> str:
     """Return the combined markdown document expected by the legacy pipeline."""
-    all_md = ["# Maps of the Sea: Publication Tables\n"]
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    all_md = [f"# Maps of the Sea: Publication Tables\n\n*Generated: {timestamp}*\n"]
     for table_key in MARKDOWN_GENERATORS.keys():
         all_md.append(MARKDOWN_GENERATORS[table_key]())
         all_md.append("\n---\n")
@@ -926,6 +928,7 @@ def generate_all_markdown_tables() -> str:
 
 def generate_all_latex_tables() -> str:
     """Return the combined LaTeX document expected by the legacy pipeline."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_tex = [
         r"\documentclass{article}",
         r"\usepackage{booktabs}",
@@ -934,6 +937,7 @@ def generate_all_latex_tables() -> str:
         r"\newenvironment{tablenotes}{\begin{flushleft}\footnotesize}{\end{flushleft}}",
         r"\begin{document}",
         r"\title{Maps of the Sea: Publication Tables}",
+        rf"\date{{Generated: {timestamp}}}",
         r"\maketitle",
         "",
     ]

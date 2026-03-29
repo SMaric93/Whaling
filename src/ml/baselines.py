@@ -20,10 +20,36 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from src.ml.config import ML_CFG
 
 logger = logging.getLogger(__name__)
+
+
+class LogisticBaselinePipeline(Pipeline):
+    """Scaler + logistic pipeline with estimator-like compatibility accessors."""
+
+    @property
+    def classes_(self):
+        return self.named_steps["logit"].classes_
+
+    @property
+    def coef_(self):
+        return self.named_steps["logit"].coef_
+
+    @property
+    def intercept_(self):
+        return self.named_steps["logit"].intercept_
+
+    @property
+    def n_iter_(self):
+        return self.named_steps["logit"].n_iter_
+
+    @property
+    def n_jobs(self):
+        return self.named_steps["logit"].n_jobs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -92,15 +118,23 @@ def fit_logistic_baseline(
     if n_classes > 2:
         multi_class = "multinomial"
 
-    model = LogisticRegression(
-        penalty=penalty,
-        C=C,
-        max_iter=max_iter,
-        multi_class=multi_class,
-        solver="lbfgs",
-        random_state=ML_CFG.random_seed,
-        n_jobs=-1,
-    )
+    logistic_kwargs = {
+        "penalty": penalty,
+        "C": C,
+        "max_iter": max_iter,
+        "solver": "lbfgs",
+        "random_state": ML_CFG.random_seed,
+        # Restricted environments can reject the internal parallel setup used
+        # by some sklearn estimators. Keep the baseline single-process.
+        "n_jobs": 1,
+    }
+    if multi_class not in {None, "auto", "multinomial"}:
+        logistic_kwargs["multi_class"] = multi_class
+
+    model = LogisticBaselinePipeline([
+        ("scaler", StandardScaler()),
+        ("logit", LogisticRegression(**logistic_kwargs)),
+    ])
 
     t0 = time.time()
     model.fit(X_train, y_train)

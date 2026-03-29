@@ -8,9 +8,14 @@ These tests verify that ex-ante (lagged) ground classification produces
 consistent results and avoids endogeneity.
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def make_synthetic_ground_data(n_voyages: int = 800) -> pd.DataFrame:
@@ -58,6 +63,44 @@ def make_synthetic_ground_data(n_voyages: int = 800) -> pd.DataFrame:
 
 class TestExAnteClassificationMethods:
     """Test the ex-ante classification methods."""
+
+    def test_lagged_year_classification_exact_mapping(self):
+        """Lagged-year classification should map prior-year ground means exactly."""
+        from src.analyses.counterfactual_suite import classify_ground_ex_ante
+
+        df = pd.DataFrame({
+            "voyage_id": ["V1", "V2", "V3", "V4"],
+            "year_out": [1820, 1820, 1821, 1821],
+            "route_or_ground": ["Pacific", "Atlantic", "Pacific", "Atlantic"],
+            "log_q": [5.0, 8.0, 7.0, 6.0],
+        })
+
+        classified = classify_ground_ex_ante(df, method="lagged_year")
+        by_voyage = classified.set_index("voyage_id")["ground_type_ex_ante"]
+
+        assert by_voyage["V1"] == "unknown"
+        assert by_voyage["V2"] == "unknown"
+        assert by_voyage["V3"] == "sparse"
+        assert by_voyage["V4"] == "rich"
+
+    def test_decadal_average_classification_exact_mapping(self):
+        """Decadal classification should use the previous decade only."""
+        from src.analyses.counterfactual_suite import classify_ground_ex_ante
+
+        df = pd.DataFrame({
+            "voyage_id": ["V1", "V2", "V3", "V4"],
+            "year_out": [1824, 1824, 1832, 1832],
+            "route_or_ground": ["Pacific", "Atlantic", "Pacific", "Atlantic"],
+            "log_q": [5.0, 8.0, 7.0, 6.0],
+        })
+
+        classified = classify_ground_ex_ante(df, method="decadal_average")
+        by_voyage = classified.set_index("voyage_id")["ground_type_ex_ante"]
+
+        assert by_voyage["V1"] == "unknown"
+        assert by_voyage["V2"] == "unknown"
+        assert by_voyage["V3"] == "sparse"
+        assert by_voyage["V4"] == "rich"
     
     def test_lagged_year_classification(self):
         """Test lagged-year classification produces sensible results."""

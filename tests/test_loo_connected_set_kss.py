@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.analyses.connected_set import (
+    compute_network_density,
     find_connected_set,
     find_leave_one_out_connected_set,
     full_connected_set_analysis,
@@ -206,3 +207,33 @@ class TestLOOConnectedSetKSS:
         assert expected_keys.issubset(set(diagnostics.keys())), (
             f"Missing keys: {expected_keys - set(diagnostics.keys())}"
         )
+
+    def test_find_connected_set_keeps_largest_component(self):
+        pairs = [
+            ("A", "agent1"),
+            ("A", "agent2"),
+            ("B", "agent2"),
+            ("C", "agent3"),
+        ]
+        df = _make_voyage_df(pairs)
+
+        df_cc, diagnostics = find_connected_set(df)
+
+        assert set(df_cc["captain_id"].unique()) == {"A", "B"}
+        assert set(df_cc["agent_id"].unique()) == {"agent1", "agent2"}
+        assert diagnostics["n_components"] == 2
+
+    def test_compute_network_density_exact(self):
+        pairs = [
+            ("A", "agent1"),
+            ("A", "agent2"),
+            ("B", "agent2"),
+        ]
+        df = _make_voyage_df(pairs)
+
+        diagnostics = compute_network_density(df)
+
+        assert diagnostics["n_nodes"] == 4
+        assert diagnostics["n_edges"] == 3
+        assert diagnostics["density"] == pytest.approx(3 / 4)
+        assert diagnostics["avg_degree"] == pytest.approx(1.5)

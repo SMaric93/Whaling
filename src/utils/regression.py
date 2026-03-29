@@ -38,26 +38,27 @@ def cluster_robust_se(
     float
         Cluster-robust standard error.
     """
-    unique_clusters = np.unique(clusters)
+    cluster_codes, unique_clusters = pd.factorize(clusters, sort=False)
     G = len(unique_clusters)
     n = len(x)
-    
+
     # Cluster sums of x * residual
-    cluster_sums = np.zeros(G)
-    for g, c in enumerate(unique_clusters):
-        mask = clusters == c
-        cluster_sums[g] = np.sum(x[mask] * residuals[mask])
-    
+    cluster_sums = np.bincount(
+        cluster_codes,
+        weights=x * residuals,
+        minlength=G,
+    )
+
     # Meat of sandwich
-    meat = np.sum(cluster_sums**2)
-    
+    meat = np.dot(cluster_sums, cluster_sums)
+
     # Bread
-    bread = np.sum(x**2)
-    
+    bread = np.dot(x, x)
+
     # Cluster-robust variance with small-sample correction
     correction = (G / (G - 1)) * ((n - 1) / (n - 1))
     var_beta = correction * meat / (bread**2)
-    
+
     return np.sqrt(max(0, var_beta))
 
 
@@ -88,25 +89,23 @@ def build_fe_design_matrix(
     n = len(df)
     matrices = []
     index_maps = {}
-    
+
     for i, col in enumerate(fe_cols):
-        ids = df[col].unique()
-        id_map = {v: idx for idx, v in enumerate(ids)}
-        col_idx = df[col].map(id_map).values
-        
-        X_full = sp.csr_matrix(
-            (np.ones(n), (np.arange(n), col_idx)),
-            shape=(n, len(ids))
+        col_idx, ids = pd.factorize(df[col], sort=False)
+        first_kept_col = 1 if drop_first and i > 0 else 0
+        keep_mask = col_idx >= first_kept_col
+
+        X = sp.csr_matrix(
+            (
+                np.ones(keep_mask.sum()),
+                (np.arange(n)[keep_mask], col_idx[keep_mask] - first_kept_col),
+            ),
+            shape=(n, len(ids) - first_kept_col),
         )
-        
-        # Drop first category for identification (except first FE)
-        if drop_first and i > 0:
-            X = X_full[:, 1:]
-        else:
-            X = X_full
-        
+
         matrices.append(X)
+        id_map = {v: idx for idx, v in enumerate(ids)}
         index_maps[col] = {"ids": ids, "map": id_map, "n": len(ids)}
-    
+
     X = sp.hstack(matrices)
     return X, index_maps

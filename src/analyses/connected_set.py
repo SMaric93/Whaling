@@ -18,6 +18,29 @@ import networkx as nx
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
+def _build_bipartite_graph(pairs: pd.DataFrame) -> nx.Graph:
+    """Build a captain-agent bipartite graph from unique pairs."""
+    graph = nx.Graph()
+    if pairs.empty:
+        return graph
+
+    captain_nodes = "C_" + pairs["captain_id"].astype(str)
+    agent_nodes = "A_" + pairs["agent_id"].astype(str)
+    graph.add_edges_from(zip(captain_nodes.to_numpy(), agent_nodes.to_numpy()))
+    return graph
+
+
+def _largest_component_ids(graph: nx.Graph) -> Tuple[Set[str], Set[str]]:
+    """Return captain and agent IDs from the largest connected component."""
+    if graph.number_of_nodes() == 0:
+        return set(), set()
+
+    largest_cc = max(nx.connected_components(graph), key=len)
+    connected_captains = {n[2:] for n in largest_cc if n.startswith("C_")}
+    connected_agents = {n[2:] for n in largest_cc if n.startswith("A_")}
+    return connected_captains, connected_agents
+
+
 def find_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     """
     Find largest connected component in captain-agent bipartite graph.
@@ -35,20 +58,17 @@ def find_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     print("\n" + "=" * 60)
     print("FINDING CONNECTED SET")
     print("=" * 60)
-    
-    # Build bipartite graph
-    G = nx.Graph()
+
+    total_captains = df["captain_id"].nunique()
+    total_agents = df["agent_id"].nunique()
+    total_voyages = len(df)
+
     pairs = df[["captain_id", "agent_id"]].drop_duplicates()
-    for _, row in pairs.iterrows():
-        G.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
-    
+    G = _build_bipartite_graph(pairs)
+
     # Find connected components
     components = list(nx.connected_components(G))
-    largest_cc = max(components, key=len)
-    
-    # Extract IDs from largest component
-    connected_captains = {n[2:] for n in largest_cc if n.startswith("C_")}
-    connected_agents = {n[2:] for n in largest_cc if n.startswith("A_")}
+    connected_captains, connected_agents = _largest_component_ids(G)
     
     # Filter data
     df_cc = df[
@@ -61,13 +81,13 @@ def find_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
         "n_components": len(components),
         "largest_component_captains": len(connected_captains),
         "largest_component_agents": len(connected_agents),
-        "total_captains": df["captain_id"].nunique(),
-        "total_agents": df["agent_id"].nunique(),
+        "total_captains": total_captains,
+        "total_agents": total_agents,
         "voyages_in_connected_set": len(df_cc),
-        "total_voyages": len(df),
-        "coverage_captains": len(connected_captains) / df["captain_id"].nunique(),
-        "coverage_agents": len(connected_agents) / df["agent_id"].nunique(),
-        "coverage_voyages": len(df_cc) / len(df),
+        "total_voyages": total_voyages,
+        "coverage_captains": len(connected_captains) / total_captains if total_captains else 0,
+        "coverage_agents": len(connected_agents) / total_agents if total_agents else 0,
+        "coverage_voyages": len(df_cc) / total_voyages if total_voyages else 0,
     }
     
     print(f"Connected components: {diagnostics['n_components']}")
@@ -152,10 +172,7 @@ def find_leave_one_out_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
         # Step 2: Build bipartite graph of unique (mover, agent) pairs
         # Nodes: captain IDs (prefixed C_) and agent IDs (prefixed A_)
         unique_pairs = df_movers[["captain_id", "agent_id"]].drop_duplicates()
-        
-        G = nx.Graph()
-        for _, row in unique_pairs.iterrows():
-            G.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
+        G = _build_bipartite_graph(unique_pairs)
         
         # Step 3: Find articulation points (cut vertices)
         artic_points = set(nx.articulation_points(G))
@@ -177,15 +194,13 @@ def find_leave_one_out_connected_set(df: pd.DataFrame) -> Tuple[pd.DataFrame, Di
         # Step 6: Re-find largest connected component
         if len(df_loo) > 0:
             pairs_remaining = df_loo[["captain_id", "agent_id"]].drop_duplicates()
-            G_remaining = nx.Graph()
-            for _, row in pairs_remaining.iterrows():
-                G_remaining.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
-            
-            if len(G_remaining) > 0:
+            G_remaining = _build_bipartite_graph(pairs_remaining)
+
+            if G_remaining.number_of_nodes() > 0:
                 # Reset IDs and find largest connected component
-                largest_cc = max(nx.connected_components(G_remaining), key=len)
-                connected_captains = {n[2:] for n in largest_cc if n.startswith("C_")}
-                connected_agents = {n[2:] for n in largest_cc if n.startswith("A_")}
+                connected_captains, connected_agents = _largest_component_ids(
+                    G_remaining
+                )
                 df_loo = df_loo[
                     df_loo["captain_id"].isin(connected_captains) & 
                     df_loo["agent_id"].isin(connected_agents)
@@ -267,9 +282,9 @@ def compute_mobility_diagnostics(df: pd.DataFrame) -> Dict:
         "n_voyages": len(df),
         "n_captain_agent_pairs": len(pair_counts),
         "multi_agent_captains": multi_agent_captains,
-        "multi_agent_captain_rate": multi_agent_captains / df["captain_id"].nunique(),
+        "multi_agent_captain_rate": multi_agent_captains / df["captain_id"].nunique() if df["captain_id"].nunique() else 0,
         "multi_captain_agents": multi_captain_agents,
-        "multi_captain_agent_rate": multi_captain_agents / df["agent_id"].nunique(),
+        "multi_captain_agent_rate": multi_captain_agents / df["agent_id"].nunique() if df["agent_id"].nunique() else 0,
         "mean_agents_per_captain": mean_agents_per_captain,
         "mean_captains_per_agent": mean_captains_per_agent,
         "single_pairs": single_pairs,
@@ -306,23 +321,19 @@ def compute_network_density(df: pd.DataFrame) -> Dict:
     Dict
         Network statistics.
     """
-    # Build bipartite graph
-    G = nx.Graph()
     pairs = df[["captain_id", "agent_id"]].drop_duplicates()
-    for _, row in pairs.iterrows():
-        G.add_edge(f"C_{row['captain_id']}", f"A_{row['agent_id']}")
-    
     n_captains = df["captain_id"].nunique()
     n_agents = df["agent_id"].nunique()
     n_edges = len(pairs)
+    n_nodes = n_captains + n_agents
     max_edges = n_captains * n_agents
     
     diagnostics = {
-        "n_nodes": len(G.nodes()),
+        "n_nodes": n_nodes,
         "n_edges": n_edges,
         "max_possible_edges": max_edges,
         "density": n_edges / max_edges if max_edges > 0 else 0,
-        "avg_degree": 2 * n_edges / len(G.nodes()) if len(G.nodes()) > 0 else 0,
+        "avg_degree": 2 * n_edges / n_nodes if n_nodes > 0 else 0,
     }
     
     print(f"\nNetwork density:")

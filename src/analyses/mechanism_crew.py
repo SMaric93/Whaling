@@ -23,6 +23,9 @@ from .config import TABLES_DIR, FIGURES_DIR
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+FIRST_MATE_RANKS = {"1ST MATE", "1 MATE", "MATE"}
+MATE_RANKS = FIRST_MATE_RANKS | {"2ND MATE", "2 MATE"}
+
 
 def load_crew_data() -> pd.DataFrame:
     """Load and parse crew roster data."""
@@ -51,66 +54,92 @@ def compute_crew_features(crew: pd.DataFrame, voyage_df: pd.DataFrame) -> pd.Dat
     - avg_crew_age: Average age of crew
     """
     print("\n--- Computing Crew Features ---")
-    
+
     # Standardize voyage_id format
     crew = crew.copy()
     voyage_df = voyage_df.copy()
-    
+    voyage_ids = voyage_df["voyage_id"].drop_duplicates()
+    crew = crew[crew["voyage_id"].isin(voyage_ids)]
+
     # Clean up rank field
     if "rank" in crew.columns:
         crew["rank"] = crew["rank"].fillna("").str.upper().str.strip()
-    
-    # Compute per-voyage features
-    voyage_features = []
-    
-    for voyage_id in voyage_df["voyage_id"].unique():
-        v_crew = crew[crew["voyage_id"] == voyage_id]
-        
-        if len(v_crew) == 0:
-            continue
-        
-        # Crew size
-        crew_size = len(v_crew)
-        
-        # Greenhand ratio
-        n_greenhand = v_crew["rank"].str.contains("GREEN", case=False, na=False).sum()
-        greenhand_ratio = n_greenhand / crew_size if crew_size > 0 else np.nan
-        
-        # Get 1st mate
-        mate_rows = v_crew[v_crew["rank"].isin(["1ST MATE", "1 MATE", "MATE"])]
-        mate_id = mate_rows["crew_name_clean"].iloc[0] if len(mate_rows) > 0 else None
-        
-        # Crew diversity (unique birthplaces)
-        if "birthplace" in v_crew.columns:
-            birthplaces = v_crew["birthplace"].dropna().unique()
-            crew_diversity = len(birthplaces)
-        else:
-            crew_diversity = np.nan
-        
-        # Average age
-        if "age" in v_crew.columns:
-            ages = pd.to_numeric(v_crew["age"], errors="coerce")
-            avg_age = ages.mean()
-        else:
-            avg_age = np.nan
-        
-        # Desertion rate
-        if "is_deserted" in v_crew.columns:
-            desertion_rate = v_crew["is_deserted"].mean()
-        else:
-            desertion_rate = np.nan
-        
-        voyage_features.append({
-            "voyage_id": voyage_id,
-            "crew_size": crew_size,
-            "greenhand_ratio": greenhand_ratio,
-            "crew_diversity": crew_diversity,
-            "avg_crew_age": avg_age,
-            "desertion_rate": desertion_rate,
-            "mate_id": mate_id,
-        })
-    
-    features_df = pd.DataFrame(voyage_features)
+
+    if crew.empty:
+        return pd.DataFrame(
+            columns=[
+                "voyage_id",
+                "crew_size",
+                "greenhand_ratio",
+                "crew_diversity",
+                "avg_crew_age",
+                "desertion_rate",
+                "mate_id",
+            ]
+        )
+
+    grouped = crew.groupby("voyage_id", sort=False)
+    features_df = grouped.size().rename("crew_size").reset_index()
+
+    greenhand_ratio = (
+        crew["rank"].str.contains("GREEN", case=False, na=False)
+        .groupby(crew["voyage_id"], sort=False)
+        .mean()
+        .rename("greenhand_ratio")
+        .reset_index()
+    )
+    features_df = features_df.merge(greenhand_ratio, on="voyage_id", how="left")
+
+    mate_rows = (
+        crew.loc[crew["rank"].isin(FIRST_MATE_RANKS), ["voyage_id", "crew_name_clean"]]
+        .dropna(subset=["crew_name_clean"])
+        .drop_duplicates(subset=["voyage_id"])
+        .rename(columns={"crew_name_clean": "mate_id"})
+    )
+    features_df = features_df.merge(mate_rows, on="voyage_id", how="left")
+
+    if "birthplace" in crew.columns:
+        crew_diversity = (
+            crew.groupby("voyage_id", sort=False)["birthplace"]
+            .nunique(dropna=True)
+            .rename("crew_diversity")
+            .reset_index()
+        )
+        features_df = features_df.merge(crew_diversity, on="voyage_id", how="left")
+    else:
+        features_df["crew_diversity"] = np.nan
+
+    if "age" in crew.columns:
+        ages = pd.to_numeric(crew["age"], errors="coerce")
+        avg_age = (
+            ages.groupby(crew["voyage_id"], sort=False)
+            .mean()
+            .rename("avg_crew_age")
+            .reset_index()
+        )
+        features_df = features_df.merge(avg_age, on="voyage_id", how="left")
+    else:
+        features_df["avg_crew_age"] = np.nan
+
+    if "is_deserted" in crew.columns:
+        desertion_rate = (
+            pd.to_numeric(crew["is_deserted"], errors="coerce")
+            .groupby(crew["voyage_id"], sort=False)
+            .mean()
+            .rename("desertion_rate")
+            .reset_index()
+        )
+        features_df = features_df.merge(desertion_rate, on="voyage_id", how="left")
+    else:
+        features_df["desertion_rate"] = np.nan
+
+    features_df = (
+        voyage_ids.to_frame(name="voyage_id")
+        .merge(features_df, on="voyage_id", how="left")
+        .dropna(subset=["crew_size"])
+        .reset_index(drop=True)
+    )
+
     print(f"Computed features for {len(features_df):,} voyages")
     print(f"  Mean crew size: {features_df['crew_size'].mean():.1f}")
     print(f"  Mean greenhand ratio: {features_df['greenhand_ratio'].mean():.2%}")
@@ -135,27 +164,25 @@ def track_crew_experience(crew: pd.DataFrame, voyage_df: pd.DataFrame) -> pd.Dat
     # Merge dates to crew
     crew_with_dates = crew.merge(voyage_dates, on="voyage_id", how="left")
     crew_with_dates = crew_with_dates.dropna(subset=["year_out", "crew_name_clean"])
-    
+
     # Count prior voyages for each crew member
-    crew_with_dates = crew_with_dates.sort_values("year_out")
-    
-    # For each crew member, count cumulative voyages
-    crew_with_dates["voyage_num"] = crew_with_dates.groupby("crew_name_clean").cumcount()
-    
-    # Aggregate to voyage level
-    experience_agg = crew_with_dates.groupby("voyage_id").agg({
-        "voyage_num": ["mean", "max"],
-        "crew_name_clean": "count"
-    }).reset_index()
-    experience_agg.columns = ["voyage_id", "avg_prior_voyages", "max_prior_voyages", "n_crew"]
-    
-    # Repeat crew ratio: fraction with voyage_num > 0
-    repeat_crew = crew_with_dates[crew_with_dates["voyage_num"] > 0].groupby("voyage_id").size()
-    total_crew = crew_with_dates.groupby("voyage_id").size()
-    repeat_ratio = (repeat_crew / total_crew).fillna(0).reset_index()
-    repeat_ratio.columns = ["voyage_id", "repeat_crew_ratio"]
-    
-    experience_df = experience_agg.merge(repeat_ratio, on="voyage_id", how="left")
+    crew_with_dates = crew_with_dates.sort_values(
+        ["crew_name_clean", "year_out", "voyage_id"]
+    )
+    crew_with_dates["voyage_num"] = crew_with_dates.groupby(
+        "crew_name_clean", sort=False
+    ).cumcount()
+    crew_with_dates["is_repeat_crew"] = (crew_with_dates["voyage_num"] > 0).astype(float)
+
+    experience_df = (
+        crew_with_dates.groupby("voyage_id", sort=False, as_index=False)
+        .agg(
+            avg_prior_voyages=("voyage_num", "mean"),
+            max_prior_voyages=("voyage_num", "max"),
+            n_crew=("crew_name_clean", "count"),
+            repeat_crew_ratio=("is_repeat_crew", "mean"),
+        )
+    )
     
     print(f"Tracked experience for {len(experience_df):,} voyages")
     print(f"  Mean prior voyages: {experience_df['avg_prior_voyages'].mean():.2f}")
@@ -452,7 +479,7 @@ def run_mate_to_captain_test(df: pd.DataFrame, crew: pd.DataFrame, outcome_col: 
     crew["rank"] = crew["rank"].fillna("").str.upper().str.strip()
     
     # Find mates
-    mates = crew[crew["rank"].isin(["1ST MATE", "1 MATE", "MATE", "2ND MATE", "2 MATE"])]
+    mates = crew[crew["rank"].isin(MATE_RANKS)]
     mates = mates.dropna(subset=["crew_name_clean"])
     
     # Find captains

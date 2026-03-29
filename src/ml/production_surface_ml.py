@@ -114,7 +114,7 @@ def estimate_production_surface(
             max_depth=ML_CFG.rf_max_depth,
             min_samples_leaf=ML_CFG.rf_min_samples_leaf,
             random_state=ML_CFG.random_seed,
-            n_jobs=-1,
+            n_jobs=1,
         )
         rf.fit(X_tr, y_tr)
         models["random_forest"] = {
@@ -157,21 +157,25 @@ def estimate_production_surface(
                 best_name, best_info["val"]["r_squared"])
 
     # ── Prediction grids ────────────────────────────────────────────
+    needs_interactions = best_name == "linear_interactions"
     grids = _compute_prediction_grids(
         best_model, df_valid, features,
         theta_idx=theta_idx, psi_idx=psi_idx, scar_idx=scar_idx,
+        needs_interactions=needs_interactions,
     )
 
     # ── Marginal returns ────────────────────────────────────────────
     marginals = _compute_marginal_returns(
         best_model, df_valid, features,
         theta_idx=theta_idx, psi_idx=psi_idx, scar_idx=scar_idx,
+        needs_interactions=needs_interactions,
     )
 
     # ── Cross-partial (submodularity test) ──────────────────────────
     cross_partial = _compute_cross_partial(
         best_model, df_valid, features,
         theta_idx=theta_idx, psi_idx=psi_idx, scar_idx=scar_idx,
+        needs_interactions=needs_interactions,
     )
 
     if save_outputs:
@@ -220,7 +224,7 @@ def _build_benchmark(models: Dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _compute_prediction_grids(model, df, features, *, theta_idx, psi_idx, scar_idx):
+def _compute_prediction_grids(model, df, features, *, theta_idx, psi_idx, scar_idx, needs_interactions=False):
     """Compute prediction grids over θ, ψ, and scarcity percentiles."""
     grids = {}
     n_grid = 20
@@ -251,7 +255,10 @@ def _compute_prediction_grids(model, df, features, *, theta_idx, psi_idx, scar_i
                     x[psi_idx] = psi_val
                 if scar_idx is not None:
                     x[scar_idx] = df[features[scar_idx]].quantile(scarcity_pctile / 100)
-                pred_grid[i, j] = model.predict(x.reshape(1, -1))[0]
+                x_in = x.reshape(1, -1)
+                if needs_interactions:
+                    x_in = _add_interaction_features(x_in, theta_idx, psi_idx, scar_idx)
+                pred_grid[i, j] = model.predict(x_in)[0]
 
         grids[scarcity_label] = {
             "theta_range": theta_range,
@@ -262,7 +269,7 @@ def _compute_prediction_grids(model, df, features, *, theta_idx, psi_idx, scar_i
     return grids
 
 
-def _compute_marginal_returns(model, df, features, *, theta_idx, psi_idx, scar_idx):
+def _compute_marginal_returns(model, df, features, *, theta_idx, psi_idx, scar_idx, needs_interactions=False):
     """Compute marginal return to ψ at different θ values."""
     if theta_idx is None or psi_idx is None:
         return {}
@@ -278,6 +285,12 @@ def _compute_marginal_returns(model, df, features, *, theta_idx, psi_idx, scar_i
 
     X_median = df[features].fillna(0).median().values
 
+    def _predict_one(x):
+        x_in = x.reshape(1, -1)
+        if needs_interactions:
+            x_in = _add_interaction_features(x_in, theta_idx, psi_idx, scar_idx)
+        return model.predict(x_in)[0]
+
     marginal_psi_at_theta = []
     for theta_val in theta_range:
         x_lo = X_median.copy()
@@ -287,8 +300,8 @@ def _compute_marginal_returns(model, df, features, *, theta_idx, psi_idx, scar_i
         x_lo[psi_idx] = df[features[psi_idx]].quantile(0.25)
         x_hi[psi_idx] = df[features[psi_idx]].quantile(0.75)
 
-        pred_lo = model.predict(x_lo.reshape(1, -1))[0]
-        pred_hi = model.predict(x_hi.reshape(1, -1))[0]
+        pred_lo = _predict_one(x_lo)
+        pred_hi = _predict_one(x_hi)
         marginal = pred_hi - pred_lo
         marginal_psi_at_theta.append(marginal)
 
@@ -298,7 +311,7 @@ def _compute_marginal_returns(model, df, features, *, theta_idx, psi_idx, scar_i
     }
 
 
-def _compute_cross_partial(model, df, features, *, theta_idx, psi_idx, scar_idx):
+def _compute_cross_partial(model, df, features, *, theta_idx, psi_idx, scar_idx, needs_interactions=False):
     """Compute cross-partial: does marginal value of ψ decline with θ?"""
     if theta_idx is None or psi_idx is None:
         return {}
@@ -318,7 +331,10 @@ def _compute_cross_partial(model, df, features, *, theta_idx, psi_idx, scar_idx)
             x = x_base.copy()
             x[theta_idx] += t_offset
             x[psi_idx] += p_offset
-            return model.predict(x.reshape(1, -1))[0]
+            x_in = x.reshape(1, -1)
+            if needs_interactions:
+                x_in = _add_interaction_features(x_in, theta_idx, psi_idx, scar_idx)
+            return model.predict(x_in)[0]
 
         cross_partial_val = (
             _pred(eps_t, eps_p) - _pred(eps_t, 0) - _pred(0, eps_p) + _pred(0, 0)

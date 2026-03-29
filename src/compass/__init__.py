@@ -7,8 +7,8 @@ compass indices, and exports panel-ready datasets for causal/movers
 econometric designs.
 """
 
-from compass.config import CompassConfig, load_config
-from compass.cli import run_compass_pipeline
+from .cli import run_compass_pipeline
+from .config import CompassConfig, load_config
 
 __all__ = [
     "CompassConfig",

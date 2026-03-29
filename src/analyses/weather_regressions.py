@@ -50,6 +50,14 @@ def load_analysis_data_with_weather() -> pd.DataFrame:
         raise FileNotFoundError(f"Voyage data not found: {voyages_path}")
     
     voyages = pd.read_parquet(voyages_path)
+    # Ensure canonical ID columns exist
+    for name_col, id_col in [
+        ("captain_name_clean", "captain_id"),
+        ("agent_name_clean", "agent_id"),
+        ("vessel_name_clean", "vessel_id"),
+    ]:
+        if id_col not in voyages.columns and name_col in voyages.columns:
+            voyages = voyages.rename(columns={name_col: id_col})
     
     # Load weather data
     weather_path = DATA_DIR / "voyage_weather.parquet"

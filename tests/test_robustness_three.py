@@ -7,9 +7,14 @@ Tests for:
 3. Insurance Variance Validation
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 # =============================================================================
@@ -255,6 +260,22 @@ class TestVesselMoverDesign:
         # Should return results (not error)
         assert "error" not in results or "model1_pooled" in results
 
+    def test_event_study_runs(self):
+        """Test that vessel-transfer event study returns event-time output."""
+        df = make_synthetic_vessel_transfer_data()
+
+        from src.analyses.vessel_mover_analysis import (
+            build_vessel_ownership_panel,
+            run_vessel_transfer_event_study,
+        )
+
+        panel = build_vessel_ownership_panel(df)
+        results = run_vessel_transfer_event_study(panel, window=2)
+
+        assert "error" not in results
+        assert results["n_transfers"] > 0
+        assert results["n_event_obs"] > 0
+
 
 # =============================================================================
 # Test: Stopping Rule
@@ -262,6 +283,69 @@ class TestVesselMoverDesign:
 
 class TestStoppingRule:
     """Tests for the Optimal Foraging Stopping Rule analysis."""
+
+    def test_step_lengths_exact_and_filters_zero_steps(self):
+        """Step lengths should preserve order and drop zero-distance moves."""
+        positions_df = pd.DataFrame({
+            "voyage_id": ["V1", "V1", "V1", "V2", "V2"],
+            "obs_date": pd.to_datetime([
+                "1800-01-01",
+                "1800-01-02",
+                "1800-01-03",
+                "1800-01-01",
+                "1800-01-02",
+            ]),
+            "lat": [0.0, 0.0, 1.0, 10.0, 10.0],
+            "lon": [0.0, 1.0, 1.0, 20.0, 20.0],
+        })
+
+        from src.analyses.search_theory import compute_step_lengths, haversine_distance
+
+        steps = compute_step_lengths(positions_df)
+        expected = np.array([
+            haversine_distance(0.0, 0.0, 0.0, 1.0),
+            haversine_distance(0.0, 1.0, 1.0, 1.0),
+        ])
+
+        assert steps["voyage_id"].tolist() == ["V1", "V1"]
+        np.testing.assert_allclose(steps["step_length"].to_numpy(), expected)
+
+    def test_placebo_skill_scores_exact(self):
+        """Placebo skill scores should use the actual and placebo maps correctly."""
+        positions_df = pd.DataFrame({
+            "voyage_id": ["V1"] * 10 + ["V2"] * 9,
+            "lat": [0.0] * 19,
+            "lon": [0.0] * 19,
+            "year": [1800] * 10 + [1800] * 9,
+        })
+        voyage_df = pd.DataFrame({
+            "voyage_id": ["V1", "V2"],
+            "captain_id": ["C001", "C002"],
+            "alpha_hat": [0.5, 0.2],
+        })
+
+        from src.analyses.search_theory import (
+            compute_placebo_skill_scores,
+            lat_lon_to_grid,
+        )
+
+        cell = lat_lon_to_grid(0.0, 0.0)
+        density_maps = {
+            1800: {cell: 2.0},
+            1801: {cell: 1.0},
+        }
+
+        scores = compute_placebo_skill_scores(
+            positions_df,
+            density_maps,
+            voyage_df,
+            n_placebo_years=1,
+        )
+
+        assert scores["voyage_id"].tolist() == ["V1"]
+        assert scores.loc[0, "actual_encounters"] == pytest.approx(20.0)
+        assert scores.loc[0, "mean_placebo_encounters"] == pytest.approx(10.0)
+        assert scores.loc[0, "skill_score"] == pytest.approx(2.0)
     
     def test_patch_identification(self):
         """Test that patches are correctly identified from positions."""
@@ -294,6 +378,34 @@ class TestStoppingRule:
         assert "estimated_yield" in patches_with_yield.columns
         assert "is_empty" in patches_with_yield.columns
         assert "is_productive" in patches_with_yield.columns
+
+    def test_patch_yield_loo_exact(self):
+        """LOO patch density should use only prior voyages in the same cell."""
+        patches = pd.DataFrame({
+            "voyage_id": ["V2", "V3"],
+            "patch_id": [1, 1],
+            "entry_date": pd.to_datetime(["1801-01-01", "1802-01-01"]),
+            "cell": ["0_0", "0_0"],
+            "duration_days": [5, 5],
+        })
+        positions_df = pd.DataFrame({
+            "voyage_id": ["V1", "V2", "V3"],
+            "obs_date": pd.to_datetime(["1800-01-01", "1801-01-01", "1802-01-01"]),
+            "lat": [1.0, 1.0, 1.0],
+            "lon": [1.0, 1.0, 1.0],
+        })
+        voyage_df = pd.DataFrame({
+            "voyage_id": ["V1", "V2", "V3"],
+            "log_q": [5.0, 7.0, 9.0],
+        })
+
+        from src.analyses.search_theory import compute_patch_yield_loo
+
+        loo = compute_patch_yield_loo(patches, positions_df, voyage_df, grid_size=5.0)
+
+        assert loo["hist_density"].tolist() == pytest.approx([5.0, 6.0])
+        assert loo["is_empty_loo"].tolist() == [True, False]
+        assert loo["is_productive_loo"].tolist() == [False, True]
     
     def test_stopping_rule_test_runs(self):
         """Test that stopping rule test runs without error."""
@@ -420,6 +532,23 @@ class TestInsuranceVariance:
         
         # Should return results
         assert "quantiles_by_cell" in results or "error" in results
+
+    def test_left_tail_analysis_exact_quantiles(self):
+        """Grouped quantiles should match the expected treatment-cell summaries."""
+        df_cells = pd.DataFrame({
+            "treatment_cell": ["Novice × High-ψ"] * 5 + ["Novice × Low-ψ"] * 5,
+            "log_q": [6.0, 6.5, 7.0, 7.5, 8.0, 4.0, 4.5, 5.0, 5.5, 6.0],
+        })
+
+        from src.analyses.insurance_variance_test import run_left_tail_analysis
+
+        results = run_left_tail_analysis(df_cells)
+        summary = pd.DataFrame(results["quantiles_by_cell"]).set_index("Treatment Cell")
+
+        assert results["p10_novice_high"] == pytest.approx(6.2)
+        assert results["p10_novice_low"] == pytest.approx(4.2)
+        assert summary.loc["Novice × High-ψ", "P50"] == pytest.approx(7.0)
+        assert summary.loc["Novice × Low-ψ", "P75"] == pytest.approx(5.5)
 
 
 # =============================================================================

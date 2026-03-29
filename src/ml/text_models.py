@@ -64,9 +64,19 @@ def fit_text_classifier(
 
     model = Pipeline([
         ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_features=5000)),
-        ("clf", LogisticRegression(max_iter=1000, random_state=seed, n_jobs=-1)),
+        # Keep fitting single-process so ETL remains usable in restricted
+        # environments where joblib cannot query/process system semaphore limits.
+        ("clf", LogisticRegression(max_iter=1000, random_state=seed, n_jobs=1)),
     ])
-    model.fit(pd.Series(text_values)[keep], label_values[keep].astype(str))
+    try:
+        model.fit(pd.Series(text_values)[keep], label_values[keep].astype(str))
+    except (PermissionError, OSError):
+        return TextClassifierBundle(
+            False,
+            sorted(label_values[keep].astype(str).unique().tolist()),
+            training_rows=int(keep.sum()),
+            notes="fit_blocked_by_environment",
+        )
 
     classes = list(getattr(model.named_steps["clf"], "classes_", []))
     return TextClassifierBundle(

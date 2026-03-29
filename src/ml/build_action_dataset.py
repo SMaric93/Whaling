@@ -247,7 +247,8 @@ def build_action_dataset(
               "tonnage", "rig", "crew_count",
               "switch_agent", "switch_vessel",
               "captain_experience", "captain_voyage_num",
-              "novice"]:
+              "novice",
+              "theta", "psi"]:
         # Check actual column name from config
         actual = c
         if actual in voyages.columns:
@@ -260,20 +261,82 @@ def build_action_dataset(
             how="left",
         )
 
-    # Load authoritative types
+    # ── Load cross-fitted type estimates (theta_hat_holdout / psi_hat_holdout) ──
+    #
+    # Priority chain:
+    #   1. Authoritative types file (outputs/post_connectivity/manifests/)
+    #   2. Cross-fitted type estimation from the panel in-line
+    #   3. In-sample theta/psi from the AKM merge (already on `voyages`)
+    #
+    # We always prefer cross-fitted estimates to avoid data leakage.
+    theta_psi_loaded = False
+
+    # Source 1: authoritative types file
     try:
-        types_path = Path(__file__).parent.parent.parent / 'outputs' / 'post_connectivity' / 'manifests' / 'type_file_authoritative.parquet'
-        df_types = pd.read_parquet(types_path)
-        # Merge it
-        positions = positions.merge(df_types[['voyage_id', 'theta_hat', 'psi_hat']].drop_duplicates(), on='voyage_id', how='left')
-        
-        # Standard names for ML policy learning ladder
-        positions['theta_hat_holdout'] = positions['theta_hat']
-        positions['psi_hat_holdout'] = positions['psi_hat']
+        types_path = (
+            Path(__file__).parent.parent.parent
+            / "outputs" / "post_connectivity" / "manifests"
+            / "type_file_authoritative.parquet"
+        )
+        if types_path.exists():
+            df_types = pd.read_parquet(types_path)
+            positions = positions.merge(
+                df_types[["voyage_id", "theta_hat", "psi_hat"]].drop_duplicates("voyage_id"),
+                on="voyage_id", how="left",
+            )
+            positions["theta_hat_holdout"] = positions["theta_hat"]
+            positions["psi_hat_holdout"] = positions["psi_hat"]
+            n_theta = positions["theta_hat_holdout"].notna().sum()
+            logger.info("Loaded authoritative types: %d voyages with theta_hat", n_theta)
+            theta_psi_loaded = n_theta > 0
     except Exception as e:
-        logger.warning(f"Could not load authoritative types: {e}")
-        positions['theta_hat_holdout'] = np.nan
-        positions['psi_hat_holdout'] = np.nan
+        logger.warning("Could not load authoritative types: %s", e)
+
+    # Source 2: run cross-fitted type estimation from in-sample effects
+    if not theta_psi_loaded and "theta" in positions.columns and "psi" in positions.columns:
+        try:
+            from src.reinforcement.type_estimation import run_type_estimation
+            logger.info("Running cross-fitted type estimation for action dataset...")
+            # Need a voyage-level df for cross-fitting
+            voy_df = voyages.copy()
+            if "theta" in voy_df.columns and "psi" in voy_df.columns:
+                voy_df = run_type_estimation(voy_df, method="time_split")
+                if "theta_heldout" in voy_df.columns:
+                    type_map = voy_df[["voyage_id", "theta_heldout", "psi_heldout"]].drop_duplicates("voyage_id")
+                    positions = positions.merge(type_map, on="voyage_id", how="left")
+                    positions["theta_hat_holdout"] = positions["theta_heldout"]
+                    positions["psi_hat_holdout"] = positions["psi_heldout"]
+                    n_theta = positions["theta_hat_holdout"].notna().sum()
+                    logger.info("Cross-fitted types: %d positions with theta_hat_holdout", n_theta)
+                    theta_psi_loaded = n_theta > 0
+        except Exception as e:
+            logger.warning("Cross-fitted type estimation failed: %s", e)
+
+    # Source 3: fall back to in-sample theta/psi (with warning)
+    if not theta_psi_loaded:
+        if "theta" in positions.columns and positions["theta"].notna().any():
+            logger.warning(
+                "Using in-sample theta/psi as holdout fallback. "
+                "Cross-fitted estimates were not available."
+            )
+            positions["theta_hat_holdout"] = positions["theta"]
+            positions["psi_hat_holdout"] = positions.get("psi", np.nan)
+            theta_psi_loaded = True
+        else:
+            positions["theta_hat_holdout"] = np.nan
+            positions["psi_hat_holdout"] = np.nan
+            logger.warning(
+                "No theta/psi source available. "
+                "theta_hat_holdout and psi_hat_holdout will be NaN."
+            )
+
+    # ── Median imputation for tonnage ───────────────────────────────
+    if "tonnage" in positions.columns:
+        tonnage_median = positions["tonnage"].median()
+        n_imp = positions["tonnage"].isna().sum()
+        if n_imp > 0 and pd.notna(tonnage_median):
+            positions["tonnage"] = positions["tonnage"].fillna(tonnage_median)
+            logger.info("Imputed %d missing tonnage values with median (%.1f)", n_imp, tonnage_median)
 
     # ── Patch assignment ────────────────────────────────────────────
     if "patch_id" not in positions.columns and len(patch_spells) > 0:

@@ -19,128 +19,148 @@ String Normalization:
 """
 
 import logging
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def clean_voyages() -> None:
+def _save_output_variants(df, primary_path, *alias_paths) -> None:
+    """Write a dataframe to the canonical output plus compatibility aliases."""
+    primary_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(primary_path, index=False)
+    df.to_csv(primary_path.with_suffix(".csv"), index=False)
+    for alias_path in alias_paths:
+        df.to_parquet(alias_path, index=False)
+        df.to_csv(alias_path.with_suffix(".csv"), index=False)
+
+
+def clean_voyages() -> bool:
     """Parse and standardize AOWV voyage records."""
-    from src.parsing.voyage_parser import parse_voyages
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.parsing.voyage_parser import VoyageParser
+    from src.config import RAW_AOWV, STAGING_DIR
     
     logger.info("Cleaning voyage records...")
     
-    voyages_raw = RAW_DIR / 'aowv_voyages.csv'
-    if voyages_raw.exists():
-        df = parse_voyages(voyages_raw)
-        output_path = STAGING_DIR / 'voyages_parsed.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Parsed {len(df):,} voyages → {output_path}")
-    else:
-        logger.warning(f"Voyage file not found: {voyages_raw}")
+    if not RAW_AOWV.exists():
+        logger.warning(f"Voyage directory not found: {RAW_AOWV}")
+        return False
+
+    df = VoyageParser(raw_dir=RAW_AOWV).parse()
+    output_path = STAGING_DIR / 'voyages_master.parquet'
+    _save_output_variants(df, output_path, STAGING_DIR / 'voyages_parsed.parquet')
+    logger.info(f"Parsed {len(df):,} voyages → {output_path}")
+    return output_path.exists()
 
 
-def clean_crew() -> None:
+def clean_crew() -> bool:
     """Parse crew lists with role extraction."""
     from src.parsing.crew_parser import parse_crew_lists
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.config import RAW_CREWLIST, STAGING_DIR
     
     logger.info("Cleaning crew lists...")
     
-    crew_raw = RAW_DIR / 'aowv_crew.csv'
-    if crew_raw.exists():
-        df = parse_crew_lists(crew_raw)
-        output_path = STAGING_DIR / 'crew_parsed.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Parsed {len(df):,} crew records → {output_path}")
-    else:
-        logger.warning(f"Crew file not found: {crew_raw}")
+    if not RAW_CREWLIST.exists():
+        logger.warning(f"Crew directory not found: {RAW_CREWLIST}")
+        return False
+
+    df = parse_crew_lists(RAW_CREWLIST)
+    output_path = STAGING_DIR / 'crew_roster.parquet'
+    _save_output_variants(df, output_path, STAGING_DIR / 'crew_parsed.parquet')
+    logger.info(f"Parsed {len(df):,} crew records → {output_path}")
+    return output_path.exists()
 
 
-def clean_logbooks() -> None:
+def clean_logbooks() -> bool:
     """Parse logbook entries with coordinate extraction."""
-    from src.parsing.logbook_parser import parse_logbooks
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.parsing.logbook_parser import LogbookParser
+    from src.config import RAW_LOGBOOKS, STAGING_DIR
     
     logger.info("Cleaning logbook entries...")
     
-    logbooks_raw = RAW_DIR / 'aowv_logbooks.csv'
-    if logbooks_raw.exists():
-        df = parse_logbooks(logbooks_raw)
-        output_path = STAGING_DIR / 'logbooks_parsed.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Parsed {len(df):,} logbook entries → {output_path}")
-    else:
-        logger.warning(f"Logbooks file not found: {logbooks_raw}")
+    if not RAW_LOGBOOKS.exists():
+        logger.warning(f"Logbooks directory not found: {RAW_LOGBOOKS}")
+        return False
+
+    df = LogbookParser(raw_dir=RAW_LOGBOOKS).parse()
+    output_path = STAGING_DIR / 'logbook_positions.parquet'
+    _save_output_variants(df, output_path, STAGING_DIR / 'logbooks_parsed.parquet')
+    logger.info(f"Parsed {len(df):,} logbook entries → {output_path}")
+    return output_path.exists()
 
 
-def clean_registers() -> None:
+def clean_registers() -> bool:
     """Parse vessel registry and insurance records."""
     from src.parsing.register_parser import parse_registers
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.config import RAW_INSURANCE, STAGING_DIR
     
     logger.info("Cleaning vessel registers...")
     
-    register_raw = RAW_DIR / 'marine_register.csv'
-    if register_raw.exists():
-        df = parse_registers(register_raw)
-        output_path = STAGING_DIR / 'registers_parsed.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Parsed {len(df):,} register records → {output_path}")
-    else:
-        logger.info("No vessel register file found - skipping")
+    if not RAW_INSURANCE.exists():
+        logger.info("No vessel register source found - skipping")
+        return False
+
+    df = parse_registers(RAW_INSURANCE)
+    output_path = STAGING_DIR / 'vessel_register_year.parquet'
+    _save_output_variants(df, output_path, STAGING_DIR / 'registers_parsed.parquet')
+    logger.info(f"Parsed {len(df):,} register records → {output_path}")
+    return output_path.exists()
 
 
-def clean_starbuck() -> None:
+def clean_starbuck() -> bool:
     """Parse Starbuck (1878) historical data."""
     from src.parsing.starbuck_parser import parse_starbuck
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.config import RAW_STARBUCK, STAGING_DIR
     
     logger.info("Cleaning Starbuck data...")
     
-    starbuck_raw = RAW_DIR / 'starbuck'
-    if starbuck_raw.exists():
-        df = parse_starbuck(starbuck_raw)
-        output_path = STAGING_DIR / 'starbuck_parsed.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Parsed {len(df):,} Starbuck records → {output_path}")
-    else:
+    if not RAW_STARBUCK.exists():
         logger.info("No Starbuck data found - skipping")
+        return False
+
+    df = parse_starbuck(RAW_STARBUCK)
+    output_path = STAGING_DIR / 'starbuck_voyage_list.parquet'
+    _save_output_variants(df, output_path, STAGING_DIR / 'starbuck_parsed.parquet')
+    logger.info(f"Parsed {len(df):,} Starbuck records → {output_path}")
+    return output_path.exists()
 
 
-def clean_maury() -> None:
+def clean_maury() -> bool:
     """Parse Maury logbook coordinates."""
-    from src.parsing.maury_parser import parse_maury
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.parsing.maury_parser import run_maury_parser
+    from src.config import RAW_MAURY, STAGING_DIR
     
     logger.info("Cleaning Maury logbooks...")
     
-    maury_raw = RAW_DIR / 'maury'
-    if maury_raw.exists():
-        df = parse_maury(maury_raw)
-        output_path = STAGING_DIR / 'maury_parsed.parquet'
-        df.to_parquet(output_path, index=False)
-        logger.info(f"Parsed {len(df):,} Maury entries → {output_path}")
-    else:
+    if not RAW_MAURY.exists():
         logger.info("No Maury data found - skipping")
+        return False
+
+    df = run_maury_parser(RAW_MAURY)
+    if len(df) == 0:
+        return False
+
+    output_path = STAGING_DIR / 'maury_positions.parquet'
+    _save_output_variants(df, output_path, STAGING_DIR / 'maury_parsed.parquet')
+    logger.info(f"Parsed {len(df):,} Maury entries → {output_path}")
+    return output_path.exists()
 
 
-def clean_wsl() -> None:
+def clean_wsl() -> bool:
     """Extract events from WSL PDFs."""
     from src.parsing.wsl_event_extractor import extract_all_wsl_events
-    from src.config import RAW_DIR, STAGING_DIR
+    from src.config import RAW_WSL, STAGING_DIR
     
     logger.info("Extracting WSL events...")
     
-    wsl_dir = RAW_DIR / 'wsl_pdfs'
+    wsl_dir = RAW_WSL
     if wsl_dir.exists() and any(wsl_dir.glob('*.pdf')):
         df = extract_all_wsl_events(wsl_dir)
         output_path = STAGING_DIR / 'wsl_events.parquet'
-        df.to_parquet(output_path, index=False)
+        _save_output_variants(df, output_path)
         logger.info(f"Extracted {len(df):,} WSL events → {output_path}")
-    else:
-        logger.info("No WSL PDFs found - skipping")
+        return output_path.exists()
+
+    logger.info("No WSL PDFs found - skipping")
+    return False
 
 
 def run_clean() -> dict:
@@ -166,45 +186,38 @@ def run_clean() -> dict:
     
     # Core data
     try:
-        clean_voyages()
-        results['voyages'] = True
+        results['voyages'] = clean_voyages()
     except Exception as e:
         logger.error(f"Voyage cleaning failed: {e}")
     
     try:
-        clean_crew()
-        results['crew'] = True
+        results['crew'] = clean_crew()
     except Exception as e:
         logger.error(f"Crew cleaning failed: {e}")
     
     try:
-        clean_logbooks()
-        results['logbooks'] = True
+        results['logbooks'] = clean_logbooks()
     except Exception as e:
         logger.error(f"Logbook cleaning failed: {e}")
     
     # Supplementary data
     try:
-        clean_registers()
-        results['registers'] = True
+        results['registers'] = clean_registers()
     except Exception as e:
         logger.warning(f"Register cleaning skipped: {e}")
     
     try:
-        clean_starbuck()
-        results['starbuck'] = True
+        results['starbuck'] = clean_starbuck()
     except Exception as e:
         logger.warning(f"Starbuck cleaning skipped: {e}")
     
     try:
-        clean_maury()
-        results['maury'] = True
+        results['maury'] = clean_maury()
     except Exception as e:
         logger.warning(f"Maury cleaning skipped: {e}")
     
     try:
-        clean_wsl()
-        results['wsl'] = True
+        results['wsl'] = clean_wsl()
     except Exception as e:
         logger.warning(f"WSL cleaning skipped: {e}")
     
