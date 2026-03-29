@@ -111,13 +111,19 @@ def build_sparse_design_matrix(
         matrices.append(X_pt)
         index_maps["port_time"] = {"ids": pt_ids, "map": pt_map, "n": len(pt_ids)}
     
-    # Continuous controls
+    # Continuous controls (standard + any column starting with '_fe_')
     controls = []
     control_names = []
     
     for col in ["log_tonnage", "log_duration"]:
         if col in df.columns:
             controls.append(df[col].values)
+            control_names.append(col)
+    
+    # Additional controls: any column starting with '_fe_' (e.g. year dummies)
+    for col in sorted(df.columns):
+        if col.startswith("_fe_") and col not in control_names:
+            controls.append(df[col].values.astype(float))
             control_names.append(col)
     
     if controls:
@@ -279,6 +285,7 @@ def compute_kss_correction(
     results: Dict,
     use_parallel: bool = True,
     n_workers: Optional[int] = None,
+    homoskedastic: bool = False,
 ) -> Dict:
     """
     Compute KSS (Kline-Saggio-Sølvsten 2020) bias correction for variance components.
@@ -302,13 +309,18 @@ def compute_kss_correction(
         If True, use multithreaded leverage computation.
     n_workers : int, optional
         Number of worker threads (default: auto-detect CPU count).
+    homoskedastic : bool
+        If True, use σ̂² = RSS/(n-k) instead of observation-specific εᵢ².
+        More stable at low obs/parameter ratios (< 10). This is the correction
+        used in Card, Heining, Kline (2013).
         
     Returns
     -------
     Dict
         Bias-corrected variance estimates.
     """
-    print(f"\nComputing KSS bias correction (partial-out method, parallel={use_parallel})...")
+    mode_str = "homoskedastic" if homoskedastic else "heteroskedastic"
+    print(f"\nComputing KSS bias correction (partial-out, {mode_str}, parallel={use_parallel})...")
     
     df = results["df"]
     full_X = results["X"]
@@ -337,13 +349,23 @@ def compute_kss_correction(
     # Following KSS MATLAB: y = y - X(:,N+J:end) * b(N+J:end)
     # =========================================================================
     if n_nuisance > 0:
-        # Get the full model coefficients (already estimated in estimate_r1)
-        full_beta = lsqr(full_X, y, iter_lim=10000, atol=1e-10, btol=1e-10)[0]
-        
-        # Nuisance component: X_nuisance @ b_nuisance
+        # Partial out nuisance by regressing y on nuisance columns ONLY.
+        # This avoids collinearity between nuisance (e.g. decade dummies)
+        # and the captain/agent FE block that can produce NaN in LSQR.
         X_nuisance = full_X[:, nuisance_start:]
-        b_nuisance = full_beta[nuisance_start:]
-        nuisance_fitted = X_nuisance @ b_nuisance
+        if sp.issparse(X_nuisance):
+            X_nui_dense = X_nuisance.toarray()
+        else:
+            X_nui_dense = np.asarray(X_nuisance)
+        
+        # OLS via pseudo-inverse (handles rank-deficiency gracefully)
+        XtX_nui = X_nui_dense.T @ X_nui_dense
+        Xty_nui = X_nui_dense.T @ y
+        try:
+            b_nuisance = np.linalg.solve(XtX_nui, Xty_nui)
+        except np.linalg.LinAlgError:
+            b_nuisance = np.linalg.pinv(XtX_nui) @ Xty_nui
+        nuisance_fitted = X_nui_dense @ b_nuisance
         
         y_partialled = y - nuisance_fitted
         print(f"  Partialled out {n_nuisance} nuisance columns from y")
@@ -441,13 +463,28 @@ def compute_kss_correction(
         leverage_cov = np.sum((X_alpha_d @ S_cross) * X_gamma_d, axis=1)
     
     # =========================================================================
-    # Step 6: Compute bias corrections using reduced-model residuals
+    # Step 6: Compute bias corrections
     # =========================================================================
-    sigma_sq = residuals_reduced ** 2
-    
-    bias_var_alpha = np.sum(leverage_alpha * sigma_sq) / n
-    bias_var_gamma = np.sum(leverage_gamma * sigma_sq) / n
-    bias_cov = np.sum(leverage_cov * sigma_sq) / n
+    if homoskedastic:
+        # Card-Heining-Kline (2013) homoskedastic correction:
+        # Use σ̂² = RSS / (n - k) as a single scalar instead of εᵢ²
+        # This is much more stable at low obs/parameter ratios because
+        # it prevents high-leverage, high-residual observations from
+        # dominating the cross-term bias (which causes Corr > 1).
+        rss = np.sum(residuals_reduced ** 2)
+        dof = max(n - ca_end, 1)
+        sigma_hat_sq = rss / dof
+        print(f"  Homoskedastic σ̂² = {sigma_hat_sq:.4f} (RSS={rss:.1f}, dof={dof})")
+        
+        bias_var_alpha = sigma_hat_sq * np.mean(leverage_alpha)
+        bias_var_gamma = sigma_hat_sq * np.mean(leverage_gamma)
+        bias_cov = sigma_hat_sq * np.mean(leverage_cov)
+    else:
+        # KSS heteroskedastic correction: weight by observation-specific εᵢ²
+        sigma_sq = residuals_reduced ** 2
+        bias_var_alpha = np.sum(leverage_alpha * sigma_sq) / n
+        bias_var_gamma = np.sum(leverage_gamma * sigma_sq) / n
+        bias_cov = np.sum(leverage_cov * sigma_sq) / n
     
     # Plugin estimates (from partialled-out model)
     var_alpha_plugin = np.var(alpha_i)
@@ -459,7 +496,15 @@ def compute_kss_correction(
     var_gamma_kss = max(0, var_gamma_plugin - bias_var_gamma)
     cov_kss = cov_plugin - bias_cov
     
-    print(f"\n  --- KSS Results (partial-out method) ---")
+    # Sanity: clamp correlation to [-1, 1]
+    if var_alpha_kss > 0 and var_gamma_kss > 0:
+        corr_kss = cov_kss / (np.sqrt(var_alpha_kss) * np.sqrt(var_gamma_kss))
+        if abs(corr_kss) > 1.0:
+            print(f"  WARNING: Corr(α,γ) = {corr_kss:.4f} exceeds [-1,1]. "
+                  f"Clamping covariance.")
+            cov_kss = np.sign(cov_kss) * np.sqrt(var_alpha_kss * var_gamma_kss)
+    
+    print(f"\n  --- KSS Results ({mode_str}) ---")
     print(f"  Var(α): Plugin={var_alpha_plugin:.4f} - Bias={bias_var_alpha:.4f} = {var_alpha_kss:.4f}")
     print(f"  Var(γ): Plugin={var_gamma_plugin:.4f} - Bias={bias_var_gamma:.4f} = {var_gamma_kss:.4f}")
     print(f"  Cov(α,γ): Plugin={cov_plugin:.4f} - Bias={bias_cov:.4f} = {cov_kss:.4f}")

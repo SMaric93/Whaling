@@ -244,7 +244,6 @@ def build_action_dataset(
     merge_cols = ["voyage_id"]
     available_merge = []
     for c in ["captain_id", "agent_id", "vessel_id", "home_port",
-              "theta", "psi", "theta_heldout", "psi_heldout",
               "tonnage", "rig", "crew_count",
               "switch_agent", "switch_vessel",
               "captain_experience", "captain_voyage_num",
@@ -261,11 +260,20 @@ def build_action_dataset(
             how="left",
         )
 
-    # Rename holdout columns to standard names
-    for old, new in [("theta_heldout", "theta_hat_holdout"),
-                     ("psi_heldout", "psi_hat_holdout")]:
-        if old in positions.columns and new not in positions.columns:
-            positions.rename(columns={old: new}, inplace=True)
+    # Load authoritative types
+    try:
+        types_path = Path(__file__).parent.parent.parent / 'outputs' / 'post_connectivity' / 'manifests' / 'type_file_authoritative.parquet'
+        df_types = pd.read_parquet(types_path)
+        # Merge it
+        positions = positions.merge(df_types[['voyage_id', 'theta_hat', 'psi_hat']].drop_duplicates(), on='voyage_id', how='left')
+        
+        # Standard names for ML policy learning ladder
+        positions['theta_hat_holdout'] = positions['theta_hat']
+        positions['psi_hat_holdout'] = positions['psi_hat']
+    except Exception as e:
+        logger.warning(f"Could not load authoritative types: {e}")
+        positions['theta_hat_holdout'] = np.nan
+        positions['psi_hat_holdout'] = np.nan
 
     # ── Patch assignment ────────────────────────────────────────────
     if "patch_id" not in positions.columns and len(patch_spells) > 0:
