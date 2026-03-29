@@ -13,8 +13,9 @@ Outputs:
 
 import logging
 from pathlib import Path
-from datetime import datetime
 import shutil
+
+from src.pipeline._runner import StepSpec, run_steps
 
 logger = logging.getLogger(__name__)
 
@@ -245,36 +246,26 @@ def run_output(include_figures: bool = True) -> dict:
         'all_tables_md': None,
         'figures_copied': 0,
     }
-    
-    # Generate individual tables (MD)
-    try:
-        results['main_tables_md'] = generate_main_tables_md()
-    except Exception as e:
-        logger.error(f"Main tables MD failed: {e}")
-    
-    try:
-        results['appendix_tables_md'] = generate_appendix_tables_md()
-    except Exception as e:
-        logger.error(f"Appendix tables MD failed: {e}")
-    
-    # Generate combined files
-    try:
-        results['all_tables_tex'] = generate_all_tables_tex()
-    except Exception as e:
-        logger.error(f"Combined TEX failed: {e}")
-    
-    try:
-        results['all_tables_md'] = generate_all_tables_md()
-    except Exception as e:
-        logger.error(f"Combined MD failed: {e}")
-    
+
+    run_steps(
+        results,
+        [
+            StepSpec('main_tables_md', generate_main_tables_md, "Main tables MD failed", failure_level="error"),
+            StepSpec('appendix_tables_md', generate_appendix_tables_md, "Appendix tables MD failed", failure_level="error"),
+            StepSpec('all_tables_tex', generate_all_tables_tex, "Combined TEX failed", failure_level="error"),
+            StepSpec('all_tables_md', generate_all_tables_md, "Combined MD failed", failure_level="error"),
+        ],
+        logger=logger,
+    )
+
     # Copy figures
     if include_figures:
-        try:
-            results['figures_copied'] = copy_figures_to_paper()
-        except Exception as e:
-            logger.warning(f"Figure copying failed: {e}")
-    
+        run_steps(
+            results,
+            [StepSpec('figures_copied', copy_figures_to_paper, "Figure copying failed")],
+            logger=logger,
+        )
+
     # Generate summaries
     try:
         generate_robustness_summary()

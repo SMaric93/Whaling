@@ -13,6 +13,8 @@ Data Sources:
 
 import logging
 
+from src.pipeline._runner import StepSpec, run_steps
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,35 +106,27 @@ def run_pull(force: bool = False, skip_optional: bool = False) -> dict:
         'weather': False,
         'economic': False,
     }
-    
-    # Core data sources
-    try:
-        results['aowv'] = pull_aowv(force=force)
-    except Exception as e:
-        logger.error(f"AOWV pull failed: {e}")
-    
-    try:
-        results['online_sources'] = pull_online_sources(force=force)
-    except Exception as e:
-        logger.error(f"Online sources pull failed: {e}")
-    
-    try:
-        results['weather'] = pull_weather(force=force)
-    except Exception as e:
-        logger.error(f"Weather pull failed: {e}")
-    
-    # Optional data sources
+
+    run_steps(
+        results,
+        [
+            StepSpec('aowv', lambda: pull_aowv(force=force), "AOWV pull failed", failure_level="error"),
+            StepSpec('online_sources', lambda: pull_online_sources(force=force), "Online sources pull failed", failure_level="error"),
+            StepSpec('weather', lambda: pull_weather(force=force), "Weather pull failed", failure_level="error"),
+        ],
+        logger=logger,
+    )
+
     if not skip_optional:
-        try:
-            results['wsl_pdfs'] = pull_wsl_pdfs(force=force)
-        except Exception as e:
-            logger.warning(f"WSL PDF pull skipped: {e}")
-        
-        try:
-            results['economic'] = pull_economic(force=force)
-        except Exception as e:
-            logger.warning(f"Economic pull skipped: {e}")
-    
+        run_steps(
+            results,
+            [
+                StepSpec('wsl_pdfs', lambda: pull_wsl_pdfs(force=force), "WSL PDF pull skipped"),
+                StepSpec('economic', lambda: pull_economic(force=force), "Economic pull skipped"),
+            ],
+            logger=logger,
+        )
+
     # Summary
     success_count = sum(results.values())
     total_count = len(results)

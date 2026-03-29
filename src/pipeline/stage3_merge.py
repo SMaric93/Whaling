@@ -21,6 +21,8 @@ String-Based Entity Matching:
 
 import logging
 
+from src.pipeline._runner import StepSpec, run_steps
+
 logger = logging.getLogger(__name__)
 
 
@@ -370,55 +372,23 @@ def run_merge() -> dict:
         'augmentation': False,
         'climate_merge': False,
     }
-    
-    # Aggregation
-    try:
-        results['labor_metrics'] = compute_labor_metrics()
-    except Exception as e:
-        logger.error(f"Labor metrics failed: {e}")
-    
-    try:
-        results['route_exposure'] = compute_route_exposure()
-    except Exception as e:
-        logger.error(f"Route exposure failed: {e}")
-    
-    # Entity resolution (with string-based matching)
-    try:
-        results['entities'] = resolve_entities()
-    except Exception as e:
-        logger.error(f"Entity resolution failed: {e}")
-    
-    try:
-        results['crosswalks'] = build_entity_crosswalks()
-    except Exception as e:
-        logger.warning(f"Crosswalk building skipped: {e}")
-    
-    # Assembly
-    try:
-        results['voyage_assembly'] = assemble_voyages()
-    except Exception as e:
-        logger.error(f"Voyage assembly failed: {e}")
-    
-    try:
-        results['captain_linkage'] = link_captains()
-    except Exception as e:
-        logger.warning(f"Captain linkage skipped: {e}")
-    
-    try:
-        results['captain_assembly'] = assemble_captains()
-    except Exception as e:
-        logger.warning(f"Captain assembly skipped: {e}")
-    
-    try:
-        results['augmentation'] = augment_voyages()
-    except Exception as e:
-        logger.warning(f"Voyage augmentation skipped: {e}")
-    
-    try:
-        results['climate_merge'] = merge_climate_data()
-    except Exception as e:
-        logger.warning(f"Climate merge skipped: {e}")
-    
+
+    run_steps(
+        results,
+        [
+            StepSpec('labor_metrics', compute_labor_metrics, "Labor metrics failed", failure_level="error"),
+            StepSpec('route_exposure', compute_route_exposure, "Route exposure failed", failure_level="error"),
+            StepSpec('entities', resolve_entities, "Entity resolution failed", failure_level="error"),
+            StepSpec('crosswalks', build_entity_crosswalks, "Crosswalk building skipped"),
+            StepSpec('voyage_assembly', assemble_voyages, "Voyage assembly failed", failure_level="error"),
+            StepSpec('captain_linkage', link_captains, "Captain linkage skipped"),
+            StepSpec('captain_assembly', assemble_captains, "Captain assembly skipped"),
+            StepSpec('augmentation', augment_voyages, "Voyage augmentation skipped"),
+            StepSpec('climate_merge', merge_climate_data, "Climate merge skipped"),
+        ],
+        logger=logger,
+    )
+
     # Summary
     success_count = sum(results.values())
     total_count = len(results)

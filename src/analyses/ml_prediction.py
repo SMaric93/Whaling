@@ -13,7 +13,7 @@ Key outputs:
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Any, Dict, List, Optional
 import warnings
 
 from src.ml.acceleration import (
@@ -21,17 +21,81 @@ from src.ml.acceleration import (
     get_ml_runtime_info,
     get_xgboost_regressor_kwargs,
 )
+from src.ml.config import ML_CFG
 
 warnings.filterwarnings('ignore')
+
+
+_DEFAULT_MODEL_PARAMS: Dict[str, Dict[str, Any]] = {
+    "xgboost": {
+        "n_estimators": 200,
+        "max_depth": 6,
+        "learning_rate": 0.1,
+        "n_jobs": -1,
+        "subsample": ML_CFG.subsample,
+    },
+    "lightgbm": {
+        "n_estimators": 200,
+        "max_depth": 6,
+        "learning_rate": 0.1,
+        "n_jobs": -1,
+        "verbose": -1,
+        "subsample": ML_CFG.subsample,
+    },
+}
+
+
+def _resolve_prediction_model_kwargs(
+    model_type: str,
+    *,
+    random_state: int,
+    model_params: Optional[Dict[str, Any]] = None,
+    preferred_torch_device: Optional[str] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve model kwargs and acceleration metadata for the requested booster."""
+    if model_type not in _DEFAULT_MODEL_PARAMS:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+    resolved_params = dict(_DEFAULT_MODEL_PARAMS[model_type])
+    resolved_params["random_state"] = random_state
+    if model_params:
+        resolved_params.update(model_params)
+
+    shared_kwargs = {
+        "n_estimators": resolved_params["n_estimators"],
+        "max_depth": resolved_params["max_depth"],
+        "learning_rate": resolved_params["learning_rate"],
+        "random_state": resolved_params["random_state"],
+        "n_jobs": resolved_params["n_jobs"],
+        "preferred_torch_device": preferred_torch_device,
+    }
+
+    if model_type == "xgboost":
+        model_kwargs, acceleration = get_xgboost_regressor_kwargs(**shared_kwargs)
+    else:
+        model_kwargs, acceleration = get_lightgbm_regressor_kwargs(
+            **shared_kwargs,
+            verbose=resolved_params.get("verbose", -1),
+        )
+
+    passthrough_kwargs = {
+        key: value
+        for key, value in resolved_params.items()
+        if key not in model_kwargs
+    }
+    model_kwargs.update(passthrough_kwargs)
+    return model_kwargs, acceleration
 
 
 def train_prediction_model(
     df: pd.DataFrame,
     target_col: str = "log_q",
-    feature_cols: List[str] = None,
+    feature_cols: Optional[List[str]] = None,
     model_type: str = "xgboost",
     test_size: float = 0.2,
     random_state: int = 42,
+    model_params: Optional[Dict[str, Any]] = None,
+    preferred_torch_device: Optional[str] = None,
 ) -> Dict:
     """
     Train a gradient boosting model to predict voyage outcomes.
@@ -50,6 +114,14 @@ def train_prediction_model(
         Fraction for test set.
     random_state : int
         Random seed.
+    model_params : dict, optional
+        Estimator hyper-parameter overrides. Shared keys such as
+        ``n_estimators``, ``max_depth``, ``learning_rate``, and ``n_jobs``
+        are routed through the acceleration helpers; any extra keys are
+        passed directly to the underlying estimator constructor.
+    preferred_torch_device : str, optional
+        Preferred torch runtime to use when resolving accelerator-aware
+        kwargs (for example ``"cuda"``).
         
     Returns
     -------
@@ -89,26 +161,23 @@ def train_prediction_model(
     print(f"Test size: {len(X_test):,}")
     
     # Train model
-    runtime_info = get_ml_runtime_info()
+    runtime_info = get_ml_runtime_info(preferred_torch_device)
     if model_type == "xgboost":
         import xgboost as xgb
-        model_kwargs, acceleration = get_xgboost_regressor_kwargs(
-            n_estimators=200,
-            max_depth=6,
-            learning_rate=0.1,
+        model_kwargs, acceleration = _resolve_prediction_model_kwargs(
+            model_type,
             random_state=random_state,
-            n_jobs=-1,
+            model_params=model_params,
+            preferred_torch_device=preferred_torch_device,
         )
         model = xgb.XGBRegressor(**model_kwargs)
     elif model_type == "lightgbm":
         import lightgbm as lgb
-        model_kwargs, acceleration = get_lightgbm_regressor_kwargs(
-            n_estimators=200,
-            max_depth=6,
-            learning_rate=0.1,
+        model_kwargs, acceleration = _resolve_prediction_model_kwargs(
+            model_type,
             random_state=random_state,
-            n_jobs=-1,
-            verbose=-1,
+            model_params=model_params,
+            preferred_torch_device=preferred_torch_device,
         )
         model = lgb.LGBMRegressor(**model_kwargs)
     else:
@@ -121,6 +190,7 @@ def train_prediction_model(
         f"(accelerated={acceleration['accelerated']})"
     )
     print(f"Backend note: {acceleration['reason']}")
+    print(f"Model kwargs: {model_kwargs}")
     model.fit(X_train, y_train)
     
     # Predictions
@@ -151,6 +221,7 @@ def train_prediction_model(
         "model_type": model_type,
         "feature_cols": available_cols,
         "target_col": target_col,
+        "model_kwargs": model_kwargs,
         "X_train": X_train,
         "X_test": X_test,
         "y_train": y_train,
@@ -383,6 +454,14 @@ def analyze_residuals(
 
 def run_ml_prediction_analysis(
     df: pd.DataFrame,
+    target_col: str = "log_q",
+    feature_cols: Optional[List[str]] = None,
+    model_type: str = "xgboost",
+    test_size: float = 0.2,
+    random_state: int = 42,
+    model_params: Optional[Dict[str, Any]] = None,
+    preferred_torch_device: Optional[str] = None,
+    shap_max_samples: int = 1000,
     save_outputs: bool = True,
 ) -> Dict:
     """
@@ -395,13 +474,19 @@ def run_ml_prediction_analysis(
     # 1. Train model
     model_results = train_prediction_model(
         df,
-        target_col="log_q",
-        model_type="xgboost",
+        target_col=target_col,
+        feature_cols=feature_cols,
+        model_type=model_type,
+        test_size=test_size,
+        random_state=random_state,
+        model_params=model_params,
+        preferred_torch_device=preferred_torch_device,
     )
     
     # 2. SHAP analysis
     shap_results = compute_shap_values(
         model_results,
+        max_samples=shap_max_samples,
         save_outputs=save_outputs,
     )
     
@@ -420,6 +505,11 @@ def run_ml_prediction_analysis(
             "# ML Prediction Analysis",
             "",
             "## Model Performance",
+            "",
+            f"- Target: {model_results['target_col']}",
+            f"- Features: {', '.join(model_results['feature_cols'])}",
+            f"- Model: {model_results['model_type']}",
+            f"- Model kwargs: `{model_results['model_kwargs']}`",
             "",
             f"| Metric | Train | Test |",
             f"|--------|-------|------|",

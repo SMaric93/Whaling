@@ -20,6 +20,8 @@ String Normalization:
 
 import logging
 
+from src.pipeline._runner import StepSpec, run_steps
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,44 +185,21 @@ def run_clean() -> dict:
         'maury': False,
         'wsl': False,
     }
-    
-    # Core data
-    try:
-        results['voyages'] = clean_voyages()
-    except Exception as e:
-        logger.error(f"Voyage cleaning failed: {e}")
-    
-    try:
-        results['crew'] = clean_crew()
-    except Exception as e:
-        logger.error(f"Crew cleaning failed: {e}")
-    
-    try:
-        results['logbooks'] = clean_logbooks()
-    except Exception as e:
-        logger.error(f"Logbook cleaning failed: {e}")
-    
-    # Supplementary data
-    try:
-        results['registers'] = clean_registers()
-    except Exception as e:
-        logger.warning(f"Register cleaning skipped: {e}")
-    
-    try:
-        results['starbuck'] = clean_starbuck()
-    except Exception as e:
-        logger.warning(f"Starbuck cleaning skipped: {e}")
-    
-    try:
-        results['maury'] = clean_maury()
-    except Exception as e:
-        logger.warning(f"Maury cleaning skipped: {e}")
-    
-    try:
-        results['wsl'] = clean_wsl()
-    except Exception as e:
-        logger.warning(f"WSL cleaning skipped: {e}")
-    
+
+    run_steps(
+        results,
+        [
+            StepSpec('voyages', clean_voyages, "Voyage cleaning failed", failure_level="error"),
+            StepSpec('crew', clean_crew, "Crew cleaning failed", failure_level="error"),
+            StepSpec('logbooks', clean_logbooks, "Logbook cleaning failed", failure_level="error"),
+            StepSpec('registers', clean_registers, "Register cleaning skipped"),
+            StepSpec('starbuck', clean_starbuck, "Starbuck cleaning skipped"),
+            StepSpec('maury', clean_maury, "Maury cleaning skipped"),
+            StepSpec('wsl', clean_wsl, "WSL cleaning skipped"),
+        ],
+        logger=logger,
+    )
+
     # Summary
     success_count = sum(results.values())
     total_count = len(results)
