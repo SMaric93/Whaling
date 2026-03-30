@@ -12,7 +12,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.ml.config import ML_CFG, ML_FIGURES_DIR
+from src.ml.config import ML_CFG
 
 logger = logging.getLogger(__name__)
 

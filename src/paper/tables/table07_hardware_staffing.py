@@ -9,7 +9,6 @@ from ..data import load_action_dataset, load_connected_sample, load_survival_dat
 from ..utils.footnotes import standard_footnote
 from ..utils.inference import clustered_ols
 
-
 NEG_SIGNAL_THRESHOLD = 7
 
 

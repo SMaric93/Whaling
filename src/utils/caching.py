@@ -5,10 +5,11 @@ Provides LRU caching for expensive data loading operations
 to avoid redundant disk I/O and parsing.
 """
 
+import hashlib
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Callable, Any
-import hashlib
+from typing import Any, Callable, Optional
+
 import pandas as pd
 
 
@@ -60,7 +61,6 @@ def cached_dataframe(
 
 def clear_cache() -> None:
     """Clear all cached DataFrames."""
-    global _dataframe_cache
     _dataframe_cache.clear()
 
 

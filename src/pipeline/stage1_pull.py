@@ -13,7 +13,7 @@ Data Sources:
 
 import logging
 
-from src.pipeline._runner import StepSpec, run_steps
+from src.pipeline._runner import StepSpec, run_steps, summarize_step_results
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +48,12 @@ def pull_wsl_pdfs(force: bool = False) -> bool:
     
     logger.info("Pulling WSL PDFs...")
     try:
-        # Keep the pipeline responsive when the NMDL site falls back to
-        # speculative PDF URLs; a small sample is enough to validate access.
-        download_wsl_pdfs(force=force, max_issues=5)
+        download_wsl_pdfs(force=force)
         logger.info("WSL PDF pull complete.")
-        return RAW_WSL.exists() and any(RAW_WSL.glob("*.pdf"))
+        return RAW_WSL.exists() and any(RAW_WSL.rglob("*.pdf"))
     except Exception as e:
         logger.warning(f"WSL PDF download skipped or failed: {e}")
-        return False
+        return None
 
 
 def pull_weather(force: bool = False) -> bool:
@@ -81,7 +79,7 @@ def pull_economic(force: bool = False) -> bool:
         return len(economic_df) > 0 or (ECONOMIC_RAW_DIR / "economic_annual_combined.csv").exists()
     except Exception as e:
         logger.warning(f"Economic data download skipped or failed: {e}")
-        return False
+        return None
 
 
 def run_pull(force: bool = False, skip_optional: bool = False) -> dict:
@@ -102,9 +100,9 @@ def run_pull(force: bool = False, skip_optional: bool = False) -> dict:
     results = {
         'aowv': False,
         'online_sources': False,
-        'wsl_pdfs': False,
+        'wsl_pdfs': None if skip_optional else False,
         'weather': False,
-        'economic': False,
+        'economic': None if skip_optional else False,
     }
 
     run_steps(
@@ -128,9 +126,13 @@ def run_pull(force: bool = False, skip_optional: bool = False) -> dict:
         )
 
     # Summary
-    success_count = sum(results.values())
-    total_count = len(results)
-    logger.info(f"Stage 1 complete: {success_count}/{total_count} sources pulled successfully")
+    success_count, skipped_count, failed_count = summarize_step_results(results)
+    logger.info(
+        "Stage 1 complete: %s successful, %s skipped, %s failed",
+        success_count,
+        skipped_count,
+        failed_count,
+    )
     
     return results
 

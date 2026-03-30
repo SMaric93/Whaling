@@ -13,26 +13,12 @@ Stages:
 
 import logging
 import time
-from pathlib import Path
 
 from tqdm import tqdm
 
+from src.pipeline._runner import has_successful_output
+
 logger = logging.getLogger(__name__)
-
-
-def _stage_has_success(value) -> bool:
-    """Recursively determine whether a stage returned any successful work."""
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, dict):
-        return any(_stage_has_success(v) for v in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_stage_has_success(v) for v in value)
-    if hasattr(value, 'empty'):
-        return not value.empty
-    return bool(value)
 
 
 def run_full_pipeline(
@@ -108,7 +94,7 @@ def run_full_pipeline(
     
     # Count successes
     stages_run = sum(1 for v in results.values() if v is not None)
-    stages_successful = sum(1 for v in results.values() if _stage_has_success(v))
+    stages_successful = sum(1 for v in results.values() if has_successful_output(v))
     logger.info(f"Stages run: {stages_run}/5")
     logger.info(f"Stages with successful outputs: {stages_successful}/5")
     

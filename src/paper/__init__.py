@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import tempfile
 import warnings
+from pathlib import Path
 
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 1))

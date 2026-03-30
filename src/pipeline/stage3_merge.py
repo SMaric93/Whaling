@@ -21,7 +21,7 @@ String-Based Entity Matching:
 
 import logging
 
-from src.pipeline._runner import StepSpec, run_steps
+from src.pipeline._runner import StepSpec, run_steps, summarize_step_results
 
 logger = logging.getLogger(__name__)
 
@@ -237,19 +237,28 @@ def link_captains() -> bool:
     profiles = profiler.build_profiles(force_reload=True)
     if len(profiles) == 0:
         logger.warning("No captain profiles available - skipping linkage")
-        return False
+        return None
     profiler.save()
 
-    if not RAW_IPUMS.exists():
-        logger.warning("IPUMS data not found - skipping linkage")
-        return False
+    ipums_path = STAGING_DIR / "ipums_person_year.parquet"
+    if ipums_path.exists():
+        census_data = pd.read_parquet(ipums_path)
+        logger.info("Loaded staged IPUMS data: %s rows", len(census_data))
+    else:
+        if not RAW_IPUMS.exists():
+            logger.warning(
+                "IPUMS data not found - add an extract under %s or save %s first",
+                RAW_IPUMS,
+                ipums_path,
+            )
+            return None
 
-    loader = IPUMSLoader(RAW_IPUMS)
-    census_data = loader.parse(force_reload=True)
-    if len(census_data) == 0:
-        logger.warning("No IPUMS records loaded - skipping linkage")
-        return False
-    loader.save()
+        loader = IPUMSLoader(RAW_IPUMS)
+        census_data = loader.parse(force_reload=True)
+        if len(census_data) == 0:
+            logger.warning("No IPUMS records loaded - skipping linkage")
+            return None
+        loader.save(ipums_path)
 
     linker = RecordLinker()
     yearly_linkages = []
@@ -264,7 +273,7 @@ def link_captains() -> bool:
 
     if not yearly_linkages:
         logger.warning("No captain-census matches found")
-        return False
+        return None
 
     linkage_df = pd.concat(yearly_linkages, ignore_index=True)
     output_path = linker.save_linkage(linkage_df)
@@ -292,7 +301,7 @@ def assemble_captains() -> bool:
 def augment_voyages() -> bool:
     """Augment voyages with supplementary sources (Starbuck, Maury, WSL)."""
     from src.assembly.voyage_augmentor import run_voyage_augmentation
-    from src.config import STAGING_DIR, FINAL_DIR
+    from src.config import FINAL_DIR
     
     logger.info("Augmenting voyage dataset...")
     
@@ -331,13 +340,13 @@ def merge_climate_data() -> bool:
             _, voyage_weather = download_and_integrate_weather(voyages_path=voyage_path, save_raw=True)
         except Exception as exc:
             logger.warning(f"Weather integration skipped: {exc}")
-            return False
+            return None
     else:
         voyage_weather = pd.read_parquet(voyage_weather_path)
 
     if len(voyage_weather) == 0:
         logger.warning("No voyage weather data available")
-        return False
+        return None
 
     climate_df = voyage_weather.drop(columns=['year_out'], errors='ignore')
     voyages = voyages.merge(climate_df, on='voyage_id', how='left')
@@ -390,9 +399,13 @@ def run_merge() -> dict:
     )
 
     # Summary
-    success_count = sum(results.values())
-    total_count = len(results)
-    logger.info(f"Stage 3 complete: {success_count}/{total_count} operations successful")
+    success_count, skipped_count, failed_count = summarize_step_results(results)
+    logger.info(
+        "Stage 3 complete: %s successful, %s skipped, %s failed",
+        success_count,
+        skipped_count,
+        failed_count,
+    )
     
     return results
 

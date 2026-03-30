@@ -20,7 +20,7 @@ String Normalization:
 
 import logging
 
-from src.pipeline._runner import StepSpec, run_steps
+from src.pipeline._runner import StepSpec, run_steps, summarize_step_results
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def clean_registers() -> bool:
     
     if not RAW_INSURANCE.exists():
         logger.info("No vessel register source found - skipping")
-        return False
+        return None
 
     df = parse_registers(RAW_INSURANCE)
     output_path = STAGING_DIR / 'vessel_register_year.parquet'
@@ -116,7 +116,7 @@ def clean_starbuck() -> bool:
     
     if not RAW_STARBUCK.exists():
         logger.info("No Starbuck data found - skipping")
-        return False
+        return None
 
     df = parse_starbuck(RAW_STARBUCK)
     output_path = STAGING_DIR / 'starbuck_voyage_list.parquet'
@@ -134,11 +134,12 @@ def clean_maury() -> bool:
     
     if not RAW_MAURY.exists():
         logger.info("No Maury data found - skipping")
-        return False
+        return None
 
     df = run_maury_parser(RAW_MAURY)
     if len(df) == 0:
-        return False
+        logger.info("No valid Maury positions parsed - skipping output")
+        return None
 
     output_path = STAGING_DIR / 'maury_positions.parquet'
     _save_output_variants(df, output_path, STAGING_DIR / 'maury_parsed.parquet')
@@ -154,15 +155,33 @@ def clean_wsl() -> bool:
     logger.info("Extracting WSL events...")
     
     wsl_dir = RAW_WSL
-    if wsl_dir.exists() and any(wsl_dir.glob('*.pdf')):
+    if wsl_dir.exists() and any(wsl_dir.rglob('*.pdf')):
         df = extract_all_wsl_events(wsl_dir)
         output_path = STAGING_DIR / 'wsl_events.parquet'
-        _save_output_variants(df, output_path)
+        compatibility_path = STAGING_DIR / 'wsl_extracted_events.parquet'
+        _save_output_variants(df, output_path, compatibility_path)
         logger.info(f"Extracted {len(df):,} WSL events → {output_path}")
+
+        voyages_path = STAGING_DIR / 'voyages_master.parquet'
+        if len(df) > 0 and voyages_path.exists():
+            from src.entities.wsl_voyage_matcher import run_wsl_crosswalk
+
+            try:
+                crosswalk_df, panel_df = run_wsl_crosswalk(
+                    events_path=output_path,
+                    voyages_path=voyages_path,
+                )
+                logger.info(
+                    "WSL crosswalk complete: %s matched events, %s voyage-panel rows",
+                    crosswalk_df['voyage_id'].notna().sum(),
+                    len(panel_df),
+                )
+            except Exception as exc:
+                logger.warning("WSL crosswalk skipped or failed: %s", exc)
         return output_path.exists()
 
     logger.info("No WSL PDFs found - skipping")
-    return False
+    return None
 
 
 def run_clean() -> dict:
@@ -201,9 +220,13 @@ def run_clean() -> dict:
     )
 
     # Summary
-    success_count = sum(results.values())
-    total_count = len(results)
-    logger.info(f"Stage 2 complete: {success_count}/{total_count} sources cleaned successfully")
+    success_count, skipped_count, failed_count = summarize_step_results(results)
+    logger.info(
+        "Stage 2 complete: %s successful, %s skipped, %s failed",
+        success_count,
+        skipped_count,
+        failed_count,
+    )
     
     return results
 

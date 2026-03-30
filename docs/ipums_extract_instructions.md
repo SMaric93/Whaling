@@ -99,13 +99,13 @@ To reduce extract size, you can filter to whaling states:
 
 1. Wait for email notification (large extracts may take hours)
 2. Download the data file and codebook
-3. Place files in: `/Users/smaric/Whaling/data/raw/ipums/`
+3. Place files in: `data/raw/ipums/`
 
 Expected files:
 
 ```
 data/raw/ipums/
-├── usa_00001.csv         # or .dat/.dta
+├── usa_00001.csv         # or .csv.gz/.zip/.dat/.dta/.parquet
 ├── usa_00001.xml         # codebook
 └── usa_00001.cbk         # plain text codebook (optional)
 ```
@@ -113,9 +113,13 @@ data/raw/ipums/
 ## Step 8: Run IPUMS Loader
 
 ```bash
-cd /Users/smaric/Whaling
+cd /path/to/Whaling
 python -c "from src.linkage.ipums_loader import IPUMSLoader; loader = IPUMSLoader(); loader.parse(); loader.save()"
 ```
+
+Stage 3 will also reuse `data/staging/ipums_person_year.parquet` directly if it
+already exists, so you do not need to keep the raw extract around for every
+later pipeline run.
 
 ## Approximate File Sizes
 
@@ -135,7 +139,7 @@ python -c "from src.linkage.ipums_loader import IPUMSLoader; loader = IPUMSLoade
 
 ### Memory Issues Loading Data
 
-- Use chunked loading (not yet implemented)
+- Chunked CSV loading is supported in `IPUMSLoader`
 - Filter to whaling states during load
 - Consider converting to Parquet format
 

@@ -8,7 +8,6 @@ Matches extracted WSL events to voyages in voyages_master using:
 """
 
 import pandas as pd
-import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass
@@ -18,7 +17,7 @@ import logging
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
-    STAGING_DIR, MATCH_CONFIDENCE_THRESHOLDS, CROSSWALK_CONFIG, ML_SHIFT_CONFIG,
+    STAGING_DIR, ML_SHIFT_CONFIG,
 )
 from ml.record_matching import fit_match_probability_model, score_match_probability
 
@@ -115,18 +114,33 @@ def compute_date_score(
         return 0.3  # Neutral score if no date
     
     # Parse dates
-    def parse_date(d: str) -> Optional[datetime]:
+    def parse_date(d) -> Optional[datetime]:
         if not d:
             return None
+        if isinstance(d, pd.Timestamp):
+            return d.to_pydatetime()
+        if isinstance(d, datetime):
+            return d
+        if hasattr(d, "to_pydatetime"):
+            try:
+                return d.to_pydatetime()
+            except Exception:
+                pass
+        if hasattr(d, "year") and hasattr(d, "month") and hasattr(d, "day"):
+            try:
+                return datetime(d.year, d.month, d.day)
+            except Exception:
+                pass
         try:
             # Handle partial dates
+            d = str(d)
             if len(d) == 4:  # Year only
                 return datetime(int(d), 6, 15)  # Mid-year
             elif len(d) == 7:  # YYYY-MM
                 return datetime.strptime(d, "%Y-%m")
             else:
                 return datetime.strptime(d[:10], "%Y-%m-%d")
-        except:
+        except Exception:
             return None
     
     event_dt = parse_date(event_date)
@@ -527,6 +541,10 @@ def run_wsl_crosswalk(
     """
     if events_path is None:
         events_path = STAGING_DIR / "wsl_extracted_events.parquet"
+        if not events_path.exists():
+            fallback_events_path = STAGING_DIR / "wsl_events.parquet"
+            if fallback_events_path.exists():
+                events_path = fallback_events_path
     if voyages_path is None:
         voyages_path = STAGING_DIR / "voyages_master.parquet"
     

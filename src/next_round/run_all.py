@@ -7,10 +7,10 @@ Same threading-safe environment as src/ml/run_all.py.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
-import logging
 import traceback
 
 # ── Threading safety (MUST be before any numpy/sklearn imports) ───────

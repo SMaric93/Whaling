@@ -14,10 +14,20 @@ Runs the complete empirical analysis suite including:
 """
 
 import logging
+import os
+from pathlib import Path
+import tempfile
 
 from src.pipeline._runner import StepSpec, run_step, run_steps
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_runtime_cache_dirs() -> None:
+    """Point Matplotlib at a writable cache dir before any heavy imports."""
+    cache_dir = Path(tempfile.gettempdir()) / "whaling-mpl"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
 
 
 def run_baseline_akm() -> dict:
@@ -227,6 +237,8 @@ def run_analyze(quick: bool = False, run_all_tests: bool = True) -> dict:
     logger.info("=" * 60)
     logger.info("STAGE 4: FULL ANALYSES")
     logger.info("=" * 60)
+
+    _ensure_runtime_cache_dirs()
     
     results = {}
 

@@ -1,6 +1,6 @@
 """Assembly modules for final analysis tables."""
 
-from .voyage_assembly import VoyageAssembler
 from .captain_assembly import CaptainAssembler
+from .voyage_assembly import VoyageAssembler
 
-__all__ = ["VoyageAssembler", "CaptainAssembler"]
+__all__ = ["CaptainAssembler", "VoyageAssembler"]

@@ -1,8 +1,0 @@
-# table06_search_execution_exitvalue
-
-Sample: Panel A uses connected-set voyages merged to the action panel; Panel B uses active-search barren-state observations with forward outcomes computed within voyage.. Unit: Action-day in Panel A's first three stages and Panel B; voyage in Panel A's yield and total-output rows.. Types: theta_hat and psi_hat are connected-set AKM types merged to each action day through the voyage identifier.. FE: No fixed effects in the production-chain rows; value-of-exit estimates use design-based reweighting and outcome adjustment rather than FE.. Clustering: Captain clustering for Panel A. Panel B reports simple, subclassification-matched, IPW, and doubly robust ATEs.. Controls: Scarcity, captain experience, days since last success, consecutive empty days, days in patch, tonnage, and crew size where available.. Interpretation: The repository's organizational effect is stronger in cumulative search governance than in point-of-contact conversion: Panel B shows that exiting barren states earlier changes the downstream path of the voyage.. Caution: The paper layer reconstructs forward-looking barren-state outcomes from the daily action panel, so horizon rows are internally consistent but still depend on logbook observation frequency..
-
-Implementation notes:
-- Panel A rebuilds the production chain with clustered linear models and adds the `theta_hat × psi_hat` interaction that is not preserved in the shipped next-round CSV.
-- Panel B computes barren-state forward outcomes directly from `outputs/datasets/ml/action_dataset.parquet` and reports simple, matched, IPW, and doubly robust estimates.
-- The shipped `outputs/tables/next_round/exit_value_eval.csv` is retained as an upstream benchmark for the future-output horizon rows.

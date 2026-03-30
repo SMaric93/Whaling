@@ -11,17 +11,18 @@ enabled via config flag (not implemented in this base version).
 """
 
 import re
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 import logging
+import sys
 import uuid
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import pandas as pd
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import WSL_EVENT_TYPES, STAGING_DIR, ML_SHIFT_CONFIG
+from config import STAGING_DIR, ML_SHIFT_CONFIG
 from ml.text_models import fit_text_classifier, predict_text_probabilities
 from parsing.string_normalizer import normalize_name, normalize_port_name
 
@@ -107,6 +108,7 @@ EVENT_PATTERNS = {
     EventType.DEPARTURE: [
         r"(?:sailed|departed|cleared|left)\s+(?:from\s+)?(\w+)",
         r"(?:has\s+)?(?:sailed|cleared)\s+for\s+(\w+)",
+        r"(?:sniled|ailed)\s+from\s+(\w+)",
     ],
     EventType.ARRIVAL: [
         r"(?:arrived|arr(?:\.)?|returned|came\s+in)\s+(?:at\s+)?(\w+)",
@@ -115,10 +117,13 @@ EVENT_PATTERNS = {
     EventType.SPOKEN_WITH: [
         r"(?:spoke|spoken|spk\.?)\s+(?:with\s+)?",
         r"(?:was\s+)?spoken\s+(?:by\s+)?",
+        r"(?:apoken|snoken)\s+(?:with\s+)?",
     ],
     EventType.REPORTED_AT: [
         r"(?:reported|rep\.?|seen)\s+(?:at\s+)?",
         r"(?:was\s+)?(?:reported|seen)\s+",
+        r"(?:heard\s+from|in\s+port|bound\s+home|bound\s+to)",
+        r"(?:lat\.?\s*\d+|lon\.?\s*\d+|off\s+\w+)",
     ],
     EventType.WRECK: [
         r"(?:wrecked|wreck|run\s+aground|stranded)",
@@ -140,6 +145,24 @@ EVENT_PATTERNS = {
         r"(?:returned|arrived)\s+(?:home|to\s+port)",
         r"(?:completed|finished)\s+(?:voyage|cruise)",
     ],
+}
+
+EVENT_SIGNAL_PATTERN = re.compile(
+    r"\b("
+    r"spok(?:e|en)|apoken|snoken|sailed|sniled|arrived|heard\s+from|"
+    r"in\s+port|bound\s+home|bound\s+to|lat\.?\s*\d+|lon\.?\s*\d+|"
+    r"pacif\w*|atlant\w*|indian\s+ocean|new\s+holland|fayal|tahiti|"
+    r"tombez|oahu|sandwich|cape|abrolhos|valparaiso|payta|st\s+thomas|"
+    r"\d+\s*(?:sp|bp|wh|bbl)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+VESSEL_STOPWORDS = {
+    "whalemen", "shipping", "list", "merchant", "transcript", "published",
+    "terms", "one", "dollar", "year", "newbedford", "friday", "morning",
+    "vessels", "names", "agent", "sailed", "bound", "reported", "pacific",
+    "atlantic", "indian", "ocean", "north", "water", "street",
 }
 
 
@@ -174,6 +197,52 @@ def extract_vessel_name(text: str) -> List[Tuple[str, int, int]]:
                 vessels.append((name, match.start(), match.end()))
     
     return vessels
+
+
+def has_event_signal(text: str) -> bool:
+    """Return True when a segment looks like a WSL event/report row."""
+    return bool(EVENT_SIGNAL_PATTERN.search(text))
+
+
+def extract_leading_vessel_name(text: str) -> Optional[str]:
+    """
+    Extract the leading vessel name from an OCR'd shipping-list row.
+
+    WSL rows usually begin with the vessel name, followed by tonnage/captain.
+    Limiting extraction to the left edge avoids treating every title-cased
+    token in OCR text as a separate vessel.
+    """
+    cleaned = re.sub(r"\s+", " ", text.strip())
+    cleaned = re.sub(r"^[^A-Za-z]+", "", cleaned)
+    tokens = cleaned.split()
+
+    vessel_tokens: List[str] = []
+    for token in tokens:
+        token = token.strip(",.;:|/\\")
+        lower = token.lower()
+
+        if any(char.isdigit() for char in token):
+            break
+        if lower in {"ship", "bark", "brig", "schooner", "bk", "bk.", "sch", "sch.", "brg"}:
+            continue
+        if not re.match(r"^[A-Za-z'&.-]+$", token):
+            break
+        if lower in {"in", "at", "off", "bound", "from"}:
+            break
+        if lower in VESSEL_STOPWORDS:
+            break
+
+        vessel_tokens.append(token)
+        if len(vessel_tokens) >= 3:
+            break
+
+    if not vessel_tokens:
+        return None
+
+    vessel_name = " ".join(vessel_tokens)
+    if len(vessel_name) < 3:
+        return None
+    return vessel_name
 
 
 def extract_captain_name(text: str) -> Optional[str]:
@@ -372,32 +441,36 @@ def extract_events_from_text(
         segment = segment.strip()
         if len(segment) < 10:
             continue
-        
-        # Look for vessel names as anchors
-        vessels = extract_vessel_name(segment)
-        
-        for vessel_raw, start, end in vessels:
-            # Extract context around vessel mention
-            context_start = max(0, start - 50)
-            context_end = min(len(segment), end + 100)
+
+        if not has_event_signal(segment):
+            continue
+
+        vessel_candidates: List[Tuple[str, int, int]] = []
+        leading_vessel = extract_leading_vessel_name(segment)
+        if leading_vessel:
+            vessel_candidates = [(leading_vessel, 0, len(leading_vessel))]
+        else:
+            vessel_candidates = [
+                candidate for candidate in extract_vessel_name(segment)
+                if candidate[1] <= 12
+            ]
+
+        for vessel_raw, start, end in vessel_candidates[:1]:
+            context_start = max(0, start)
+            context_end = min(len(segment), max(end + 140, 220))
             context = segment[context_start:context_end]
-            
-            # Detect event type
+
             event_type, confidence = detect_event_type(context)
-            
-            # Extract additional fields
             captain_raw = extract_captain_name(context)
             port_raw = extract_port_name(context)
             event_date = extract_date_from_context(
                 context, issue_year, issue_month, issue_day
             )
-            
-            # Normalize names
+
             vessel_clean = normalize_name(vessel_raw) if vessel_raw else None
             captain_clean = normalize_name(captain_raw) if captain_raw else None
             port_clean = normalize_port_name(port_raw) if port_raw else None
-            
-            # Create event
+
             event = WSLEvent(
                 wsl_event_id=generate_event_id(),
                 wsl_issue_id=issue_id,
@@ -409,10 +482,10 @@ def extract_events_from_text(
                 port_name_raw=port_raw,
                 port_name_clean=port_clean,
                 event_type=event_type,
-                event_text_snippet=context[:200],  # Truncate long snippets
+                event_text_snippet=context[:200],
                 confidence=confidence,
             )
-            
+
             events.append(event)
 
     return _apply_ml_event_typing(events)
@@ -492,7 +565,7 @@ def extract_all_wsl_events(wsl_dir: Path) -> pd.DataFrame:
     """Parse all WSL PDFs in a directory and return extracted events."""
     from parsing.wsl_pdf_parser import batch_parse_wsl_issues
 
-    pdf_paths = sorted(wsl_dir.glob("*.pdf"))
+    pdf_paths = sorted(wsl_dir.rglob("*.pdf"))
     if not pdf_paths:
         logger.warning(f"No WSL PDFs found in {wsl_dir}")
         return pd.DataFrame()

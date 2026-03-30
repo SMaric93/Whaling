@@ -6,10 +6,11 @@ Downloads:
 - OCR text version for parsing
 """
 
-import requests
-from pathlib import Path
-from typing import Optional, List
 import logging
+from pathlib import Path
+from typing import List, Optional
+
+import requests
 
 from ..config import ARCHIVE_ORG_URLS, RAW_INSURANCE
 from .manifest import ManifestManager

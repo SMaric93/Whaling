@@ -199,10 +199,11 @@ def hmm_k_sensitivity(
     Re-run regime segmentation with each K candidate, compare
     CompassIndex1 rank-correlations.
     """
+    from copy import deepcopy
+
     from .compass_index import compute_compass_index
     from .features import compute_compass_features
     from .regimes import segment_voyages
-    from copy import deepcopy
 
     indices: Dict[int, pd.DataFrame] = {}
     for K in cfg.num_regimes_candidates:
@@ -258,7 +259,7 @@ def missingness_sensitivity(
 
     # reduced: drop voyages that had any gap_flag
     if "gap_flag" in steps_df.columns:
-        gap_vids = steps_df.loc[steps_df["gap_flag"] == True, "voyage_id"].unique()
+        gap_vids = steps_df.loc[steps_df["gap_flag"].eq(True), "voyage_id"].unique()
         reduced = steps_df.loc[~steps_df["voyage_id"].isin(gap_vids)]
     else:
         reduced = steps_df

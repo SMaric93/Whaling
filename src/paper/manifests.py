@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from .config import APPENDIX_TABLES, BuildContext, MAIN_TABLES
+from .config import APPENDIX_TABLES, MAIN_TABLES, BuildContext
 
 
 TEST_DEFINITIONS = [

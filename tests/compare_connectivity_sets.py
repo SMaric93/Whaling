@@ -5,24 +5,22 @@ Compare standard connected set vs KSS leave-one-out connected set.
 Loads the actual whaling data, computes both sets, and reports
 detailed diagnostics on the differences.
 """
+
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 import numpy as np
-import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.analyses.data_loader import prepare_analysis_sample
 from src.analyses.connected_set import (
     find_connected_set,
     find_leave_one_out_connected_set,
-    compute_mobility_diagnostics,
-    compute_network_density,
 )
 
 
-def main():
+def main() -> None:
     # =========================================================================
     # 1. Load data
     # =========================================================================
@@ -96,29 +94,28 @@ def main():
         
         # Agent counts (mobility)
         dropped_agents = df_dropped.groupby("captain_id")["agent_id"].nunique()
-        kept_agents = df_kept.groupby("captain_id")["agent_id"].nunique()
-        
+
         # Mover/stayer breakdown
         dropped_movers = (dropped_agents >= 2).sum()
         dropped_stayers = (dropped_agents == 1).sum()
         
-        print(f"\n  Breakdown:")
+        print("\n  Breakdown:")
         print(f"    Movers (2+ agents): {dropped_movers:,}")
         print(f"    Stayers (1 agent):  {dropped_stayers:,}")
         
-        print(f"\n  Dropped captains — voyage count distribution:")
+        print("\n  Dropped captains — voyage count distribution:")
         print(f"    Mean:   {dropped_voyages.mean():.1f}")
         print(f"    Median: {dropped_voyages.median():.0f}")
         print(f"    Min:    {dropped_voyages.min()}")
         print(f"    Max:    {dropped_voyages.max()}")
         
-        print(f"\n  Kept captains — voyage count distribution:")
+        print("\n  Kept captains — voyage count distribution:")
         print(f"    Mean:   {kept_voyages.mean():.1f}")
         print(f"    Median: {kept_voyages.median():.0f}")
         print(f"    Min:    {kept_voyages.min()}")
         print(f"    Max:    {kept_voyages.max()}")
         
-        print(f"\n  Dropped captains — agent count distribution:")
+        print("\n  Dropped captains — agent count distribution:")
         print(f"    Mean:   {dropped_agents.mean():.2f}")
         print(f"    1 agent: {(dropped_agents == 1).sum():,}")
         print(f"    2 agents: {(dropped_agents == 2).sum():,}")
@@ -126,13 +123,13 @@ def main():
         
         # Outcome variable comparison
         if "log_q" in df_cc.columns:
-            print(f"\n  Mean log_q comparison:")
+            print("\n  Mean log_q comparison:")
             print(f"    Dropped captains' voyages: {df_dropped['log_q'].mean():.3f} (SD={df_dropped['log_q'].std():.3f})")
             print(f"    Kept captains' voyages:    {df_kept['log_q'].mean():.3f} (SD={df_kept['log_q'].std():.3f})")
         
         # Time distribution
         if "year_out" in df_cc.columns:
-            print(f"\n  Year distribution:")
+            print("\n  Year distribution:")
             print(f"    Dropped captains' voyages: {df_dropped['year_out'].min():.0f}–{df_dropped['year_out'].max():.0f}, mean={df_dropped['year_out'].mean():.0f}")
             print(f"    Kept captains' voyages:    {df_kept['year_out'].min():.0f}–{df_kept['year_out'].max():.0f}, mean={df_kept['year_out'].mean():.0f}")
     
@@ -196,7 +193,7 @@ def main():
     # =========================================================================
     if "log_q" in df_cc.columns and "log_q" in df_loo.columns:
         print(f"\n{'─' * 70}")
-        print(f"OUTCOME VARIANCE")
+        print("OUTCOME VARIANCE")
         print(f"  Standard CC: Var(log_q) = {np.var(df_cc['log_q']):.4f}")
         print(f"  KSS LOO:     Var(log_q) = {np.var(df_loo['log_q']):.4f}")
     
@@ -211,7 +208,7 @@ def main():
     c_pct = 100 * len(dropped_captains) / len(cc_captains)
     a_pct = 100 * len(dropped_agents_set) / len(cc_agents)
     
-    print(f"\n  The KSS LOO connected set drops:")
+    print("\n  The KSS LOO connected set drops:")
     print(f"    {len(df_cc) - len(df_loo):,} voyages ({v_pct:.1f}% of standard CC)")
     print(f"    {len(dropped_captains):,} captains ({c_pct:.1f}%)")
     print(f"    {len(dropped_agents_set):,} agents ({a_pct:.1f}%)")

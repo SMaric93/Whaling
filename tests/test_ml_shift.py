@@ -67,7 +67,7 @@ def test_record_linker_applies_match_probabilities(monkeypatch):
 def test_wsl_event_extractor_emits_ml_columns(monkeypatch):
     _lower_ml_thresholds(monkeypatch)
 
-    from parsing.wsl_event_extractor import extract_events_from_text, events_to_dataframe
+    from parsing.wsl_event_extractor import events_to_dataframe, extract_events_from_text
 
     sample_text = """
     The ship AWASHONKS, Capt. Wood, arrived at New Bedford on March 15.

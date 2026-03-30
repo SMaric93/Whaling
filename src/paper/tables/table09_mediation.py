@@ -10,7 +10,6 @@ from ..utils.footnotes import standard_footnote
 from ..utils.inference import clustered_ols
 from ..utils.risk import expected_shortfall_proxy, lower_tail_reference
 
-
 BARREN_THRESHOLD = 7
 
 

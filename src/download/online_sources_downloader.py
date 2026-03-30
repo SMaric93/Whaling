@@ -1,19 +1,10 @@
-"""
-Downloader for Online Voyage Augmentation Pack sources.
-
-Downloads:
-- Starbuck (1878) PDF and OCR text from Archive.org
-- Maury Logbook Data from WhalingHistory.org
-- Townsend Logbook Data from WhalingHistory.org
-- Census of Marine Life (CoML) Logbook Data from WhalingHistory.org
-"""
+import io
+import logging
+import zipfile
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import requests
-import zipfile
-import io
-from pathlib import Path
-from typing import Optional, List, Dict
-import logging
 
 from ..config import (
     ONLINE_SOURCE_URLS, RAW_STARBUCK, RAW_MAURY, RAW_CONSOLIDATED,
@@ -123,24 +114,35 @@ def download_starbuck(
     
     downloaded = {}
     
-    # Download PDF
+    # Download PDF when Archive.org permits direct file access. The OCR/reader
+    # page is the required artifact for downstream parsing, so the PDF remains
+    # best-effort instead of blocking the whole source bundle.
     pdf_url = ONLINE_SOURCE_URLS["starbuck_pdf"]
     pdf_path = RAW_STARBUCK / "starbuck_1878.pdf"
-    
+
     if pdf_path.exists() and not force:
         logger.info(f"Starbuck PDF already exists: {pdf_path}")
         downloaded["pdf"] = pdf_path
     else:
-        download_file(pdf_url, pdf_path, timeout=300)
-        manifest.add_entry(
-            source_name="Starbuck_1878_PDF",
-            download_url=pdf_url,
-            local_path=pdf_path,
-            license_note=LICENSE_NOTES_ONLINE["starbuck"],
-        )
-        downloaded["pdf"] = pdf_path
-    
-    # Download OCR text
+        try:
+            download_file(pdf_url, pdf_path, timeout=300)
+        except requests.exceptions.RequestException as exc:
+            logger.warning(
+                "Starbuck PDF download unavailable (%s). Continuing with OCR fallback.",
+                exc,
+            )
+        else:
+            manifest.add_entry(
+                source_name="Starbuck_1878_PDF",
+                download_url=pdf_url,
+                local_path=pdf_path,
+                license_note=LICENSE_NOTES_ONLINE["starbuck"],
+            )
+            downloaded["pdf"] = pdf_path
+
+    # Download OCR text / full-text reader HTML. Archive.org currently serves
+    # this endpoint as an HTML full-text view, which is still usable by the
+    # existing Starbuck parser.
     ocr_url = ONLINE_SOURCE_URLS["starbuck_ocr"]
     ocr_path = RAW_STARBUCK / "starbuck_1878_ocr.txt"
     
@@ -299,21 +301,19 @@ def download_all_online_sources(
     logger.info("Downloading Online Voyage Augmentation Pack sources")
     logger.info("=" * 60)
     
-    # Starbuck
-    logger.info("\n[1/4] Downloading Starbuck (1878)...")
-    results["starbuck"] = download_starbuck(manifest, force)
-    
-    # Maury
-    logger.info("\n[2/4] Downloading Maury Logbook Data...")
-    results["maury"] = download_maury_logbooks(manifest, force)
-    
-    # Townsend
-    logger.info("\n[3/4] Downloading Townsend Logbook Data...")
-    results["townsend"] = download_townsend_logbooks(manifest, force)
-    
-    # CoML
-    logger.info("\n[4/4] Downloading Census of Marine Life Data...")
-    results["coml"] = download_coml_logbooks(manifest, force)
+    steps = [
+        ("starbuck", "Starbuck (1878)", download_starbuck),
+        ("maury", "Maury Logbook Data", download_maury_logbooks),
+        ("townsend", "Townsend Logbook Data", download_townsend_logbooks),
+        ("coml", "Census of Marine Life Data", download_coml_logbooks),
+    ]
+    for idx, (key, label, func) in enumerate(steps, start=1):
+        logger.info("\n[%d/%d] Downloading %s...", idx, len(steps), label)
+        try:
+            results[key] = func(manifest, force)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("%s download failed: %s", label, exc)
+            results[key] = {}
     
     logger.info("\n" + "=" * 60)
     logger.info("Download complete!")

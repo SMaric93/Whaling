@@ -16,7 +16,6 @@ from ..data import load_action_dataset, load_connected_sample, load_state_datase
 from ..utils.footnotes import standard_footnote
 from ..utils.inference import clustered_ols, normal_pvalue
 
-
 BARREN_THRESHOLD = 7
 
 

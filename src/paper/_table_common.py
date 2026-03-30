@@ -6,9 +6,9 @@ from typing import Any
 import pandas as pd
 
 from .config import BuildContext
+from .utils.footnotes import standard_footnote
 from .utils.io import write_csv, write_md_preview
 from .utils.latex import write_simple_table_tex
-from .utils.footnotes import standard_footnote
 
 
 def save_table_outputs(

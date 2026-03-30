@@ -20,6 +20,10 @@ networkx>=3.0
 matplotlib>=3.7.0
 statsmodels>=0.14.0
 beautifulsoup4>=4.12.0
+pdfplumber>=0.11.0
+rapidocr-onnxruntime>=1.2.0
+pypdfium2>=5.6.0
+rapidfuzz>=3.14.0
 
 # Optional: Record linkage
 # recordlinkage>=0.15  # Uncomment if using advanced linkage features

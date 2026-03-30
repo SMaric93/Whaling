@@ -10,7 +10,6 @@ from ..data import load_action_dataset, load_connected_sample, load_next_round_o
 from ..utils.footnotes import standard_footnote
 from ..utils.inference import clustered_ols
 
-
 BARREN_THRESHOLD = 7
 
 

@@ -5,9 +5,6 @@ This package contains unit tests, integration tests,
 and validation checks for all pipeline components.
 """
 
-import pytest
-
-
 def test_package_imports():
     """Test that the main package can be imported."""
     import src
@@ -19,6 +16,9 @@ def test_config_imports():
     """Test that configuration is accessible."""
     from src import PROJECT_ROOT, RAW_DIR, STAGING_DIR, FINAL_DIR
     assert PROJECT_ROOT.exists()
+    assert RAW_DIR.is_absolute()
+    assert STAGING_DIR.is_absolute()
+    assert FINAL_DIR.is_absolute()
 
 
 def test_parsing_imports():
@@ -50,3 +50,7 @@ def test_utils_imports():
     assert callable(cluster_robust_se)
     assert callable(build_fe_design_matrix)
     assert callable(ensure_dir)
+    assert callable(save_parquet)
+    assert callable(load_parquet)
+    assert callable(cached_dataframe)
+    assert callable(clear_cache)

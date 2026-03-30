@@ -10,14 +10,14 @@ Records:
 - license_or_terms_note
 """
 
-import json
 import hashlib
-from pathlib import Path
+import json
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
-from ..config import MANIFEST_FILE, MANIFEST_FIELDS, LICENSE_NOTES
+from ..config import LICENSE_NOTES, MANIFEST_FIELDS, MANIFEST_FILE
 
 
 @dataclass
@@ -38,9 +38,36 @@ class ManifestEntry:
         return cls(**{k: d[k] for k in MANIFEST_FIELDS})
 
 
+def _iter_hash_targets(path: Path) -> Iterable[Path]:
+    """Yield deterministic file targets for a file or directory."""
+    if path.is_dir():
+        yield from sorted(
+            (candidate for candidate in path.rglob("*") if candidate.is_file()),
+            key=lambda candidate: candidate.relative_to(path).as_posix(),
+        )
+        return
+    yield path
+
+
 def compute_file_hash(filepath: Path) -> str:
-    """Compute SHA256 hash of a file."""
+    """Compute a stable SHA256 hash for a file or directory tree."""
     sha256_hash = hashlib.sha256()
+
+    if filepath.is_dir():
+        sha256_hash.update(b"directory\0")
+        hashed_any = False
+        for child_path in _iter_hash_targets(filepath):
+            hashed_any = True
+            relative_path = child_path.relative_to(filepath).as_posix()
+            sha256_hash.update(relative_path.encode("utf-8"))
+            sha256_hash.update(b"\0")
+            with open(child_path, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+        if not hashed_any:
+            sha256_hash.update(b"<empty>")
+        return sha256_hash.hexdigest()
+
     with open(filepath, "rb") as f:
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)

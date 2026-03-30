@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import BuildContext, MAIN_TABLES
+from .config import MAIN_TABLES, BuildContext
 from .data import (
     load_action_dataset,
     load_connected_sample,

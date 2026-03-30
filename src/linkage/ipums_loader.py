@@ -4,13 +4,13 @@ IPUMS data loader for census microdata.
 Loads and prepares IPUMS USA Full Count / MLP extracts for captain linkage.
 """
 
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from typing import Optional, Dict, List, Any
 import logging
-
 import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import RAW_IPUMS, STAGING_DIR, WHALING_STATE_FIPS, LINKAGE_CONFIG
 from parsing.string_normalizer import normalize_name
@@ -52,6 +52,21 @@ class IPUMSLoader:
         "poploc": ["POPLOC", "poploc"],
         "relate": ["RELATE", "relate"],
     }
+
+    FILE_PATTERNS = (
+        "*.csv",
+        "*.csv.gz",
+        "*.CSV",
+        "*.CSV.GZ",
+        "*.dat",
+        "*.DAT",
+        "*.dta",
+        "*.DTA",
+        "*.parquet",
+        "*.PARQUET",
+        "*.zip",
+        "*.ZIP",
+    )
     
     def __init__(self, raw_dir: Optional[Path] = None):
         self.raw_dir = raw_dir or RAW_IPUMS
@@ -65,37 +80,79 @@ class IPUMSLoader:
             if col in df.columns:
                 return col
         return None
+
+    def _expected_columns(self) -> List[str]:
+        """Return the union of relevant IPUMS columns for selective loading."""
+        columns: set[str] = set()
+        for candidates in self.COLUMN_MAP.values():
+            columns.update(candidates)
+        return sorted(columns)
+
+    def _iter_source_files(self) -> List[Path]:
+        """Find likely IPUMS extract files recursively under the raw directory."""
+        seen: set[Path] = set()
+        files: List[Path] = []
+        for pattern in self.FILE_PATTERNS:
+            for filepath in self.raw_dir.rglob(pattern):
+                if filepath in seen:
+                    continue
+                seen.add(filepath)
+                if filepath.is_dir():
+                    continue
+                lower_name = filepath.name.lower()
+                if "cb" in lower_name or "readme" in lower_name or filepath.suffix.lower() == ".xml":
+                    continue
+                files.append(filepath)
+        return sorted(files)
+
+    def _read_delimited_file(self, filepath: Path) -> pd.DataFrame:
+        """Read CSV-like IPUMS extracts with column projection and chunking."""
+        compression = "infer" if filepath.suffix.lower() in {".zip", ".gz"} or filepath.name.lower().endswith(".csv.gz") else None
+
+        header = pd.read_csv(
+            filepath,
+            nrows=0,
+            low_memory=False,
+            compression=compression,
+        )
+        available_columns = [col for col in header.columns if col in self._expected_columns()]
+
+        reader = pd.read_csv(
+            filepath,
+            usecols=available_columns or None,
+            low_memory=False,
+            compression=compression,
+            chunksize=200_000,
+        )
+        return pd.concat(reader, ignore_index=True)
+
+    def _read_source_file(self, filepath: Path) -> pd.DataFrame:
+        """Read one supported IPUMS extract file."""
+        suffix = filepath.suffix.lower()
+
+        if suffix == ".parquet":
+            return pd.read_parquet(filepath)
+        if suffix == ".dta":
+            return pd.read_stata(filepath)
+        if suffix in {".csv", ".dat", ".zip", ".gz"} or filepath.name.lower().endswith(".csv.gz"):
+            return self._read_delimited_file(filepath)
+
+        raise ValueError(f"Unsupported IPUMS file type: {filepath.name}")
     
     def _load_files(self) -> pd.DataFrame:
         """Load IPUMS extract files."""
         dfs = []
-        
-        # Try common patterns
-        for pattern in ["*.csv", "*.CSV", "*.dat", "*.DAT", "*.dta", "*.parquet"]:
-            for filepath in self.raw_dir.glob(pattern):
-                # Skip codebook files
-                if "cb" in filepath.name.lower() or "readme" in filepath.name.lower():
-                    continue
-                
-                logger.info(f"Loading {filepath.name}")
-                
-                try:
-                    if filepath.suffix.lower() == ".csv":
-                        df = pd.read_csv(filepath, low_memory=False)
-                    elif filepath.suffix.lower() == ".parquet":
-                        df = pd.read_parquet(filepath)
-                    elif filepath.suffix.lower() == ".dta":
-                        df = pd.read_stata(filepath)
-                    else:
-                        # Try CSV as default
-                        df = pd.read_csv(filepath, low_memory=False)
-                    
-                    df["_source_file"] = filepath.name
-                    dfs.append(df)
-                    logger.info(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
-                    
-                except Exception as e:
-                    logger.warning(f"  Could not load {filepath.name}: {e}")
+
+        for filepath in self._iter_source_files():
+            logger.info(f"Loading {filepath.relative_to(self.raw_dir)}")
+
+            try:
+                df = self._read_source_file(filepath)
+                df["_source_file"] = filepath.name
+                dfs.append(df)
+                logger.info(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
+            except Exception as e:
+                logger.warning(f"  Could not load {filepath.name}: {e}")
         
         if not dfs:
             logger.warning(f"No IPUMS files found in {self.raw_dir}")

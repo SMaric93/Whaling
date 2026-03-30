@@ -17,6 +17,38 @@ class StepSpec:
     exc_info: bool = False
 
 
+def has_successful_output(value: Any) -> bool:
+    """Recursively determine whether a step produced any successful output."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        return any(has_successful_output(v) for v in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(has_successful_output(v) for v in value)
+    if hasattr(value, "empty"):
+        return not value.empty
+    return bool(value)
+
+
+def summarize_step_results(results: MutableMapping[str, Any]) -> tuple[int, int, int]:
+    """Count successful, skipped, and failed step results."""
+    successful = 0
+    skipped = 0
+    failed = 0
+
+    for value in results.values():
+        if value is None:
+            skipped += 1
+        elif has_successful_output(value):
+            successful += 1
+        else:
+            failed += 1
+
+    return successful, skipped, failed
+
+
 def run_step(
     results: MutableMapping[str, Any],
     spec: StepSpec,

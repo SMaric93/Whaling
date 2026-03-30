@@ -13,6 +13,10 @@ _PARENT = Path(__file__).resolve().parents[1]
 if str(_PARENT) not in __path__:
     __path__.append(str(_PARENT))
 
-from src._public_api import PUBLIC_API, __all__, __version__  # type: ignore
+from src import _public_api as _public_api  # type: ignore  # noqa: E402
+
+PUBLIC_API = _public_api.PUBLIC_API
+__all__ = _public_api.__all__
+__version__ = _public_api.__version__
 
 globals().update(PUBLIC_API)

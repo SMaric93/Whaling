@@ -11,7 +11,6 @@ Implements project conventions for:
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Set
-import re
 
 # =============================================================================
 # PATH CONFIGURATION
@@ -52,12 +51,15 @@ ONLINE_SOURCE_URLS = {
     # Starbuck (1878) - History of American Whale Fishery
     "starbuck_pdf": "https://archive.org/download/historyofamerica00star/historyofamerica00star.pdf",
     "starbuck_ocr": "https://archive.org/stream/historyofamerica00star/historyofamerica00star_djvu.txt",
+    "starbuck_item_page": "https://archive.org/details/historyofamerica00star",
     # Logbook datasets from WhalingHistory.org
     "maury_logbooks": "https://whalinghistory.org/maury/MauryLogbookData.zip",
     "townsend_logbooks": "https://whalinghistory.org/townsend/TownsendLogbookData.zip",
     "coml_logbooks": "https://whalinghistory.org/coml/CoMLLogbookData.zip",
     # Whalemen's Shipping List project page (for PDF enumeration)
     "wsl_project_page": "https://nmdl.org/projects/wsl/",
+    "wsl_catalog_jsonp": "https://research.mysticseaport.org/reference/scripts/whalemens_shipping-jsonp.php",
+    "wsl_pdf_base": "https://img.mysticseaport.org/images/wsl",
 }
 
 # Weather and climate index URLs

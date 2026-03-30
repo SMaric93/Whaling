@@ -7,7 +7,7 @@ All ML modules import from here instead of hardcoding values.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from torch_device import resolve_torch_device
 

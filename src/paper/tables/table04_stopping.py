@@ -19,7 +19,6 @@ from ..data import (
 from ..utils.footnotes import standard_footnote
 from ..utils.inference import clustered_ols
 
-
 NEG_SIGNAL_THRESHOLD = 3
 
 

@@ -1,8 +1,0 @@
-# table04_stopping
-
-Sample: Panel A uses the exported patch-day stopping-rule sample and the connected voyage sample; Panels B and C use the action dataset's day-level search observations.. Unit: Patch-day for exported logit rows; day-level search observation for LPM robustness rows.. Types: The upstream exported hazard uses held-out psi_heldout; supplemental rows use connected-sample theta and psi from the outcome ML dataset.. FE: No fixed effects in the exported hazard file; captain clustering used in the supplemental paper builder.. Clustering: Exported logit rows inherit voyage clustering from the saved reinforcement output; supplemental rows cluster by captain.. Controls: Negative/positive signal indicators, scarcity, theta_hat, captain experience, and within-patch or within-ground duration controls.. Interpretation: The strongest stopping evidence in the repository remains state contingent: exit behavior shifts with negative signals, and the sign/magnitude can be traced across active-search and placebo subsamples.. Caution: Because `statsmodels` is not available in the current venv, rows marked as clustered LPM are linear-probability supplements rather than re-estimated logit hazards..
-
-Implementation notes:
-- `Exported logit hazard` rows come directly from `output/reinforcement/tables/test3_stopping_rule.csv`.
-- `Clustered LPM` rows are paper-layer supplements used to recover controls and placebo splits not preserved in the exported logit table.
-- `Leave-one-out local quality` uses `quality_loo_ground_year` from `data/derived/ground_quality_loo.parquet` merged at the voyage level.

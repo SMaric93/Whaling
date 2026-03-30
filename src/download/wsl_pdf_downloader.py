@@ -8,21 +8,24 @@ WSL Coverage: 1843-1914
 Target: Years overlapping with AOWV data (approx. 1784-1928)
 """
 
+import time
+
+import hashlib
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
 import requests
+
 try:
     from bs4 import BeautifulSoup
     HAS_BS4 = True
 except ImportError:
     HAS_BS4 = False
     BeautifulSoup = None  # type: ignore
-import re
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple
-from datetime import datetime
-import logging
-import hashlib
-import json
-import pandas as pd
 
 from ..config import (
     ONLINE_SOURCE_URLS, RAW_WSL, STAGING_DIR, LICENSE_NOTES_ONLINE,
@@ -36,6 +39,86 @@ logger = logging.getLogger(__name__)
 WSL_TARGET_YEARS = list(range(1843, 1915))  # Full coverage: 1843-1914
 
 
+def _parse_jsonp_payload(body: str) -> Dict[str, Any]:
+    """Extract the JSON payload from a JSONP response."""
+    start = body.find("(")
+    end = body.rfind(")")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("WSL catalog response was not valid JSONP")
+    return json.loads(body[start + 1:end])
+
+
+def fetch_wsl_issue_catalog(
+    catalog_url: Optional[str] = None,
+    timeout: int = 60,
+    page_size: int = 1000,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch the live WSL issue catalog from Mystic Seaport's JSONP endpoint.
+
+    Returns issue rows with direct PDF URLs hosted at img.mysticseaport.org.
+    """
+    if catalog_url is None:
+        catalog_url = ONLINE_SOURCE_URLS["wsl_catalog_jsonp"]
+
+    pdf_base = ONLINE_SOURCE_URLS["wsl_pdf_base"].rstrip("/")
+    headers = {
+        "Referer": ONLINE_SOURCE_URLS["wsl_project_page"],
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    issues: List[Dict[str, Any]] = []
+    start = 0
+    draw = 1
+    records_total: Optional[int] = None
+
+    while records_total is None or start < records_total:
+        response = requests.get(
+            catalog_url,
+            params={
+                "callback": "codexWSL",
+                "draw": draw,
+                "start": start,
+                "length": page_size,
+            },
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = _parse_jsonp_payload(response.text)
+
+        if records_total is None:
+            records_total = int(payload.get("recordsTotal", 0))
+
+        rows = payload.get("data", [])
+        if not rows:
+            break
+
+        for row in rows:
+            if len(row) < 4:
+                continue
+            year, month, day, filename = row[:4]
+            year = int(year)
+            month = int(month)
+            day = int(day)
+            issue_id = f"wsl_{year}_{month:02d}_{day:02d}"
+            issues.append(
+                {
+                    "url": f"{pdf_base}/{filename}",
+                    "year": year,
+                    "month": month,
+                    "day": day,
+                    "issue_id": issue_id,
+                }
+            )
+
+        start += len(rows)
+        draw += 1
+
+    logger.info("Fetched %d WSL issues from Mystic Seaport catalog", len(issues))
+    return issues
+
+
 def scrape_wsl_pdf_links(
     project_url: Optional[str] = None,
     timeout: int = 60,
@@ -43,7 +126,8 @@ def scrape_wsl_pdf_links(
     """
     Scrape the NMDL WSL project page to enumerate available PDF links.
     
-    The page uses a dynamic table, so we look for PDF link patterns.
+    The page uses a dynamic table, so prefer the live JSONP catalog and only
+    fall back to HTML scraping if the catalog endpoint is unavailable.
     
     Args:
         project_url: URL of WSL project page (defaults to config)
@@ -55,9 +139,18 @@ def scrape_wsl_pdf_links(
     if project_url is None:
         project_url = ONLINE_SOURCE_URLS["wsl_project_page"]
     
+    try:
+        issues = fetch_wsl_issue_catalog(timeout=timeout)
+    except Exception as exc:
+        logger.warning("WSL JSONP catalog lookup failed: %s", exc)
+        issues = []
+
+    if issues:
+        return issues
+
     if not HAS_BS4:
         raise ImportError(
-            "BeautifulSoup (bs4) is required for WSL PDF scraping. "
+            "BeautifulSoup (bs4) is required for HTML fallback scraping. "
             "Install with: pip install beautifulsoup4"
         )
     
@@ -126,7 +219,7 @@ def parse_wsl_pdf_url(url: str) -> Optional[Dict[str, str]]:
         if url.startswith('/'):
             url = f"https://nmdl.org{url}"
         else:
-            url = f"https://nmdl.org/projects/wsl/{url}"
+            url = f"{ONLINE_SOURCE_URLS['wsl_pdf_base'].rstrip('/')}/{url}"
     
     # Extract filename
     filename = url.split('/')[-1].lower()
@@ -201,12 +294,12 @@ def generate_expected_wsl_urls(
         (7, 4), (8, 8), (9, 12), (10, 3), (11, 14), (12, 5),
     ]
     
-    base_url = "https://nmdl.org/projects/wsl/pdfs"
-    
+    base_url = ONLINE_SOURCE_URLS["wsl_pdf_base"].rstrip("/")
+
     for year in years:
         for month, day in sample_dates[:sample_size]:
             issue_id = f"wsl_{year}_{month:02d}_{day:02d}"
-            url = f"{base_url}/{year}/{issue_id}.pdf"
+            url = f"{base_url}/{year}{month:02d}{day:02d}.pdf"
             expected_urls.append({
                 'url': url,
                 'year': year,
@@ -223,6 +316,7 @@ def download_wsl_pdf(
     pdf_info: Dict[str, str],
     target_dir: Path,
     timeout: int = 120,
+    force: bool = False,
 ) -> Optional[Path]:
     """
     Download a single WSL PDF issue.
@@ -246,7 +340,7 @@ def download_wsl_pdf(
     target_path = year_dir / f"{issue_id}.pdf"
     
     # Skip if already exists
-    if target_path.exists():
+    if target_path.exists() and not force:
         logger.debug(f"Already exists: {target_path}")
         return target_path
     
@@ -320,9 +414,10 @@ def download_wsl_pdfs(
     consecutive_failures = 0
     
     for i, pdf_info in enumerate(target_pdfs):
-        logger.info(f"[{i+1}/{len(target_pdfs)}] {pdf_info['issue_id']}")
+        if i % 100 == 0 or i == len(target_pdfs) - 1:
+            logger.info(f"[{i+1}/{len(target_pdfs)}] {pdf_info['issue_id']}  ({len(downloaded)} downloaded so far)")
         
-        path = download_wsl_pdf(pdf_info, RAW_WSL)
+        path = download_wsl_pdf(pdf_info, RAW_WSL, force=force)
         
         if path:
             consecutive_failures = 0
@@ -340,12 +435,15 @@ def download_wsl_pdfs(
             })
         else:
             consecutive_failures += 1
-            if not downloaded and consecutive_failures >= 3:
+            if consecutive_failures >= 20:
                 logger.warning(
-                    "Stopping WSL download after repeated speculative URL failures "
-                    "with no successful PDFs."
+                    f"Stopping WSL download after {consecutive_failures} consecutive "
+                    f"failures ({len(downloaded)} downloaded so far)."
                 )
                 break
+        
+        # Politeness delay to avoid hammering the server
+        time.sleep(0.25)
     
     # Build issue index DataFrame
     issue_index = pd.DataFrame(index_rows)

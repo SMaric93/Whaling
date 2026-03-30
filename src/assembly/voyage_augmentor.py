@@ -5,13 +5,13 @@ Combines base analysis_voyage with WSL event features, route validation
 metrics, and optional ICOADS weather controls.
 """
 
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from typing import Optional, List, Dict
 import logging
-
 import sys
+from pathlib import Path
+from typing import Dict, Optional
+
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import STAGING_DIR, FINAL_DIR
 
@@ -191,7 +191,7 @@ def build_augmented_voyage(
     bool_cols = ['has_wsl_loss', 'route_discrepancy_flag']
     for col in bool_cols:
         if col in result.columns:
-            result[col] = result[col].fillna(False)
+            result[col] = result[col].astype('boolean').fillna(False).astype(bool)
     
     logger.info(f"Built augmented voyage: {len(result)} rows, {len(result.columns)} columns")
     return result
@@ -290,7 +290,7 @@ if __name__ == "__main__":
     augmented = run_voyage_augmentation(args.base_path)
     
     print(f"\nAugmented voyage: {len(augmented)} rows, {len(augmented.columns)} columns")
-    print(f"\nNew columns added:")
+    print("\nNew columns added:")
     base_cols = set(load_base_voyage(args.base_path).columns) if args.base_path else set()
     new_cols = [c for c in augmented.columns if c not in base_cols]
     for col in new_cols[:20]:
