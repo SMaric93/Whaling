@@ -28,6 +28,17 @@ def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Seri
     return pd.to_numeric(series, errors="coerce")
 
 
+def _connected_merge(connected: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    available = [column for column in columns if column in connected.columns]
+    if connected.empty or "voyage_id" not in connected.columns:
+        return pd.DataFrame(columns=["voyage_id", *columns])
+    merged = connected[["voyage_id", *available]].drop_duplicates("voyage_id").copy()
+    for column in columns:
+        if column not in merged.columns:
+            merged[column] = np.nan
+    return merged[["voyage_id", *columns]]
+
+
 def _normal_pvalue(coef: float, se: float) -> float:
     if not np.isfinite(coef) or not np.isfinite(se) or se <= 0:
         return np.nan
@@ -88,7 +99,9 @@ def _panel_a_from_logit(exported: pd.DataFrame, survival: pd.DataFrame) -> list[
 
 
 def _panel_a_lpm(survival: pd.DataFrame, connected: pd.DataFrame) -> list[dict]:
-    merge = connected[["voyage_id", "theta", "psi", "captain_experience", "captain_id", "scarcity"]].drop_duplicates("voyage_id")
+    if survival.empty:
+        return []
+    merge = _connected_merge(connected, ["theta", "psi", "captain_experience", "captain_id", "scarcity"])
     df = survival.merge(merge, on="voyage_id", how="left", suffixes=("", "_connected"))
     if "captain_id_connected" in df.columns:
         df["captain_id"] = df["captain_id"].fillna(df["captain_id_connected"])
@@ -147,7 +160,7 @@ def _panel_a_lpm(survival: pd.DataFrame, connected: pd.DataFrame) -> list[dict]:
 def _panel_b(action: pd.DataFrame, connected: pd.DataFrame, ground_quality: pd.DataFrame) -> list[dict]:
     if action.empty:
         return []
-    voyage_merge = connected[["voyage_id", "theta", "psi", "captain_experience", "captain_id", "scarcity"]].drop_duplicates("voyage_id")
+    voyage_merge = _connected_merge(connected, ["theta", "psi", "captain_experience", "captain_id", "scarcity"])
     quality_merge = (
         ground_quality[["voyage_id", "quality_loo_ground_year"]].drop_duplicates("voyage_id")
         if not ground_quality.empty
@@ -195,7 +208,7 @@ def _panel_b(action: pd.DataFrame, connected: pd.DataFrame, ground_quality: pd.D
 def _panel_c(action: pd.DataFrame, connected: pd.DataFrame, rational_exit: pd.DataFrame) -> list[dict]:
     if action.empty:
         return []
-    voyage_merge = connected[["voyage_id", "theta", "psi", "captain_experience", "captain_id", "scarcity"]].drop_duplicates("voyage_id")
+    voyage_merge = _connected_merge(connected, ["theta", "psi", "captain_experience", "captain_id", "scarcity"])
     df = action.merge(voyage_merge, on="voyage_id", how="left", suffixes=("", "_connected"))
     for column in ["theta", "psi", "captain_experience", "captain_id", "scarcity"]:
         connected_column = f"{column}_connected"
@@ -252,7 +265,9 @@ def _panel_c(action: pd.DataFrame, connected: pd.DataFrame, rational_exit: pd.Da
 
 
 def _panel_d(survival: pd.DataFrame, connected: pd.DataFrame) -> list[dict]:
-    merge = connected[["voyage_id", "theta", "psi", "captain_experience", "captain_id", "agent_id", "scarcity"]].drop_duplicates("voyage_id")
+    if survival.empty:
+        return []
+    merge = _connected_merge(connected, ["theta", "psi", "captain_experience", "captain_id", "agent_id", "scarcity"])
     df = survival.merge(merge, on="voyage_id", how="left", suffixes=("", "_connected"))
     for key in ["captain_id", "agent_id", "scarcity"]:
         other = f"{key}_connected"

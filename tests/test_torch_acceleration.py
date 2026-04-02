@@ -90,6 +90,16 @@ def test_configure_torch_runtime_sets_high_matmul_precision(monkeypatch):
     assert info["float32_matmul_precision"] == "high"
 
 
+def test_get_torch_device_raises_when_torch_is_missing(monkeypatch):
+    from torch_device import get_torch_device
+    import torch_device
+
+    monkeypatch.setattr(torch_device, "_import_torch", lambda: None)
+
+    with pytest.raises(ImportError, match="PyTorch is required"):
+        get_torch_device()
+
+
 @pytest.mark.skipif(
     not _try_import("torch"),
     reason="torch not installed",

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import csv
 import math
 from pathlib import Path
 from typing import Iterable
-import csv
 
 import pandas as pd
 
@@ -21,20 +21,43 @@ def _rows_from_input(rows: Iterable[dict] | pd.DataFrame) -> list[dict]:
     return list(rows)
 
 
-def _format_value(value: object) -> str:
+def _is_blank(value: object) -> bool:
     if value is None:
+        return True
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    if isinstance(value, str):
+        return not value.strip()
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _format_collection(items: Iterable[object]) -> str:
+    rendered_items = [
+        rendered
+        for item in items
+        if (rendered := _format_value(item))
+    ]
+    return "; ".join(rendered_items)
+
+
+def _escape_markdown_cell(value: str) -> str:
+    return value.replace("|", r"\|").replace("\n", "<br>")
+
+
+def _format_value(value: object) -> str:
+    if _is_blank(value):
         return ""
     if isinstance(value, (list, tuple, set)):
-        return "; ".join(_format_value(item) for item in value if _format_value(item))
+        return _format_collection(value)
     if isinstance(value, dict):
-        return "; ".join(f"{key}={_format_value(val)}" for key, val in value.items() if _format_value(val))
-    try:
-        if pd.isna(value):
-            return ""
-    except TypeError:
-        pass
-    except ValueError:
-        pass
+        return _format_collection(
+            f"{key}={rendered}"
+            for key, val in value.items()
+            if (rendered := _format_value(val))
+        )
 
     if isinstance(value, bool):
         return "True" if value else "False"
@@ -57,6 +80,7 @@ def write_csv(path: Path, rows: Iterable[dict] | pd.DataFrame) -> None:
     rows = _rows_from_input(rows)
     if not rows:
         rows = [{"note": "no rows generated"}]
+    ensure_dirs(path.parent)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -68,7 +92,20 @@ def write_md_preview(path: Path, rows: list[dict] | pd.DataFrame, title: str) ->
     if not rows:
         rows = [{"note": "no rows generated"}]
     cols = list(rows[0].keys())
-    lines = [f"# {title}", "", "| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
+    lines = [
+        f"# {title}",
+        "",
+        "| " + " | ".join(_escape_markdown_cell(col) for col in cols) + " |",
+        "|" + "|".join([" --- "] * len(cols)) + "|",
+    ]
     for r in rows[:30]:
-        lines.append("| " + " | ".join(_format_value(r.get(c, "")) for c in cols) + " |")
+        lines.append(
+            "| "
+            + " | ".join(
+                _escape_markdown_cell(_format_value(r.get(c, "")))
+                for c in cols
+            )
+            + " |"
+        )
+    ensure_dirs(path.parent)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

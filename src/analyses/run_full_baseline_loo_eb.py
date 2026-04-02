@@ -82,6 +82,7 @@ def run_akm_with_eb(
     df_est, 
     control_cols=None, 
     outcome_col='log_q',
+    time_fe_col='decade',
     use_parallel: bool = True,
     n_workers: int = None,
 ):
@@ -95,6 +96,9 @@ def run_akm_with_eb(
         Control variable column names.
     outcome_col : str
         Outcome column name.
+    time_fe_col : str or None
+        Column for time fixed effects (e.g. 'decade', 'year_out').
+        Set to None to omit time FEs. Default: 'decade'.
     use_parallel : bool
         If True, use multithreaded EB shrinkage.
     n_workers : int, optional
@@ -129,6 +133,22 @@ def run_akm_with_eb(
     matrices.append(X_agent)
     n_agents = len(agent_ids)
     
+    # Time FEs (drop first for identification)
+    n_time_fes = 0
+    time_fe_ids = None
+    if time_fe_col and time_fe_col in df_est.columns:
+        time_fe_ids = sorted(df_est[time_fe_col].dropna().unique())
+        if len(time_fe_ids) > 1:
+            time_map = {t: i for i, t in enumerate(time_fe_ids)}
+            time_idx = df_est[time_fe_col].map(time_map).values
+            X_time_full = sp.csr_matrix(
+                (np.ones(n), (np.arange(n), time_idx)),
+                shape=(n, len(time_fe_ids))
+            )
+            X_time = X_time_full[:, 1:]  # drop first for identification
+            matrices.append(X_time)
+            n_time_fes = len(time_fe_ids) - 1
+    
     # Controls
     control_data = []
     control_names = []
@@ -157,14 +177,25 @@ def run_akm_with_eb(
     y_hat = X @ beta
     residuals = y - y_hat
     r2 = 1 - np.var(residuals) / np.var(y)
-    sigma2_eps = np.var(residuals)
+    # Degrees-of-freedom corrected residual variance (N-k)
+    k_total = n_captains + (n_agents - 1) + n_time_fes + len(control_names)
+    dof = max(n - k_total, 1)
+    sigma2_eps = float(np.sum(residuals**2) / dof)
     
-    # Control coefficients
+    # Control coefficients (skip time FE block)
     control_betas = {}
     if control_names:
-        control_start = n_captains + n_agents - 1
+        control_start = n_captains + n_agents - 1 + n_time_fes
         for i, name in enumerate(control_names):
             control_betas[name] = float(beta[control_start + i])
+    
+    # Time FE coefficients (for diagnostics)
+    time_fe_betas = {}
+    if n_time_fes > 0 and time_fe_ids is not None:
+        time_start = n_captains + n_agents - 1
+        time_fe_betas[str(time_fe_ids[0])] = 0.0  # reference category
+        for i, tid in enumerate(time_fe_ids[1:]):
+            time_fe_betas[str(tid)] = float(beta[time_start + i])
     
     # Count observations per FE unit
     captain_counts = df_est.groupby('captain_id').size()
@@ -278,6 +309,9 @@ def run_akm_with_eb(
         # Reliability
         'mean_lambda_captain': float(np.mean(lambda_captain)),
         'mean_lambda_agent': float(np.mean(lambda_agent)),
+        # Time FEs
+        'n_time_fes': n_time_fes,
+        'time_fe_betas': time_fe_betas,
         # DataFrames
         'captain_fe': captain_fe,
         'agent_fe': agent_fe,
@@ -291,45 +325,52 @@ def run_akm_with_eb(
 # =============================================================================
 
 def run_r1_baseline(df_est):
-    """R1: Baseline AKM variance decomposition with multiple specifications."""
+    """R1: Baseline AKM variance decomposition with multiple specifications.
+    
+    All specifications include decade fixed effects as nuisance parameters,
+    following standard practice in the AKM literature (ABB 1999, CHK 2013, KSS 2020).
+    """
     print('\n' + '='*70)
     print('R1: BASELINE VARIANCE DECOMPOSITION')
+    print('    (All specs include decade FEs)')
     print('='*70)
     
     results = {}
     
-    # Specification 1: No controls
-    print('\n  Running Spec 1: No controls...')
-    r1_noctl = run_akm_with_eb(df_est, control_cols=[])
-    results['no_controls'] = r1_noctl
+    # Specification 1: Decade FEs only (no additional controls)
+    print('\n  Running Spec 1: Decade FEs only...')
+    r1_noctl = run_akm_with_eb(df_est, control_cols=[], time_fe_col='decade')
+    results['decade_fe_only'] = r1_noctl
     
-    # Specification 2: Vessel controls
-    print('  Running Spec 2: Vessel controls...')
-    r1_vessel = run_akm_with_eb(df_est, control_cols=['log_tonnage', 'is_ship'])
+    # Specification 2: Decade FEs + vessel controls
+    print('  Running Spec 2: + Vessel controls...')
+    r1_vessel = run_akm_with_eb(df_est, control_cols=['log_tonnage', 'is_ship'], time_fe_col='decade')
     results['vessel_controls'] = r1_vessel
     
-    # Specification 3: Full controls
-    print('  Running Spec 3: Full controls...')
+    # Specification 3: Decade FEs + full controls
+    print('  Running Spec 3: + Full controls...')
     r1_full = run_akm_with_eb(df_est, control_cols=[
         'log_tonnage', 'log_duration', 'log_captain_exp', 'is_ship'
-    ])
+    ], time_fe_col='decade')
     results['full_controls'] = r1_full
     
     # Print summary
     print('\n  --- Variance Decomposition Summary (EB-Corrected) ---')
+    print('  (All specifications include decade fixed effects)')
     for name, r in results.items():
-        print(f"\n  {name}:")
+        n_tfe = r.get('n_time_fes', 0)
+        print(f"\n  {name} ({n_tfe} decade FEs):")
         print(f"    R² = {r['r2']:.4f}")
         print(f"    Captain share: {100*r['share_alpha']:.1f}%")
         print(f"    Agent share: {100*r['share_gamma']:.1f}%")
         print(f"    Sorting share: {100*r['share_cov']:.1f}%")
         print(f"    Corr(α,γ) = {r['corr_eb']:.3f}")
     
-    # Compute trimmed and winsorized implied productivity for the no-controls spec
-    noctl = results['no_controls']
+    # Compute trimmed and winsorized implied productivity for the baseline (vessel controls) spec
+    baseline = results['vessel_controls']
     for fe_name, fe_df, col in [
-        ('captain', noctl['captain_fe'], 'alpha_eb'),
-        ('agent', noctl['agent_fe'], 'gamma_eb'),
+        ('captain', baseline['captain_fe'], 'alpha_eb'),
+        ('agent', baseline['agent_fe'], 'gamma_eb'),
     ]:
         vals = fe_df[col].values
         std_full = float(np.std(vals))
@@ -343,12 +384,12 @@ def run_r1_baseline(df_est):
         winsorized = np.clip(vals, lo, hi)
         std_winsorized = float(np.std(winsorized))
         
-        noctl[f'{fe_name}_std_full'] = std_full
-        noctl[f'{fe_name}_std_trimmed_5_95'] = std_trimmed
-        noctl[f'{fe_name}_std_winsorized_5_95'] = std_winsorized
-        noctl[f'{fe_name}_implied_pct_full'] = float(100 * (np.exp(std_full) - 1))
-        noctl[f'{fe_name}_implied_pct_trimmed'] = float(100 * (np.exp(std_trimmed) - 1))
-        noctl[f'{fe_name}_implied_pct_winsorized'] = float(100 * (np.exp(std_winsorized) - 1))
+        baseline[f'{fe_name}_std_full'] = std_full
+        baseline[f'{fe_name}_std_trimmed_5_95'] = std_trimmed
+        baseline[f'{fe_name}_std_winsorized_5_95'] = std_winsorized
+        baseline[f'{fe_name}_implied_pct_full'] = float(100 * (np.exp(std_full) - 1))
+        baseline[f'{fe_name}_implied_pct_trimmed'] = float(100 * (np.exp(std_trimmed) - 1))
+        baseline[f'{fe_name}_implied_pct_winsorized'] = float(100 * (np.exp(std_winsorized) - 1))
         
         print(f"\n  {fe_name} implied productivity (±1 SD):")
         print(f"    Full:            σ={std_full:.3f} → ±{100*(np.exp(std_full)-1):.0f}%")
@@ -633,94 +674,176 @@ def run_event_study(df_est):
 
 
 # =============================================================================
-# ANALYSIS 5: MATCHING COUNTERFACTUALS (PAM vs AAM)
+# ANALYSIS 5: ADDITIVE MATCHING COUNTERFACTUAL (Level-Based)
 # =============================================================================
 
-def run_matching_counterfactual(df, comp_results):
-    """Run matching counterfactual: PAM vs AAM efficiency."""
+def run_additive_matching(df, model_residuals=None):
+    """Matching analysis under the additive AKM benchmark.
+
+    Under additive AKM in logs, production in levels is multiplicatively
+    separable: Q_hat = exp(theta) * exp(psi) * c_hat.
+    PAM is mean-output-maximizing.  The risk margin compares
+    variance/P10 under observed vs PAM vs spread-the-compass.
+    
+    Parameters
+    ----------
+    df : DataFrame with alpha_eb, gamma_eb, log_q columns
+    model_residuals : array-like, optional
+        Full-model residuals (y - y_hat) from the AKM estimation.
+        If None, computed as y - alpha - gamma (INCORRECT if controls/time FEs used).
+    """
     print('\n' + '='*70)
-    print('MATCHING COUNTERFACTUAL: PAM vs AAM')
+    print('ADDITIVE MATCHING COUNTERFACTUAL (Level-Based)')
     print('='*70)
-    
+
     df = df.copy()
-    
-    # Get interaction coefficient
-    if 'sparse' in comp_results and 'rich' in comp_results:
-        beta3_sparse = comp_results['sparse']['beta_interaction']
-        beta3_rich = comp_results['rich']['beta_interaction']
+
+    # Level types
+    df['exp_theta'] = np.exp(df['alpha_eb'])
+    df['exp_psi'] = np.exp(df['gamma_eb'])
+
+    # Duan (1983) smearing correction — use full-model residuals
+    if model_residuals is not None:
+        residuals = np.asarray(model_residuals)
+        if len(residuals) != len(df):
+            print(f'  WARNING: model_residuals length ({len(residuals)}) != df length ({len(df)}), recomputing')
+            residuals = (df['log_q'] - df['alpha_eb'] - df['gamma_eb']).values
     else:
-        beta3_sparse = beta3_rich = comp_results['pooled']['beta_interaction']
+        # Fallback: only correct if no controls or time FEs were used
+        residuals = (df['log_q'] - df['alpha_eb'] - df['gamma_eb']).values
     
-    print(f"\n  Interaction coefficients:")
-    print(f"    Sparse: β₃ = {beta3_sparse:.4f}")
-    print(f"    Rich: β₃ = {beta3_rich:.4f}")
-    
-    # Create cells (decade × ground_sparse)
-    if 'decade' in df.columns and 'ground_sparse' in df.columns:
-        df['cell'] = df['decade'].astype(str) + '_' + df['ground_sparse'].astype(str)
-    else:
-        df['cell'] = 'all'
-    
-    results = []
-    
-    for is_sparse in [0, 1]:
-        df_g = df[df['ground_sparse'] == is_sparse].copy()
-        beta3 = beta3_sparse if is_sparse else beta3_rich
-        ground_label = 'Sparse' if is_sparse else 'Rich'
-        
-        if len(df_g) < 100:
+    smearing_c = float(np.mean(np.exp(residuals)))
+    print(f"\n  Duan smearing correction c_hat = {smearing_c:.4f}")
+    print(f"  Residual: mean={np.mean(residuals):.4f}, std={np.std(residuals):.4f}")
+
+    df['q_hat_level'] = df['exp_theta'] * df['exp_psi'] * smearing_c
+    df['q_actual_level'] = np.exp(df['log_q'])
+
+    # --- Panel A: Mean-allocation within decade cells ---
+    cell_col = 'decade' if 'decade' in df.columns else None
+    if cell_col is None:
+        df['_cell'] = 'all'
+        cell_col = '_cell'
+
+    cells = df[cell_col].unique()
+    observed_total = 0.0
+    random_total = 0.0
+    pam_total = 0.0
+    total_n = 0
+    rng = np.random.default_rng(42)
+
+    for cell in cells:
+        dc = df[df[cell_col] == cell]
+        n = len(dc)
+        if n < 10:
             continue
+        obs_sum = dc['q_hat_level'].sum()
+        rand_draws = []
+        for _ in range(100):
+            psi_shuf = rng.permutation(dc['exp_psi'].values)
+            rand_draws.append(np.sum(dc['exp_theta'].values * psi_shuf * smearing_c))
+        rand_sum = float(np.mean(rand_draws))
+        theta_s = np.sort(dc['exp_theta'].values)
+        psi_s = np.sort(dc['exp_psi'].values)
+        pam_sum = float(np.sum(theta_s * psi_s * smearing_c))
+        observed_total += obs_sum
+        random_total += rand_sum
+        pam_total += pam_sum
+        total_n += n
+
+    obs_per = observed_total / total_n
+    random_per = random_total / total_n
+    pam_per = pam_total / total_n
+    pam_vs_obs = 100 * (pam_per / obs_per - 1)
+    pam_vs_random = 100 * (pam_per / random_per - 1)
+    obs_vs_random = 100 * (obs_per / random_per - 1)
+
+    print(f"\n  --- Panel A: Mean-Allocation (Level Predictions) ---")
+    print(f"    Observed mean Q_hat:  {obs_per:.1f}")
+    print(f"    Random mean Q_hat:    {random_per:.1f}")
+    print(f"    PAM mean Q_hat:       {pam_per:.1f}")
+    print(f"    PAM vs Observed:      {pam_vs_obs:+.2f}%")
+    print(f"    PAM vs Random:        {pam_vs_random:+.2f}%")
+    print(f"    Observed vs Random:   {obs_vs_random:+.2f}%")
+
+    mean_results = {
+        'observed_mean_level': float(obs_per),
+        'random_mean_level': float(random_per),
+        'pam_mean_level': float(pam_per),
+        'pam_vs_observed_pct': float(pam_vs_obs),
+        'pam_vs_random_pct': float(pam_vs_random),
+        'observed_vs_random_pct': float(obs_vs_random),
+        'smearing_c': smearing_c,
+        'n': total_n,
+    }
+
+    # --- Panel B: Risk-allocation (Q1 captains) ---
+    df['theta_quartile'] = pd.qcut(df['alpha_eb'], 4, labels=['Q1', 'Q2', 'Q3', 'Q4'])
+    psi_med = df['gamma_eb'].median()
+    df['high_psi'] = (df['gamma_eb'] >= psi_med).astype(int)
+
+    risk_results = []
+    print(f"\n  --- Panel B: Risk-Allocation (Q1 Captain Floor) ---")
+
+    for hp, label in [(0, 'Low-psi'), (1, 'High-psi')]:
+        dc = df[(df['theta_quartile'] == 'Q1') & (df['high_psi'] == hp)]
+        if len(dc) < 20:
+            continue
+        log_vals = dc['log_q'].values
+        level_vals = dc['q_actual_level'].values
+        positive_mask = level_vals > 1.0
+        n_pos = positive_mask.sum()
         
-        # Current output
-        current_mean = df_g['log_q'].mean()
+        row = {
+            'cell': f'Q1 x {label}',
+            'n': len(dc),
+            'zero_share': float(np.mean(~positive_mask)),
+            'mean_log_q': float(np.mean(log_vals)),
+            'std_log_q': float(np.std(log_vals)),
+            'p10_log_q': float(np.percentile(log_vals, 10)),
+            'mean_level': float(np.mean(level_vals)),
+            'p10_level': float(np.percentile(level_vals, 10)),
+        }
+        # Conditional on positive output
+        if n_pos > 10:
+            pos_log = log_vals[positive_mask]
+            row['cond_mean_log_q'] = float(np.mean(pos_log))
+            row['cond_std_log_q'] = float(np.std(pos_log))
+            row['cond_p10_log_q'] = float(np.percentile(pos_log, 10))
+            row['cond_n'] = int(n_pos)
         
-        # PAM counterfactual: sort theta and psi in same direction within cells
-        pam_gains = []
-        aam_gains = []
-        
-        for cell in df_g['cell'].unique():
-            df_cell = df_g[df_g['cell'] == cell].copy()
-            if len(df_cell) < 10:
-                continue
-            
-            # Current matching
-            current = df_cell['theta_x_psi'].mean()
-            
-            # PAM: high-θ with high-ψ → maximize θ×ψ
-            theta_sorted = np.sort(df_cell['theta_std'].values)
-            psi_sorted = np.sort(df_cell['psi_std'].values)
-            pam_interaction = np.mean(theta_sorted * psi_sorted)
-            
-            # AAM: high-θ with low-ψ → minimize θ×ψ
-            psi_reverse = np.sort(df_cell['psi_std'].values)[::-1]
-            aam_interaction = np.mean(theta_sorted * psi_reverse)
-            
-            # Output changes
-            pam_delta = beta3 * (pam_interaction - current)
-            aam_delta = beta3 * (aam_interaction - current)
-            
-            pam_gains.append(pam_delta * len(df_cell))
-            aam_gains.append(aam_delta * len(df_cell))
-        
-        if pam_gains:
-            pam_effect = sum(pam_gains) / len(df_g)
-            aam_effect = sum(aam_gains) / len(df_g)
-            
-            results.append({
-                'ground': ground_label,
-                'beta3': float(beta3),
-                'pam_delta_log_q': float(pam_effect),
-                'pam_delta_pct': float(100 * (np.exp(pam_effect) - 1)),
-                'aam_delta_log_q': float(aam_effect),
-                'aam_delta_pct': float(100 * (np.exp(aam_effect) - 1)),
-                'n': len(df_g),
-            })
-            
-            print(f"\n  {ground_label} Grounds (N = {len(df_g):,}):")
-            print(f"    PAM effect: {100 * (np.exp(pam_effect) - 1):+.2f}%")
-            print(f"    AAM effect: {100 * (np.exp(aam_effect) - 1):+.2f}%")
-    
-    return pd.DataFrame(results)
+        risk_results.append(row)
+        r = row
+        print(f"    {r['cell']}: N={r['n']:,}  Zero%={100*r['zero_share']:.1f}%  "
+              f"Mean(log)={r['mean_log_q']:.2f}  Std(log)={r['std_log_q']:.2f}")
+        if 'cond_mean_log_q' in r:
+            print(f"      Conditional on positive (N={r['cond_n']:,}): "
+                  f"Mean={r['cond_mean_log_q']:.2f}  Std={r['cond_std_log_q']:.2f}  "
+                  f"P10={r['cond_p10_log_q']:.2f}")
+
+    if len(risk_results) == 2:
+        lo, hi = risk_results[0], risk_results[1]
+        print(f"\n  KEY FINDING:")
+        print(f"    Extensive margin: zero-catch share {100*lo['zero_share']:.0f}% → {100*hi['zero_share']:.0f}%")
+        # Conditional variance compression (intensive margin)
+        if 'cond_std_log_q' in lo and 'cond_std_log_q' in hi:
+            cond_var_comp = 1 - (hi['cond_std_log_q']**2 / lo['cond_std_log_q']**2)
+            cond_floor = hi['cond_p10_log_q'] - lo['cond_p10_log_q']
+            print(f"    Intensive margin (conditional on positive):")
+            print(f"      Variance compression: {100*cond_var_comp:.0f}%")
+            print(f"      Floor (P10) raised by {cond_floor:+.2f} log points")
+            if lo['cond_p10_log_q'] > 0:
+                print(f"      (in levels: {np.exp(lo['cond_p10_log_q']):.0f} → {np.exp(hi['cond_p10_log_q']):.0f} bbl)")
+            mean_results['q1_cond_var_compression'] = float(cond_var_comp)
+            mean_results['q1_cond_floor_raise_log'] = float(cond_floor)
+        mean_results['q1_zero_share_low_psi'] = float(lo['zero_share'])
+        mean_results['q1_zero_share_high_psi'] = float(hi['zero_share'])
+
+    return {
+        'mean_allocation': mean_results,
+        'risk_allocation': risk_results,
+    }
+
 
 
 # =============================================================================
@@ -800,6 +923,65 @@ def run_insurance_variance(df):
 # MAIN EXECUTION
 # =============================================================================
 
+def _aggregate_secondary_outputs(all_results):
+    """Load secondary pipeline CSVs and merge into the results dict.
+    
+    This ensures analysis_results.json has everything the table generator needs,
+    even for analyses run in separate pipeline stages.
+    """
+    import pandas as pd
+    
+    project_root = Path(__file__).parent.parent.parent
+    
+    # Mechanism analysis (Tests 1-8: crew, mate FE, etc.)
+    mech_path = project_root / "output" / "tables" / "mechanism_analysis.csv"
+    if mech_path.exists():
+        try:
+            mdf = pd.read_csv(mech_path)
+            mech = {}
+            for _, row in mdf.iterrows():
+                test_name = row['test']
+                entry = {}
+                for col in mdf.columns:
+                    val = row[col]
+                    if pd.notna(val):
+                        entry[col] = float(val) if isinstance(val, (int, float, np.floating, np.integer)) else val
+                mech[test_name] = entry
+            all_results['mechanism_tests'] = mech
+        except Exception as e:
+            print(f"  Warning: could not load mechanism_analysis.csv: {e}")
+    
+    # R3 event study coefficients (wider window than our 5-point study)
+    es_path = project_root / "output" / "tables" / "r3_event_study_coefficients.csv"
+    if es_path.exists():
+        try:
+            esdf = pd.read_csv(es_path)
+            all_results['event_study_full'] = esdf.to_dict('records')
+        except Exception:
+            pass
+    
+    # Portability summary (R2, R4)
+    port_path = project_root / "output" / "tables" / "r2_r4_portability_summary.csv"
+    if port_path.exists():
+        try:
+            pdf = pd.read_csv(port_path)
+            all_results['portability'] = pdf.to_dict('records')
+        except Exception:
+            pass
+    
+    # Search theory summary
+    st_path = project_root / "output" / "search_theory" / "search_theory_summary.csv"
+    if st_path.exists():
+        try:
+            stdf = pd.read_csv(st_path)
+            st_dict = {}
+            for _, row in stdf.iterrows():
+                st_dict[row['Metric']] = row['Value']
+            all_results['search_theory'] = st_dict
+        except Exception:
+            pass
+
+
 def run_full_suite():
     """Run the full analysis suite."""
     print('='*70)
@@ -838,30 +1020,24 @@ def run_full_suite():
     }
     
     # R1: Baseline variance decomposition
-    print('\n[3/7] Running R1: Baseline variance decomposition...')
+    print('\n[3/8] Running R1: Baseline variance decomposition...')
     r1_results = run_r1_baseline(df_est)
     all_results['r1'] = {
         k: {kk: vv for kk, vv in v.items() if not isinstance(vv, pd.DataFrame)}
         for k, v in r1_results.items()
     }
     
-    # Save fixed effects
-    r1_results['no_controls']['captain_fe'].to_csv(TABLES_DIR / 'captain_fixed_effects.csv', index=False)
-    r1_results['no_controls']['agent_fe'].to_csv(TABLES_DIR / 'agent_fixed_effects.csv', index=False)
+    # Save fixed effects (from baseline = vessel_controls)
+    r1_results['vessel_controls']['captain_fe'].to_csv(TABLES_DIR / 'captain_fixed_effects.csv', index=False)
+    r1_results['vessel_controls']['agent_fe'].to_csv(TABLES_DIR / 'agent_fixed_effects.csv', index=False)
     
-    # Complementarity analysis
-    print('\n[4/7] Running complementarity analysis...')
-    comp_results, df_with_fe = run_complementarity(df_est, r1_results['no_controls'])
-    all_results['complementarity'] = comp_results
-    
-    # Heterogeneous effects
-    print('\n[5/7] Running heterogeneous effects analysis...')
-    cate_results = run_heterogeneous_effects(df_with_fe)
-    cate_results.to_csv(TABLES_DIR / 'cate_by_quartile.csv', index=False)
-    all_results['cate'] = cate_results.to_dict('records')
+    # Merge FEs into estimation sample for downstream analyses
+    df_with_fe = r1_results['vessel_controls']['df_with_fe'].copy()
+    df_with_fe['theta_std'] = (df_with_fe['alpha_eb'] - df_with_fe['alpha_eb'].mean()) / df_with_fe['alpha_eb'].std()
+    df_with_fe['psi_std'] = (df_with_fe['gamma_eb'] - df_with_fe['gamma_eb'].mean()) / df_with_fe['gamma_eb'].std()
     
     # Event study
-    print('\n[6/7] Running event study...')
+    print('\n[4/8] Running event study...')
     event_results, n_switches = run_event_study(df_est)
     event_results.to_csv(TABLES_DIR / 'event_study.csv', index=False)
     all_results['event_study'] = {
@@ -869,16 +1045,33 @@ def run_full_suite():
         'coefficients': event_results.to_dict('records'),
     }
     
-    # Matching counterfactual
-    print('\n[7/7] Running matching counterfactual...')
-    cf_results = run_matching_counterfactual(df_with_fe, comp_results)
-    cf_results.to_csv(TABLES_DIR / 'matching_counterfactual.csv', index=False)
-    all_results['counterfactual'] = cf_results.to_dict('records')
+    # Heterogeneous effects (CATE — floor-raising)
+    print('\n[5/8] Running heterogeneous effects analysis...')
+    cate_results = run_heterogeneous_effects(df_with_fe)
+    cate_results.to_csv(TABLES_DIR / 'cate_by_quartile.csv', index=False)
+    all_results['cate'] = cate_results.to_dict('records')
     
-    # Insurance variance
+    # Insurance variance (risk channel)
+    print('\n[6/8] Running insurance variance analysis...')
     insurance_results = run_insurance_variance(df_with_fe)
     insurance_results.to_csv(TABLES_DIR / 'insurance_variance.csv', index=False)
     all_results['insurance'] = insurance_results.to_dict('records')
+    
+    # Additive matching counterfactual (level-based)
+    print('\n[7/8] Running additive matching counterfactual...')
+    matching_results = run_additive_matching(
+        df_with_fe,
+        model_residuals=r1_results['vessel_controls'].get('residuals'),
+    )
+    all_results['matching'] = matching_results
+    
+    # Appendix: complementarity diagnostic (feeds Table A3 only)
+    print('\n[8/8] Running complementarity diagnostic (appendix)...')
+    comp_results, _ = run_complementarity(df_est, r1_results['vessel_controls'])
+    all_results['complementarity_appendix'] = comp_results
+    
+    # Aggregate secondary pipeline outputs (from stage4 sub-analyses)
+    _aggregate_secondary_outputs(all_results)
     
     # Save all results (with numpy type conversion)
     def convert_numpy(obj):
@@ -911,7 +1104,6 @@ def run_full_suite():
     print(f'  - tables/agent_fixed_effects.csv')
     print(f'  - tables/cate_by_quartile.csv')
     print(f'  - tables/event_study.csv')
-    print(f'  - tables/matching_counterfactual.csv')
     print(f'  - tables/insurance_variance.csv')
     print(f'  - analysis_results.json')
     print(f'  - executive_summary.md')
@@ -943,45 +1135,63 @@ def generate_summary_markdown(results, r1_results):
         md.append(f"| {spec} | {r['r2']:.4f} | {100*r['share_alpha']:.1f}% | {100*r['share_gamma']:.1f}% | {100*r['share_cov']:.1f}% | {r['corr_eb']:.3f} |")
     md.append('')
     
-    # Complementarity
-    md.append('## Complementarity (θ × ψ Interaction)')
-    md.append('')
-    if 'complementarity' in results:
-        for ground, r in results['complementarity'].items():
-            if isinstance(r, dict) and 'beta_interaction' in r:
-                interp = 'Substitutes' if r['beta_interaction'] < 0 else 'Complements'
-                md.append(f"- **{ground}**: β₃ = {r['beta_interaction']:.4f} ({interp})")
-    md.append('')
-    
     # CATE
-    md.append('## Conditional Average Treatment Effects (CATE)')
+    md.append('## Floor-Raising: Heterogeneous Returns to Organizational Quality')
     md.append('')
     md.append('| Captain Quartile | Mean θ | CATE(ψ) | Interpretation |')
     md.append('|------------------|-------:|--------:|----------------|')
     
     for row in results.get('cate', []):
-        mechanism = 'Insurance' if row['quartile'] == 'Q1 (Novice)' else 'Diminishing Returns' if row['quartile'] == 'Q4 (Expert)' else 'Transition'
+        mechanism = 'Floor-Raising' if row['quartile'] == 'Q1 (Novice)' else 'Diminishing Returns' if row['quartile'] == 'Q4 (Expert)' else 'Transition'
         md.append(f"| {row['quartile']} | {row['mean_theta']:.2f} | {row['cate']:.4f}{row['stars']} | {mechanism} |")
     md.append('')
     
-    # Counterfactual
-    md.append('## Matching Counterfactual')
+    # Matching
+    md.append('## Matching: Mean-Allocation vs Risk-Allocation')
     md.append('')
-    md.append('| Ground | PAM Effect | AAM Effect | Optimal |')
-    md.append('|--------|----------:|----------:|---------|')
-    
-    for row in results.get('counterfactual', []):
-        optimal = 'AAM' if row['pam_delta_pct'] < row['aam_delta_pct'] else 'PAM'
-        md.append(f"| {row['ground']} | {row['pam_delta_pct']:+.2f}% | {row['aam_delta_pct']:+.2f}% | {optimal} |")
-    md.append('')
+    matching = results.get('matching', {})
+    mean_alloc = matching.get('mean_allocation', {})
+    if mean_alloc:
+        md.append('### Panel A: Mean-Allocation (Level Predictions)')
+        md.append(f"- Observed mean level output: {mean_alloc.get('observed_mean_level', 0):.1f}")
+        md.append(f"- Random assignment output: {mean_alloc.get('random_mean_level', 0):.1f}")
+        md.append(f"- PAM (mean-optimal) output: {mean_alloc.get('pam_mean_level', 0):.1f}")
+        md.append(f"- **PAM vs Observed**: {mean_alloc.get('pam_vs_observed_pct', 0):+.2f}%")
+        md.append(f"- **Observed vs Random**: {mean_alloc.get('observed_vs_random_pct', 0):+.2f}% (efficiency of actual sorting)")
+        md.append(f"- Duan smearing correction: {mean_alloc.get('smearing_c', 0):.4f}")
+        md.append('')
+    risk_alloc = matching.get('risk_allocation', [])
+    if risk_alloc:
+        md.append('### Panel B: Risk-Allocation (Q1 Captain Floor)')
+        md.append('')
+        md.append('| Cell | N | Mean Level | P10 Level | Zero-Catch Share |')
+        md.append('|------|---:|-----------:|----------:|-----------------:|')
+        for r in risk_alloc:
+            md.append(f"| {r['cell']} | {r['n']:,} | {r['mean_level']:.0f} | {r['p10_level']:.0f} | {100*r['zero_share']:.1f}% |")
+        md.append('')
+        if mean_alloc.get('q1_floor_raise_level'):
+            md.append(f"- **Floor (P10) raised by {mean_alloc['q1_floor_raise_level']:+.0f} barrels** for Q1 captains")
+            md.append(f"- Variance compression: {100*mean_alloc.get('q1_var_compression', 0):.0f}%")
+            md.append('')
     
     # Reliability
     md.append('## Reliability Diagnostics')
     md.append('')
-    noctl = results['r1']['no_controls']
+    noctl = results['r1'].get('vessel_controls', results['r1'].get('decade_fe_only', {}))
     md.append(f"- **Captain λ (mean)**: {noctl['mean_lambda_captain']:.3f}")
     md.append(f"- **Agent λ (mean)**: {noctl['mean_lambda_agent']:.3f}")
     md.append('')
+    
+    # Appendix note
+    if 'complementarity_appendix' in results:
+        md.append('## Appendix: θ×ψ Interaction Diagnostic')
+        md.append('')
+        md.append('*Note: The interaction analysis is supplementary. The additive AKM is the first-order benchmark.*')
+        md.append('')
+        for ground, r in results['complementarity_appendix'].items():
+            if isinstance(r, dict) and 'beta_interaction' in r:
+                md.append(f"- **{ground}**: β₃ = {r['beta_interaction']:.4f}")
+        md.append('')
     
     # Write
     (OUTPUT_DIR / 'executive_summary.md').write_text('\n'.join(md))

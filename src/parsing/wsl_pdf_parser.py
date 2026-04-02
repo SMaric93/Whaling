@@ -14,6 +14,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from .ocr_layout import OCRTextBox, ocr_boxes_to_lines
+
 # PDF processing - graceful fallback if not installed
 try:
     import pdfplumber
@@ -193,49 +195,11 @@ def _render_pdf_page(pdf_document, page_number: int, dpi: int) -> np.ndarray:
 
 def _ocr_boxes_to_lines(ocr_result) -> List[str]:
     """Group OCR text boxes into page rows by y-position, then sort by x-position."""
-    boxes = list(ocr_result or [])
-    if not boxes:
-        return []
-
-    def _x_left(item) -> float:
-        return min(point[0] for point in item[0])
-
-    def _y_center(item) -> float:
-        ys = [point[1] for point in item[0]]
-        return (min(ys) + max(ys)) / 2.0
-
-    def _height(item) -> float:
-        ys = [point[1] for point in item[0]]
-        return max(ys) - min(ys)
-
-    sorted_boxes = sorted(boxes, key=lambda item: (_y_center(item), _x_left(item)))
-    median_height = statistics.median(_height(item) for item in sorted_boxes)
-    row_threshold = max(12.0, median_height * 0.6)
-
-    rows: List[dict] = []
-    for item in sorted_boxes:
-        center = _y_center(item)
-        if not rows or abs(center - rows[-1]["center"]) > row_threshold:
-            rows.append({"center": center, "items": [item]})
-            continue
-
-        current_row = rows[-1]
-        current_row["items"].append(item)
-        current_row["center"] = (
-            current_row["center"] * (len(current_row["items"]) - 1) + center
-        ) / len(current_row["items"])
-
-    lines: List[str] = []
-    for row in rows:
-        texts = []
-        for item in sorted(row["items"], key=_x_left):
-            cleaned = str(item[1]).strip()
-            if cleaned:
-                texts.append(cleaned)
-        line = " ".join(texts).strip()
-        if line:
-            lines.append(line)
-    return lines
+    boxes = [
+        OCRTextBox(points=tuple(tuple(point) for point in item[0]), text=str(item[1]))
+        for item in (ocr_result or [])
+    ]
+    return ocr_boxes_to_lines(boxes, min_row_threshold=12.0)
 
 
 def _build_ocr_page(page_number: int, ocr_result, extraction_method: str) -> WSLPage:

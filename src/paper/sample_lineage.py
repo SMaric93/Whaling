@@ -37,10 +37,28 @@ def _voyage_counts(frame: pd.DataFrame, output_col: str) -> pd.Series:
     )
 
 
+def _ensure_columns(frame: pd.DataFrame, defaults: dict[str, object]) -> pd.DataFrame:
+    """Backfill optional columns that are absent in older intermediate datasets."""
+    frame = frame.copy()
+    for column, default in defaults.items():
+        if column not in frame.columns:
+            frame[column] = default
+    return frame
+
+
 def build_master_sample_lineage(context: BuildContext) -> Path:
     out = context.outputs / "manifests" / "master_sample_lineage.parquet"
 
-    universe = load_universe(context)
+    universe = _ensure_columns(
+        load_universe(context),
+        {
+            "has_logbook_data": False,
+            "logbook_source_count": 0,
+            "has_route_data": False,
+            "has_labor_data": False,
+            "has_vqi_data": False,
+        },
+    )
     connected = load_connected_sample(context)
     logbook_features = load_logbook_features(context)
     positions = load_positions(context)
@@ -92,6 +110,19 @@ def build_master_sample_lineage(context: BuildContext) -> Path:
     if "logbook_source_count_connected" in df.columns:
         df["logbook_source_count"] = df["logbook_source_count"].combine_first(df["logbook_source_count_connected"])
         df = df.drop(columns=["logbook_source_count_connected"])
+
+    df = _ensure_columns(
+        df,
+        {
+            "theta": np.nan,
+            "psi": np.nan,
+            "scarcity": np.nan,
+            "switch_agent": 0,
+            "switch_vessel": 0,
+            "n_positions": np.nan,
+            "n_grounds_visited": np.nan,
+        },
+    )
 
     df["coordinate_observations"] = df["voyage_id"].map(_voyage_counts(positions, "coordinate_observations"))
 

@@ -1,0 +1,661 @@
+#!/bin/bash --login
+###############################################################################
+# WSL Extraction Pipeline — MSU ICER HPCC (8×NVIDIA H200)
+#
+# Fully self-contained SLURM script for extracting vessel events from
+# 3,703 Whalemen's Shipping List (1843-1914) PDFs.
+#
+# Architecture:
+#   8× vLLM instances (1 per GPU) → 8× throughput
+#   PDF → render image → vLLM VLM (Qwen3-VL-32B) → structured JSON → JSONL
+#
+# Each H200 runs an independent vLLM server with the 32B model (~64 GB bf16).
+# Python workers distribute pages round-robin across all 8 servers.
+# No OCR needed — the VLM reads the page images directly.
+#
+# Usage:
+#   export HF_TOKEN="your_token_here"
+#   sbatch scripts/hpcc_extract.sb              # full corpus
+#   sbatch scripts/hpcc_extract.sb --test        # single year (default 1850)
+#   sbatch scripts/hpcc_extract.sb --test 1860   # single year (custom)
+#
+# Resume after interruption:
+#   sbatch scripts/hpcc_extract.sb   # auto-resumes from checkpoint
+#
+# Estimated runtime: ~20-40 minutes for full corpus on 8×H200.
+#                    ~1-2 minutes for a single-year test run.
+###############################################################################
+
+#SBATCH --job-name=wsl_extract
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=h200:4
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=512G
+#SBATCH --time=168:00:00
+#SBATCH --partition=general-long-gpu
+#SBATCH --output=%x-%j.SLURMout
+#SBATCH --error=%x-%j.SLURMerr
+#SBATCH --mail-type=END,FAIL
+##SBATCH --mail-user=YOUR_NETID@msu.edu  # Uncomment and set your email
+
+set -euo pipefail
+
+# ─── Cleanup trap (ensures vLLM servers die on timeout / scancel) ───────────
+cleanup() {
+    echo "Received signal, cleaning up vLLM servers..."
+    for pid in "${VLLM_PIDS[@]:-}"; do
+        kill $pid 2>/dev/null
+    done
+    wait 2>/dev/null || true
+    exit 1
+}
+trap cleanup SIGTERM SIGINT SIGHUP
+
+# ─── Parse --test flag ──────────────────────────────────────────────────────
+TEST_YEAR=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --test)
+            TEST_YEAR="${2:-1850}"
+            # Consume the year arg if it looks like a number
+            if [[ "${2:-}" =~ ^[0-9]{4}$ ]]; then shift; fi
+            shift
+            ;;
+        *) shift ;;
+    esac
+done
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+CONDA_ENV_NAME="wsl_extract"
+MODEL_ID="Qwen/Qwen3-VL-32B-Instruct"
+HF_CACHE="/mnt/research/CEO_Complementarities/maricste/hf_cache"
+OUTPUT_DIR="${PROJECT_DIR}/data/extracted"
+PDF_DIR="/mnt/home/maricste/PDFs"
+NUM_GPUS=4
+BASE_PORT=8100   # Servers on ports 8100-8107
+
+export HF_HOME="${HF_CACHE}"
+export HF_HUB_CACHE="${HF_CACHE}"
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
+export TMPDIR="${HF_CACHE}/tmp"
+export XDG_CACHE_HOME="${HF_CACHE}"
+export HF_HUB_DISABLE_XET=1
+
+mkdir -p "${OUTPUT_DIR}" "${TMPDIR}"
+
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  WSL Extraction Pipeline — 8×H200 Parallel                 ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+echo "║  Job ID:  ${SLURM_JOB_ID:-local}"
+echo "║  Node:    $(hostname)"
+echo "║  GPUs:    ${NUM_GPUS}×H200"
+echo "║  Model:   ${MODEL_ID}"
+if [ -n "${TEST_YEAR}" ]; then
+echo "║  Mode:    TEST (year ${TEST_YEAR} only)"
+else
+echo "║  Mode:    FULL CORPUS"
+fi
+echo "║  Time:    $(date)"
+echo "╚══════════════════════════════════════════════════════════════╝"
+nvidia-smi -L 2>/dev/null || true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 1: Environment Setup (Conda, as recommended by ICER)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[1/4] Setting up environment..."
+
+module purge
+module load Conda/3
+module load CUDA/12.4.0
+
+# Create conda environment if it doesn't exist
+if ! conda env list | grep -q "^${CONDA_ENV_NAME} "; then
+    echo "  Creating conda environment: ${CONDA_ENV_NAME}"
+    conda create -y --name "${CONDA_ENV_NAME}" python=3.11 pip
+fi
+conda activate "${CONDA_ENV_NAME}"
+
+# Install packages (idempotent — pip skips already-installed)
+pip install --quiet --upgrade pip
+pip install --quiet \
+    "vllm>=0.8.0" \
+    "transformers>=4.52.0" \
+    "qwen-vl-utils" \
+    "pypdfium2" \
+    "Pillow" \
+    "numpy" \
+    "requests"
+
+echo "  Python:  $(python3 --version)"
+echo "  vLLM:    $(python3 -c 'import vllm; print(vllm.__version__)' 2>/dev/null)"
+echo "  CUDA:    $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+echo "  GPUs:    $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) detected"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 2: Download Model (once, shared cache)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[2/4] Downloading model (if not cached)..."
+
+# Research space is at group quota (50GB). Use local_dir download to home instead.
+MODEL_LOCAL_DIR="${PROJECT_DIR}/models/Qwen3-VL-32B-Instruct"
+mkdir -p "${MODEL_LOCAL_DIR}"
+
+python3 -c "
+import os, glob
+os.environ['HF_HUB_DISABLE_XET'] = '1'
+
+local_dir = '${MODEL_LOCAL_DIR}'
+model_id = '${MODEL_ID}'
+
+# Check if model is already downloaded (look for safetensors)
+existing = glob.glob(os.path.join(local_dir, '*.safetensors'))
+if existing:
+    print(f'  Model already present ({len(existing)} safetensor files)')
+else:
+    print(f'  Downloading to {local_dir}...')
+    from huggingface_hub import snapshot_download
+    snapshot_download(model_id, local_dir=local_dir, max_workers=2)
+    print('  Download complete')
+print(f'  Model ready at: {local_dir}')
+"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 3: Launch 8 vLLM Servers (1 per GPU)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[3/4] Starting ${NUM_GPUS} vLLM servers (one per GPU)..."
+
+VLLM_PIDS=()
+for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
+    port=$((BASE_PORT + gpu_id))
+    echo "  GPU ${gpu_id} → port ${port}"
+
+    CUDA_VISIBLE_DEVICES=${gpu_id} python3 -m vllm.entrypoints.openai.api_server \
+        --model "${MODEL_LOCAL_DIR}" \
+        --dtype bfloat16 \
+        --max-model-len 16384 \
+        --max-num-seqs 4 \
+        --gpu-memory-utilization 0.92 \
+        --port ${port} \
+        --trust-remote-code \
+        --served-model-name "${MODEL_ID}" \
+        --no-enable-log-requests \
+        --limit-mm-per-prompt '{"image": 1}' \
+        > "${OUTPUT_DIR}/vllm_gpu${gpu_id}.log" 2>&1 &
+    VLLM_PIDS+=($!)
+done
+
+echo "  Waiting for all servers to initialize..."
+ALL_READY=1
+for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
+    port=$((BASE_PORT + gpu_id))
+    SERVER_READY=0
+    for i in $(seq 1 300); do
+        if curl -s "http://localhost:${port}/v1/models" 2>/dev/null | grep -q "Qwen"; then
+            echo "  ✓ GPU ${gpu_id} ready (${i}s)"
+            SERVER_READY=1
+            break
+        fi
+        if ! kill -0 ${VLLM_PIDS[$gpu_id]} 2>/dev/null; then
+            echo "  ✗ GPU ${gpu_id} process died. Check ${OUTPUT_DIR}/vllm_gpu${gpu_id}.log"
+            break
+        fi
+        sleep 1
+    done
+    if [ $SERVER_READY -eq 0 ]; then
+        ALL_READY=0
+    fi
+done
+
+if [ $ALL_READY -eq 0 ]; then
+    echo "ERROR: Not all servers started. Cleaning up..."
+    for pid in "${VLLM_PIDS[@]}"; do kill $pid 2>/dev/null; done
+    exit 1
+fi
+
+echo "  All ${NUM_GPUS} servers ready!"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 4: Extraction Pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[4/4] Running extraction across $(find ${PDF_DIR} -name '*.pdf' | wc -l) PDFs..."
+
+export NUM_GPUS BASE_PORT MODEL_ID OUTPUT_DIR PDF_DIR TEST_YEAR
+
+srun -c "${SLURM_CPUS_PER_TASK:-32}" python3 - << 'PYEOF'
+"""
+WSL Extraction Worker — 8× Parallel vLLM + VLM Direct Image Reading.
+
+Distributes pages across 8 vLLM servers via a thread pool.
+Each server runs on its own H200 GPU for maximum throughput.
+"""
+import os, sys, time, json, re, glob, base64, logging, threading
+from pathlib import Path
+from datetime import datetime, timedelta
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import numpy as np
+import pypdfium2 as pdfium
+from PIL import Image, ImageEnhance, ImageFilter
+import requests
+import math
+
+# ─── Config ────────────────────────────────────────────────────────────────
+NUM_GPUS = int(os.environ["NUM_GPUS"])
+BASE_PORT = int(os.environ["BASE_PORT"])
+VLLM_URLS = [f"http://localhost:{BASE_PORT + i}/v1/chat/completions"
+             for i in range(NUM_GPUS)]
+MODEL_ID = os.environ["MODEL_ID"]
+OUTPUT_DIR = Path(os.environ["OUTPUT_DIR"])
+PDF_DIR = Path(os.environ["PDF_DIR"])
+JSONL_FILE = OUTPUT_DIR / "wsl_events.jsonl"
+PROGRESS_FILE = OUTPUT_DIR / "wsl_progress.json"
+RENDER_DPI = 200
+MAX_TOKENS = 8192
+
+write_lock = threading.Lock()
+progress_lock = threading.Lock()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(OUTPUT_DIR / "extraction.log", mode="a"),
+    ],
+)
+log = logging.getLogger("wsl")
+
+# ─── Extraction Prompt ─────────────────────────────────────────────────────
+PROMPT = """/no_think
+You are an expert reader of the Whalemen's Shipping List (WSL), a weekly newspaper published in New Bedford, Massachusetts (1843-1914). Each page may contain MULTIPLE section types. Extract ALL information into the structured JSON format below.
+
+## SECTION 1: VESSEL EVENTS
+Extract every vessel entry. The WSL has several event sections:
+- DEPARTURES ("Sailed"/"Cleared"): vessels leaving port
+- ARRIVALS ("Arrived"): vessels returning with cargo
+- SPOKEN ("Sp."/"Spoken"): at-sea sighting reports, often with coordinates and the reporting ship
+- REPORTED ("Rpt"): secondhand reports of vessel status
+- IN PORT ("Inp"): vessels currently at a foreign port
+- WRECKED/CONDEMNED ("wrk"): vessel losses
+
+Use this schema for each event:
+{"v":"vessel name", "t":"ship|bark|brig|sch", "c":"captain surname",
+ "e":"dep|arr|spk|rpt|inp|wrk",
+ "p":"port or location", "d":"date as printed",
+ "hp":"home port", "dest":"whaling ground or destination",
+ "lat":null, "lon":null,
+ "sp":null, "wh":null, "bn":null,
+ "days":"time at sea", "agent":"owner or agent company", "by":"reporting vessel name"}
+
+Field rules:
+- "c" = captain's SURNAME only (a person, not a company)
+- "agent" = the shipowner or agent COMPANY (e.g. "Swift & Allen", "I. Howland Jr. & Co.")
+- "hp" = home port if stated ("of Nantucket", "of Fairhaven", "of Sag Harbor")
+- "dest" = whaling ground or destination ("Pacific Ocean", "Indian Ocean", "NW Coast", "Atlantic")
+- "days" = time at sea if stated ("14 mos", "28 months", "3 yrs")
+- "lat"/"lon" = numeric coordinates if stated. "lat 35 S, lon 170 W" → lat=-35, lon=-170
+- "sp"/"wh"/"bn" = numeric barrels of sperm oil, whale oil, pounds of bone
+- "by" = for spoken/reported events, the vessel that reported the sighting
+- "e" must be one of: dep, arr, spk, rpt, inp, wrk
+
+Examples:
+Departure: {"v":"Adeline Gibbs","t":"bark","c":"Whiteside","e":"dep","p":"New Bedford","d":"Sept 22","hp":"New Bedford","dest":"Pacific Ocean","lat":null,"lon":null,"sp":null,"wh":null,"bn":null,"days":null,"agent":"Swift & Allen","by":null}
+Arrival: {"v":"Columbus","t":"ship","c":"Rogers","e":"arr","p":"New Bedford","d":"Jan 15","hp":"New Bedford","dest":null,"lat":null,"lon":null,"sp":1200,"wh":450,"bn":8000,"days":"28 mos","agent":"C. R. Tucker & Co.","by":null}
+Spoken: {"v":"Omega","t":"ship","c":"Whalon","e":"spk","p":null,"d":"Aug 10","hp":"Nantucket","dest":"Pacific Ocean","lat":-5,"lon":-110,"sp":400,"wh":null,"bn":null,"days":"12 mos","agent":null,"by":"Ship Java"}
+
+## SECTION 2: PRICES CURRENT
+Extract commodity prices if present (usually "Sperm Oil", "Whale Oil", "Whalebone"):
+{"commodity":"sperm_oil|whale_oil|whalebone", "price_lo":0.00, "price_hi":0.00, "unit":"per gallon|per lb|per bbl"}
+
+## SECTION 3: MARINE NOTICES
+Extract casualty reports, condemnations, crew changes, and other notices:
+{"type":"casualty|condemnation|crew_change|protest|other",
+ "vessel":"vessel name", "detail":"brief summary of the notice", "date":"date if stated",
+ "location":"where it happened"}
+
+Examples:
+{"type":"casualty","vessel":"Ship Canton","detail":"lost on reef near Fiji, crew saved","date":"July 1844","location":"Fiji"}
+{"type":"crew_change","vessel":"Bark Minerva","detail":"Capt. Smith replaced by Capt. Jones","date":"Oct 12","location":"Fayal"}
+
+## RULES
+- Each vessel appears ONLY ONCE per event. Do NOT repeat entries.
+- Stop when you reach the end of visible content on the page.
+- "c" must be a person's surname, NOT a company name.
+- Parse coordinates as signed numbers: South latitudes and West longitudes are NEGATIVE.
+
+Return: {"events":[...], "prices":[...], "notices":[...]}
+Return ONLY valid JSON. No explanation."""
+
+# ─── Helpers ───────────────────────────────────────────────────────────────
+
+def img_to_base64(img_array):
+    """Convert numpy array to enhanced JPEG base64 for VLM input."""
+    pil = Image.fromarray(img_array)
+    # Convert to grayscale for consistent enhancement
+    if pil.mode != 'L':
+        pil = pil.convert('L')
+    # Enhance contrast and sharpness for faded historical newsprint
+    pil = ImageEnhance.Contrast(pil).enhance(1.5)
+    pil = ImageEnhance.Sharpness(pil).enhance(2.0)
+    # Convert back to RGB for JPEG encoding
+    pil = pil.convert('RGB')
+    buf = BytesIO()
+    pil.save(buf, format="JPEG", quality=88)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def vllm_vision(url, img_b64, prompt, max_tokens=MAX_TOKENS):
+    """Call vLLM and return (text, logprobs_list)."""
+    payload = {
+        "model": MODEL_ID,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "frequency_penalty": 1.5,
+        "logprobs": True,
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json=payload, timeout=300)
+            r.raise_for_status()
+            choice = r.json()["choices"][0]
+            text = choice["message"]["content"]
+            # Extract per-token logprobs
+            lp_data = choice.get("logprobs", {}).get("content", [])
+            return text, lp_data
+        except Exception as e:
+            if attempt == 2:
+                log.error(f"vLLM error ({url}): {e}")
+                return "", []
+            time.sleep(2 ** attempt)
+
+
+def parse_result(raw):
+    """Parse LLM output into (events, prices, notices)."""
+    text = raw.strip()
+    if "</think>" in text:
+        text = text.split("</think>")[-1].strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1].lstrip("json").strip()
+    events, prices, notices = [], [], []
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj.get("events", []), obj.get("prices", []), obj.get("notices", [])
+        if isinstance(obj, list):
+            return obj, [], []
+    except json.JSONDecodeError:
+        pass
+    for m in re.finditer(r'\{[^{}]{10,800}\}', text):
+        try:
+            o = json.loads(m.group())
+            if "v" in o: events.append(o)
+            elif "commodity" in o or ("price_lo" in o): prices.append(o)
+            elif "type" in o and "detail" in o: notices.append(o)
+        except: pass
+    return events, prices, notices
+
+
+def normalize(e):
+    """Normalize a compact-key event dict to full field names."""
+    lat = e.get("lat")
+    lon = e.get("lon")
+    # Try to parse numeric coordinates
+    if isinstance(lat, str):
+        try: lat = float(lat)
+        except: lat = None
+    if isinstance(lon, str):
+        try: lon = float(lon)
+        except: lon = None
+    return {
+        "vessel_name": (e.get("v") or "").strip(),
+        "vessel_type": (e.get("t") or "").strip().lower() or None,
+        "captain": (e.get("c") or "").strip() or None,
+        "event_type": (e.get("e") or "").strip().lower(),
+        "port": (e.get("p") or "").strip() or None,
+        "date": (e.get("d") or "").strip() or None,
+        "home_port": (e.get("hp") or "").strip() or None,
+        "destination": (e.get("dest") or "").strip() or None,
+        "latitude": lat,
+        "longitude": lon,
+        "oil_sperm_bbls": e.get("sp"),
+        "oil_whale_bbls": e.get("wh"),
+        "bone_lbs": e.get("bn"),
+        "days_out": (e.get("days") or "").strip() or None,
+        "agent": (e.get("agent") or "").strip() or None,
+        "reported_by": (e.get("by") or "").strip() or None,
+    }
+
+
+def load_progress():
+    if PROGRESS_FILE.exists():
+        return json.loads(PROGRESS_FILE.read_text())
+    return {"completed": {}, "total_events": 0, "total_pages": 0}
+
+
+def save_progress(prog):
+    tmp = PROGRESS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(prog, indent=2))
+    tmp.rename(PROGRESS_FILE)
+
+
+def process_page(args):
+    """Process a single page — called from thread pool."""
+    pdf_path, pg_idx, gpu_id = args
+    pdf_name = os.path.basename(pdf_path)
+    year = os.path.basename(os.path.dirname(pdf_path))
+    pg = pg_idx + 1
+    url = VLLM_URLS[gpu_id]
+
+    try:
+        doc = pdfium.PdfDocument(pdf_path)
+        bmp = doc[pg_idx].render(scale=RENDER_DPI / 72.0)
+        img = bmp.to_numpy()
+        doc.close()
+        b64 = img_to_base64(img)
+
+        t0 = time.time()
+        raw, logprobs_data = vllm_vision(url, b64, PROMPT)
+        llm_time = time.time() - t0
+
+        raw_events, raw_prices, raw_notices = parse_result(raw)
+        events = [normalize(e) for e in raw_events]
+
+        # Deduplicate events by (vessel, captain, event_type, date)
+        seen_keys = set()
+        deduped = []
+        for ev in events:
+            key = (ev.get('vessel_name','').lower(),
+                   ev.get('captain','') or '',
+                   ev.get('event_type',''),
+                   ev.get('date',''))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(ev)
+        events = deduped
+
+        # Compute token confidence statistics from logprobs
+        token_lps = [t["logprob"] for t in logprobs_data
+                     if isinstance(t, dict) and "logprob" in t]
+        if token_lps:
+            probs = [math.exp(lp) for lp in token_lps]
+            mean_conf = sum(probs) / len(probs)
+            min_conf = min(probs)
+            sorted_probs = sorted(probs)
+            p10_conf = sorted_probs[max(0, len(sorted_probs) // 10)]
+        else:
+            mean_conf = min_conf = p10_conf = None
+
+        result = {
+            "pdf": pdf_name,
+            "year": int(year),
+            "page": pg,
+            "page_key": f"{pdf_name}:p{pg}",
+            "extracted_at": datetime.now().isoformat(),
+            "gpu_id": gpu_id,
+            "llm_time_s": round(llm_time, 2),
+            "events": events,
+            "prices": raw_prices,
+            "notices": raw_notices,
+            "n_events": len(events),
+            "n_prices": len(raw_prices),
+            "n_notices": len(raw_notices),
+            "output_chars": len(raw),
+            "confidence": {
+                "mean": round(mean_conf, 4) if mean_conf is not None else None,
+                "min": round(min_conf, 4) if min_conf is not None else None,
+                "p10": round(p10_conf, 4) if p10_conf is not None else None,
+                "n_tokens": len(token_lps),
+            },
+        }
+
+        with write_lock:
+            with open(JSONL_FILE, "a") as f:
+                f.write(json.dumps(result) + "\n")
+
+        return pdf_path, pg, len(events), llm_time
+
+    except Exception as e:
+        log.error(f"Error {pdf_name}:p{pg} (GPU {gpu_id}): {e}")
+        return pdf_path, pg, 0, 0
+
+
+def main():
+    progress = load_progress()
+    completed_pdfs = set(progress.get("completed", {}).keys())
+
+    test_year = os.environ.get("TEST_YEAR", "")
+    pdf_paths = sorted(glob.glob(str(PDF_DIR / "*/*.pdf")))
+    if test_year:
+        pdf_paths = [p for p in pdf_paths
+                     if os.path.basename(os.path.dirname(p)) == test_year]
+        log.info(f"TEST MODE: filtered to year {test_year} → {len(pdf_paths)} PDFs")
+    pending = [p for p in pdf_paths if p not in completed_pdfs]
+    log.info(f"Corpus: {len(pdf_paths)} PDFs | Completed: {len(completed_pdfs)} | "
+             f"Pending: {len(pending)}")
+
+    # Build work queue: (pdf_path, page_idx, gpu_id)
+    work_items = []
+    gpu_rr = 0
+    for pdf_path in pending:
+        try:
+            doc = pdfium.PdfDocument(pdf_path)
+            n_pages = len(doc)
+            doc.close()
+        except:
+            continue
+        for pg_idx in range(n_pages):
+            work_items.append((pdf_path, pg_idx, gpu_rr % NUM_GPUS))
+            gpu_rr += 1
+
+    log.info(f"Pages to process: {len(work_items):,} across {NUM_GPUS} GPUs "
+             f"(~{len(work_items)//NUM_GPUS:,} per GPU)")
+
+    t_start = time.time()
+    total_events = 0
+    total_pages = 0
+    page_times = []
+    pdf_events = {}
+
+    with ThreadPoolExecutor(max_workers=NUM_GPUS) as executor:
+        futures = {executor.submit(process_page, item): item for item in work_items}
+
+        for future in as_completed(futures):
+            pdf_path, pg, n_ev, llm_time = future.result()
+
+            total_events += n_ev
+            total_pages += 1
+            if llm_time > 0:
+                page_times.append(llm_time)
+
+            if pdf_path not in pdf_events:
+                pdf_events[pdf_path] = {"events": 0, "pages": 0}
+            pdf_events[pdf_path]["events"] += n_ev
+            pdf_events[pdf_path]["pages"] += 1
+
+            # Checkpoint every 100 pages
+            if total_pages % 100 == 0:
+                for p, stats in pdf_events.items():
+                    try:
+                        doc = pdfium.PdfDocument(p)
+                        expected = len(doc)
+                        doc.close()
+                    except:
+                        expected = 999
+                    if stats["pages"] >= expected:
+                        progress["completed"][p] = stats
+                progress["total_events"] = total_events
+                progress["total_pages"] = total_pages
+                with progress_lock:
+                    save_progress(progress)
+
+            # Log every 200 pages
+            if total_pages % 200 == 0:
+                elapsed = time.time() - t_start
+                avg_t = np.mean(page_times[-500:]) if page_times else 0
+                tput = total_pages / elapsed * 3600 if elapsed > 0 else 0
+                eta = (len(work_items) - total_pages) / (total_pages / elapsed) \
+                      if total_pages > 0 else 0
+                log.info(
+                    f"[{total_pages:,}/{len(work_items):,}] "
+                    f"{total_events:,} events | "
+                    f"{avg_t:.2f}s/page | {tput:.0f} pages/hr | "
+                    f"ETA: {timedelta(seconds=int(eta))}"
+                )
+
+    # Final checkpoint
+    for p, stats in pdf_events.items():
+        progress["completed"][p] = stats
+    progress["total_events"] = total_events
+    progress["total_pages"] = total_pages
+    save_progress(progress)
+
+    elapsed = time.time() - t_start
+    avg = np.mean(page_times) if page_times else 0
+    tput = total_pages / elapsed * 3600 if elapsed > 0 else 0
+    log.info(f"\n{'='*60}")
+    log.info(f"EXTRACTION COMPLETE")
+    log.info(f"{'='*60}")
+    log.info(f"PDFs:       {len(progress['completed']):,}")
+    log.info(f"Pages:      {total_pages:,}")
+    log.info(f"Events:     {total_events:,}")
+    log.info(f"Elapsed:    {timedelta(seconds=int(elapsed))}")
+    log.info(f"Throughput: {tput:.0f} pages/hr ({avg:.2f}s avg/page)")
+    log.info(f"Output:     {JSONL_FILE}")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+
+# ─── Cleanup ───────────────────────────────────────────────────────────────
+echo ""
+echo "Shutting down all vLLM servers..."
+for pid in "${VLLM_PIDS[@]}"; do
+    kill $pid 2>/dev/null
+done
+for pid in "${VLLM_PIDS[@]}"; do
+    wait $pid 2>/dev/null || true
+done
+
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  Job complete at $(date)"
+echo "║  Output: ${OUTPUT_DIR}/wsl_events.jsonl"
+echo "╚══════════════════════════════════════════════════════════════╝"
+
+# Print resource information (ICER best practice)
+scontrol show job "${SLURM_JOB_ID:-}" 2>/dev/null || true

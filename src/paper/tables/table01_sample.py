@@ -17,6 +17,12 @@ from ..data import (
 from ..utils.footnotes import standard_footnote
 
 
+def _series_or_default(frame: pd.DataFrame, column: str, default: object) -> pd.Series:
+    if column in frame.columns:
+        return frame[column]
+    return pd.Series(default, index=frame.index)
+
+
 def _sample_flow_rows(
     universe: pd.DataFrame,
     connected: pd.DataFrame,
@@ -25,14 +31,14 @@ def _sample_flow_rows(
     survival: pd.DataFrame,
     action: pd.DataFrame,
 ) -> list[dict]:
-    switcher = connected[connected.get("switch_agent", 0).fillna(0).astype(float) > 0].copy()
+    switcher = connected[_series_or_default(connected, "switch_agent", 0).fillna(0).astype(float) > 0].copy()
     archival = universe[
-        universe.get("has_labor_data", False).fillna(False)
-        | universe.get("has_vqi_data", False).fillna(False)
-        | universe.get("has_logbook_data", False).fillna(False)
-        | universe.get("logbook_source_count", 0).fillna(0).gt(0)
+        _series_or_default(universe, "has_labor_data", False).fillna(False)
+        | _series_or_default(universe, "has_vqi_data", False).fillna(False)
+        | _series_or_default(universe, "has_logbook_data", False).fillna(False)
+        | _series_or_default(universe, "logbook_source_count", 0).fillna(0).gt(0)
     ].copy()
-    coordinate_sample = universe[universe.get("has_route_data", False).fillna(False)].copy()
+    coordinate_sample = universe[_series_or_default(universe, "has_route_data", False).fillna(False)].copy()
     ground_sample = universe[universe["ground_or_route"].notna()].copy()
 
     samples = [
@@ -101,23 +107,23 @@ def _descriptive_rows(connected: pd.DataFrame, action: pd.DataFrame, patches: pd
     sample = connected.merge(action_agg, on="voyage_id", how="left", suffixes=("", "_action")).merge(patch_agg, on="voyage_id", how="left")
     if "scarcity_action" in sample.columns:
         sample["scarcity"] = sample["scarcity"].fillna(sample["scarcity_action"])
-    sample["log_revenue_proxy"] = np.log(sample["q_total_index"].clip(lower=1))
-    sample["log_tonnage"] = np.log(sample["tonnage"].clip(lower=1))
+    sample["log_revenue_proxy"] = np.log(_series_or_default(sample, "q_total_index", np.nan).clip(lower=1))
+    sample["log_tonnage"] = np.log(_series_or_default(sample, "tonnage", np.nan).clip(lower=1))
 
     variables = [
-        ("Log output", sample["log_q"]),
+        ("Log output", _series_or_default(sample, "log_q", np.nan)),
         ("Log revenue proxy (q_total_index)", sample["log_revenue_proxy"]),
         ("Log tonnage", sample["log_tonnage"]),
-        ("Crew size", sample["crew_count"]),
-        ("Voyage duration", sample["duration_days"]),
-        ("Captain experience", sample["captain_experience"]),
-        ("Captain skill (theta_hat)", sample["theta"]),
-        ("Agent capability (psi_hat)", sample["psi"]),
-        ("Scarcity", sample["scarcity"]),
-        ("Days since last success", sample["days_since_last_success"]),
-        ("Consecutive empty days", sample["consecutive_empty_days"]),
-        ("Patch residence time", sample["patch_residence_time"]),
-        ("Number of grounds visited", sample["n_grounds_visited"]),
+        ("Crew size", _series_or_default(sample, "crew_count", np.nan)),
+        ("Voyage duration", _series_or_default(sample, "duration_days", np.nan)),
+        ("Captain experience", _series_or_default(sample, "captain_experience", np.nan)),
+        ("Captain skill (theta_hat)", _series_or_default(sample, "theta", np.nan)),
+        ("Agent capability (psi_hat)", _series_or_default(sample, "psi", np.nan)),
+        ("Scarcity", _series_or_default(sample, "scarcity", np.nan)),
+        ("Days since last success", _series_or_default(sample, "days_since_last_success", np.nan)),
+        ("Consecutive empty days", _series_or_default(sample, "consecutive_empty_days", np.nan)),
+        ("Patch residence time", _series_or_default(sample, "patch_residence_time", np.nan)),
+        ("Number of grounds visited", _series_or_default(sample, "n_grounds_visited", np.nan)),
     ]
 
     rows = []

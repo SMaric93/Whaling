@@ -1,0 +1,13 @@
+# Abstract
+
+How do organizations create value beyond the individuals they employ? Using comprehensive voyage-level data from the American whaling industry (1807–1922), we study the relative contributions of individual captains and their managing agents to productivity. An additive AKM/KSS variance decomposition of log output establishes the first-order benchmark: persistent organizational (agent) heterogeneity accounts for 65.4% of explained variance, while persistent captain heterogeneity accounts for 33.0%, with negligible sorting (Corr(θ,ψ) = 0.02). These shares are robust to vessel controls and richer specifications, with organizational heterogeneity remaining at 60–70% throughout.
+
+The distinctive role of organizations, however, extends beyond mean productivity. Within-captain mover designs reveal that switching to a higher-capability agent systematically alters search geometry — reducing the Lévy exponent μ — even after absorbing route-by-time fixed effects and vessel controls. Event-study estimates show no pre-trends and a discrete shift at the switch point, confirming that behavioral governance is causally identified on a *separate outcome* from the production function.
+
+We trace the organizational transmission channel through training pipelines: mates who are subsequently promoted to captain perform significantly better (0.279 log points, t = 3.28) when they continue sailing with the agent under whom they originally served. This mate-to-captain transmission is the most direct evidence that organizations instill portable routines rather than merely providing hardware.
+
+The organizational effect is heterogeneous across the captain skill distribution. Conditional average treatment effects estimated via CausalForestDML show that weaker captains (Q1) benefit roughly 6× as much from high-capability organizations as stronger captains (Q4) (CATE = 1.194 vs. 0.201), with organizational capability compressing outcome variance by 76% for novices. This floor-raising pattern implies that organizational assignment has two margins: a mean-output margin that reallocates captains across heterogeneous organizational slots, and a risk-management margin in which stronger organizations are especially valuable for weaker captains. High-capability organizations reduce the zero-catch rate for novice captains from 82% to 16% — the most dramatic floor-raising effect in our data.
+
+**Keywords:** organizational heterogeneity, AKM variance decomposition, portable routines, training pipelines, floor-raising, matching, risk allocation, American whaling
+
+**JEL:** D22, J24, L23, M11, N61

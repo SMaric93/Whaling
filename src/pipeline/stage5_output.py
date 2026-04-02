@@ -38,6 +38,7 @@ def generate_main_tables_md() -> list:
     from src.analyses.paper_tables import (
         generate_table_1, generate_table_2, generate_table_3,
         generate_table_4, generate_table_5, generate_table_6,
+        generate_table_7, generate_table_8,
     )
     
     logger.info("Generating main text tables (MD)...")
@@ -46,11 +47,13 @@ def generate_main_tables_md() -> list:
     
     table_generators = [
         ('table_1.md', generate_table_1, "Summary Statistics"),
-        ('table_2.md', generate_table_2, "Information Control Through Ground Selection"),
-        ('table_3.md', generate_table_3, "Variance Decomposition"),
-        ('table_4.md', generate_table_4, "Search Geometry Movers Design"),
-        ('table_5.md', generate_table_5, "Complementarity by Ground Type"),
-        ('table_6.md', generate_table_6, "CATE of Agent Capability"),
+        ('table_2.md', generate_table_2, "AKM/KSS Variance Decomposition"),
+        ('table_3.md', generate_table_3, "Route-Choice Information (AMI)"),
+        ('table_4.md', generate_table_4, "Compass Effect: Mover Design"),
+        ('table_5.md', generate_table_5, "Event Study: Agent Switch"),
+        ('table_6.md', generate_table_6, "Mate-to-Captain Transmission"),
+        ('table_7.md', generate_table_7, "Floor-Raising: Heterogeneous Returns"),
+        ('table_8.md', generate_table_8, "Matching: Mean vs Risk Allocation"),
     ]
     
     for filename, generator, title in table_generators:
@@ -70,8 +73,10 @@ def generate_appendix_tables_md() -> list:
     """Generate appendix tables as markdown."""
     from src.analyses.paper_tables import (
         generate_table_a1, generate_table_a2, generate_table_a3,
-        generate_table_a4, generate_table_a5, generate_table_a6,
+        generate_table_a4, generate_table_a5, generate_table_a5b,
+        generate_table_a6,
         generate_table_a7, generate_table_a8, generate_table_a9,
+        generate_table_a10,
     )
     
     logger.info("Generating appendix tables (MD)...")
@@ -79,15 +84,17 @@ def generate_appendix_tables_md() -> list:
     tables_generated = []
     
     table_generators = [
-        ('table_a1.md', generate_table_a1, "Robustness of Variance Decomposition"),
-        ('table_a2.md', generate_table_a2, "Robustness to Scarcity Definitions"),
-        ('table_a3.md', generate_table_a3, "Event Study of Search Geometry"),
-        ('table_a4.md', generate_table_a4, "Variance Ratios by Treatment Cell"),
-        ('table_a5.md', generate_table_a5, "Quantile Regression Results"),
-        ('table_a6.md', generate_table_a6, "Optimal Foraging Stopping Rule"),
-        ('table_a7.md', generate_table_a7, "Weather and Mechanism Tests"),
-        ('table_a8.md', generate_table_a8, "Context-Dependent Matching"),
-        ('table_a9.md', generate_table_a9, "First Mate Effects"),
+        ('table_a1.md', generate_table_a1, "Robustness of AKM Decomposition"),
+        ('table_a2.md', generate_table_a2, "Raw Shannon Route-Choice"),
+        ('table_a3.md', generate_table_a3, "Supplementary: θ×ψ Interaction"),
+        ('table_a4.md', generate_table_a4, "Vessel Mover Design"),
+        ('table_a5.md', generate_table_a5, "Insurance Variance: Left-Tail"),
+        ('table_a5b.md', generate_table_a5b, "Quantile Regression: Floor Effect"),
+        ('table_a6.md', generate_table_a6, "Stopping Rule: Adaptive Threshold"),
+        ('table_a7.md', generate_table_a7, "Mechanism Tests: β₃ Differences"),
+        ('table_a8.md', generate_table_a8, "Context-Dependent Sorting"),
+        ('table_a9.md', generate_table_a9, "Scarcity Definition Robustness"),
+        ('table_a10.md', generate_table_a10, "Lay-System Coverage Audit"),
     ]
     
     for filename, generator, title in table_generators:

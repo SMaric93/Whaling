@@ -13,7 +13,7 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 
 from .._table_common import save_table_outputs
 from ..config import BuildContext
-from ..data import load_connected_sample
+from ..data import load_connected_sample, load_destination_ontology
 from ..utils.footnotes import standard_footnote
 
 
@@ -29,8 +29,7 @@ SPECIFICATIONS = [
 
 def _load_destination_sample(context: BuildContext) -> pd.DataFrame:
     connected = load_connected_sample(context).copy()
-    ontology_path = context.root / "data" / "derived" / "destination_ontology.parquet"
-    ontology = pd.read_parquet(ontology_path)
+    ontology = load_destination_ontology(context)
     keep = ["ground_or_route", "basin", "theater", "major_ground", "ground_for_model"]
     merged = connected.merge(ontology[keep].drop_duplicates("ground_or_route"), on="ground_or_route", how="left")
     merged["major_ground_model"] = merged["ground_for_model"].where(merged["ground_for_model"].notna(), merged["major_ground"])

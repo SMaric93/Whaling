@@ -352,14 +352,13 @@ class TestTableA9Generation:
         md = generate_table_a9()
         assert md.startswith("## Table A9"), f"Unexpected start: {md[:50]}"
 
-    def test_markdown_contains_both_panels(self):
+    def test_markdown_contains_scarcity_content(self):
+        """Table A9 is now scarcity definition robustness (flat list)."""
         from src.analyses.paper_tables import generate_table_a9_md
 
         md = generate_table_a9_md()
-        assert "Panel A" in md, "Missing Panel A"
-        assert "Panel B" in md, "Missing Panel B"
-        assert "Between-Mate Variance" in md
-        assert "Same Agent" in md
+        assert "Sparse State" in md, "Missing scarcity definition column"
+        assert "3-Year Lag" in md, "Missing baseline row"
 
     def test_latex_output_has_table_environment(self):
         from src.analyses.paper_tables import generate_table_a9_tex
@@ -369,12 +368,12 @@ class TestTableA9Generation:
         assert r"\end{table}" in tex
         assert r"\label{tab:tableA9}" in tex
 
-    def test_latex_contains_both_panels(self):
+    def test_latex_contains_scarcity_content(self):
+        """A9 LaTeX should have scarcity robustness content, not mate panels."""
         from src.analyses.paper_tables import generate_table_a9_tex
 
         tex = generate_table_a9_tex()
-        assert "Panel A" in tex
-        assert "Panel B" in tex
+        assert "Sparse State" in tex or "3-Year Lag" in tex
 
     def test_a9_in_all_markdown_tables(self):
         from src.analyses.paper_tables import generate_all_markdown_tables

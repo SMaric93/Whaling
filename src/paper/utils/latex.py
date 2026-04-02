@@ -20,12 +20,15 @@ def _escape_latex(value: object) -> str:
         "\\": r"\textbackslash{}",
         "&": r"\&",
         "%": r"\%",
+        "$": r"\$",
         "_": r"\_",
         "#": r"\#",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
     }
-    for src, dest in replacements.items():
-        text = text.replace(src, dest)
-    return text
+    return "".join(replacements.get(char, char) for char in text)
 
 
 def _is_blank(value: object) -> bool:
@@ -33,15 +36,12 @@ def _is_blank(value: object) -> bool:
         return True
     if isinstance(value, (list, tuple, set, dict)):
         return len(value) == 0
-    try:
-        return bool(pd.isna(value))
-    except TypeError:
-        pass
-    except ValueError:
-        return False
     if isinstance(value, str):
         return not value.strip()
-    return False
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def _format_value(value: object) -> str:
@@ -83,6 +83,25 @@ def _column_alignment(df: pd.DataFrame, columns: list[str]) -> str:
     return "".join(align) or "l"
 
 
+def _non_blank_columns(
+    frame: pd.DataFrame,
+    *,
+    excluded: set[str],
+    fallback_column: str | None = None,
+) -> list[str]:
+    columns = [
+        column
+        for column in frame.columns
+        if column not in excluded
+        and frame[column].apply(lambda value: not _is_blank(value)).any()
+    ]
+    if columns:
+        return columns
+    if fallback_column and fallback_column in frame.columns:
+        return [fallback_column]
+    return list(frame.columns[:1])
+
+
 def _render_tabular(df: pd.DataFrame, *, columns: list[str]) -> list[str]:
     align = _column_alignment(df, columns)
     lines = [
@@ -107,31 +126,24 @@ def write_simple_table_tex(path: Path, title: str, rows: list[dict] | pd.DataFra
         r"\documentclass{article}",
         r"\usepackage[margin=1in]{geometry}",
         r"\begin{document}",
-        f"\\section*{{{title}}}",
+        f"\\section*{{{_escape_latex(title)}}}",
     ]
 
     if "panel" in frame.columns and frame["panel"].nunique(dropna=True) > 1:
         for panel in frame["panel"].dropna().unique():
             subset = frame[frame["panel"] == panel].copy()
-            columns = [
-                column
-                for column in subset.columns
-                if column not in {"panel", "note"} and subset[column].apply(lambda value: not _is_blank(value)).any()
-            ]
-            if not columns:
-                columns = ["row_label"] if "row_label" in subset.columns else list(subset.columns[:1])
+            columns = _non_blank_columns(
+                subset,
+                excluded={"panel", "note"},
+                fallback_column="row_label",
+            )
             out.append(f"\\subsection*{{{_escape_latex(panel)}}}")
             out.extend(_render_tabular(subset, columns=columns))
             out.append("")
     else:
-        columns = [
-            column
-            for column in frame.columns
-            if column != "note" and frame[column].apply(lambda value: not _is_blank(value)).any()
-        ]
-        if not columns:
-            columns = list(frame.columns[:1])
+        columns = _non_blank_columns(frame, excluded={"note"})
         out.extend(_render_tabular(frame, columns=columns))
 
+    path.parent.mkdir(parents=True, exist_ok=True)
     out += [r"\end{document}"]
     path.write_text("\n".join(out) + "\n", encoding="utf-8")

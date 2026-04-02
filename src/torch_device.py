@@ -8,7 +8,7 @@ share the same device-selection and CPU fallback behavior.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 
 def _prepare_torch_env() -> None:
@@ -21,17 +21,27 @@ def _prepare_torch_env() -> None:
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
+def _import_torch() -> Any | None:
+    _prepare_torch_env()
+    try:
+        import torch
+    except ImportError:
+        return None
+    return torch
+
+
+def _mps_is_available(torch: Any) -> bool:
+    return bool(
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    )
+
+
 def torch_is_available() -> bool:
     """Return True when PyTorch can be imported."""
-    try:
-        _prepare_torch_env()
-        import torch  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return _import_torch() is not None
 
 
-def resolve_torch_device(preferred: Optional[str] = None) -> str:
+def resolve_torch_device(preferred: str | None = None) -> str:
     """
     Resolve the best available PyTorch device.
 
@@ -44,15 +54,11 @@ def resolve_torch_device(preferred: Optional[str] = None) -> str:
     if requested == "auto":
         requested = ""
 
-    if not torch_is_available():
+    torch = _import_torch()
+    if torch is None:
         return "cpu"
 
-    _prepare_torch_env()
-    import torch
-
-    mps_available = bool(
-        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-    )
+    mps_available = _mps_is_available(torch)
     cuda_available = torch.cuda.is_available()
 
     if requested == "mps":
@@ -69,15 +75,16 @@ def resolve_torch_device(preferred: Optional[str] = None) -> str:
     return "cpu"
 
 
-def get_torch_device(preferred: Optional[str] = None):
+def get_torch_device(preferred: str | None = None) -> Any:
     """Return ``torch.device`` for the resolved runtime target."""
-    _prepare_torch_env()
-    import torch
+    torch = _import_torch()
+    if torch is None:
+        raise ImportError("PyTorch is required to construct a torch.device")
 
     return torch.device(resolve_torch_device(preferred))
 
 
-def get_torch_runtime_info(preferred: Optional[str] = None) -> dict[str, Any]:
+def get_torch_runtime_info(preferred: str | None = None) -> dict[str, Any]:
     """Describe the current PyTorch runtime and selected device."""
     info: dict[str, Any] = {
         "torch_available": False,
@@ -89,17 +96,13 @@ def get_torch_runtime_info(preferred: Optional[str] = None) -> dict[str, Any]:
         "float32_matmul_precision": None,
     }
 
-    try:
-        _prepare_torch_env()
-        import torch
-    except ImportError:
+    torch = _import_torch()
+    if torch is None:
         return info
 
     info["torch_available"] = True
     info["torch_version"] = getattr(torch, "__version__", "unknown")
-    info["mps_available"] = bool(
-        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-    )
+    info["mps_available"] = _mps_is_available(torch)
     info["cuda_available"] = torch.cuda.is_available()
     info["selected_device"] = resolve_torch_device(preferred)
     info["mps_fallback_enabled"] = (
@@ -113,7 +116,7 @@ def get_torch_runtime_info(preferred: Optional[str] = None) -> dict[str, Any]:
     return info
 
 
-def configure_torch_runtime(preferred: Optional[str] = None) -> dict[str, Any]:
+def configure_torch_runtime(preferred: str | None = None) -> dict[str, Any]:
     """
     Apply lightweight runtime tuning for the selected PyTorch backend.
 
@@ -124,8 +127,9 @@ def configure_torch_runtime(preferred: Optional[str] = None) -> dict[str, Any]:
     if not info["torch_available"]:
         return info
 
-    _prepare_torch_env()
-    import torch
+    torch = _import_torch()
+    if torch is None:
+        return info
 
     precision = os.environ.get("PYTORCH_FLOAT32_MATMUL_PRECISION", "high")
     if hasattr(torch, "set_float32_matmul_precision"):
@@ -138,6 +142,6 @@ def configure_torch_runtime(preferred: Optional[str] = None) -> dict[str, Any]:
     return info
 
 
-def tensor_to_numpy(tensor):
+def tensor_to_numpy(tensor: Any) -> Any:
     """Detach a tensor and move it back to CPU NumPy."""
     return tensor.detach().to("cpu").numpy()

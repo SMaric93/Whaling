@@ -14,6 +14,7 @@ from ..data import (
     load_action_dataset,
     load_akm_variance_decomposition,
     load_connected_sample,
+    load_destination_ontology,
     load_ground_quality,
     load_next_round_output,
     load_patch_sample,
@@ -202,7 +203,7 @@ def _table_a01(context: BuildContext):
 
 
 def _table_a02(context: BuildContext):
-    ontology = pd.read_parquet(context.root / "data" / "derived" / "destination_ontology.parquet")
+    ontology = load_destination_ontology(context)
     rows = [
         {"panel": "Panel A", "row_label": "Unique raw ground/route strings", "value": int(ontology["ground_or_route"].nunique())},
         {"panel": "Panel A", "row_label": "Unique basins", "value": int(ontology["basin"].nunique())},
