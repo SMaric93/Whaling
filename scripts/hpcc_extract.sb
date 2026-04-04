@@ -192,7 +192,8 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
 done
 
 echo "  Waiting for all servers to initialize..."
-ALL_READY=1
+WORKING_GPUS=0
+WORKING_GPU_IDS=""
 for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     port=$((BASE_PORT + gpu_id))
     SERVER_READY=0
@@ -200,6 +201,8 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
         if curl -s "http://localhost:${port}/v1/models" 2>/dev/null | grep -q "Qwen"; then
             echo "  ✓ GPU ${gpu_id} ready (${i}s)"
             SERVER_READY=1
+            WORKING_GPUS=$((WORKING_GPUS + 1))
+            WORKING_GPU_IDS="${WORKING_GPU_IDS} ${gpu_id}"
             break
         fi
         if ! kill -0 ${VLLM_PIDS[$gpu_id]} 2>/dev/null; then
@@ -209,17 +212,21 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
         sleep 1
     done
     if [ $SERVER_READY -eq 0 ]; then
-        ALL_READY=0
+        echo "  ⚠ GPU ${gpu_id} failed — continuing without it"
+        # Kill the failed process if still running
+        kill ${VLLM_PIDS[$gpu_id]} 2>/dev/null || true
     fi
 done
 
-if [ $ALL_READY -eq 0 ]; then
-    echo "ERROR: Not all servers started. Cleaning up..."
+if [ $WORKING_GPUS -eq 0 ]; then
+    echo "ERROR: No GPU servers started. Aborting."
     for pid in "${VLLM_PIDS[@]}"; do kill $pid 2>/dev/null; done
     exit 1
 fi
 
-echo "  All ${NUM_GPUS} servers ready!"
+# Override NUM_GPUS to reflect only working GPUs
+NUM_GPUS=$WORKING_GPUS
+echo "  ${WORKING_GPUS} of $(echo ${VLLM_PIDS[@]} | wc -w) servers ready (GPUs:${WORKING_GPU_IDS})"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 4: Extraction Pipeline

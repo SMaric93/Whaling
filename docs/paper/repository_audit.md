@@ -5,20 +5,26 @@
 - `src/analyses/exposure_and_proxy_tests.py`
 - `src/analyses/ground_selection_test.py`
 - `src/analyses/insurance_variance_test.py`
+- `src/analyses/referee_response_tests.py`
 - `src/analyses/run_all.py`
 - `src/analyses/run_full_baseline_loo_eb.py`
 - `src/compass/run_compass_from_aowl.py`
+- `src/minor_revision/run_all.py`
 - `src/ml/run_all.py`
 - `src/next_round/portability_tests.py`
 - `src/next_round/rational_exit_tests.py`
 - `src/next_round/run_all.py`
+- `src/pipeline/_runner.py`
 - `src/pipeline/runner.py`
+- `src/post_connectivity/rerun_types.py`
+- `src/post_connectivity/run_all.py`
 - `src/reinforcement/run_all.py`
 - `src/reinforcement/test1_map_compass.py`
 - `src/reinforcement/test2_decomposition.py`
 - `src/reinforcement/test3_stopping_rule.py`
 - `src/reinforcement/test4_variance_compression.py`
 - `src/reinforcement/test5_submodularity.py`
+- `src/revision_2026/pipeline_tests.py`
 
 ## Key paper inputs currently wired
 - `data/final/analysis_voyage_augmented.parquet`

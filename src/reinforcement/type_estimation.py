@@ -179,7 +179,8 @@ def cross_fit_time_split(
 
     df = df.copy()
     median_year = df[year_col].median()
-    logger.info("Time-split cross-fitting at median year = %.0f", median_year)
+    median_year_str = f"{float(median_year):.0f}" if pd.notna(median_year) else "N/A"
+    logger.info("Time-split cross-fitting at median year = %s", median_year_str)
 
     df["_fold"] = (df[year_col] >= median_year).astype(int)
 
@@ -213,10 +214,12 @@ def cross_fit_time_split(
     # Coverage stats
     n_theta = df["theta_heldout"].notna().sum()
     n_psi = df["psi_heldout"].notna().sum()
+    pct_theta = 100 * n_theta / len(df) if len(df) > 0 else 0.0
+    pct_psi = 100 * n_psi / len(df) if len(df) > 0 else 0.0
     logger.info(
         "Cross-fitted coverage: theta=%d (%.1f%%), psi=%d (%.1f%%)",
-        n_theta, 100 * n_theta / len(df),
-        n_psi, 100 * n_psi / len(df),
+        n_theta, pct_theta,
+        n_psi, pct_psi,
     )
 
     df = df.drop(columns=["_fold"])

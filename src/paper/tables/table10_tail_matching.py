@@ -121,7 +121,11 @@ def _fit_matching_surface(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray] |
     clean = df.dropna(subset=["q_total_index", "theta", "psi", "captain_id", "agent_id"]).copy()
     if clean.empty:
         return None, None
-    clean["scarcity"] = _numeric(clean.get("scarcity"), clean.index).fillna(_numeric(clean.get("scarcity"), clean.index).median())
+    scarcity_raw = _numeric(clean.get("scarcity"), clean.index)
+    scarcity_median = scarcity_raw.median()
+    if pd.isna(scarcity_median):
+        scarcity_median = 0.0
+    clean["scarcity"] = scarcity_raw.fillna(scarcity_median)
     X = np.column_stack(
         [
             np.ones(len(clean)),
@@ -133,6 +137,11 @@ def _fit_matching_surface(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray] |
         ]
     )
     y = clean["q_total_index"].to_numpy(dtype=float)
+    # Guard against NaN/inf in feature matrix
+    finite_mask = np.isfinite(X).all(axis=1) & np.isfinite(y)
+    if finite_mask.sum() < X.shape[1] + 1:
+        return None, None
+    X, y, clean = X[finite_mask], y[finite_mask], clean.iloc[finite_mask.nonzero()[0]]
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
     return clean, beta
 

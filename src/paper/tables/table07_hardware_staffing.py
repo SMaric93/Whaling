@@ -194,7 +194,9 @@ def _panel_c(action: pd.DataFrame, connected: pd.DataFrame) -> list[dict]:
             df[col] = _numeric(df[col], df.index)
     transit = _numeric(df.get("transit_flag"), df.index).fillna(0) > 0
     homebound = _numeric(df.get("homebound_flag"), df.index).fillna(0) > 0
-    straight_open_ocean = transit & df["move_length"].gt(df["move_length"].median()) & df["turn_angle"].abs().lt(20)
+    move_length = _numeric(df.get("move_length"), df.index)
+    turn_angle = _numeric(df.get("turn_angle"), df.index)
+    straight_open_ocean = transit & move_length.gt(move_length.median()) & turn_angle.abs().lt(20)
 
     rows = []
     for row_label, mask in [
