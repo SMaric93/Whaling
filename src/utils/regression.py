@@ -55,8 +55,11 @@ def cluster_robust_se(
     # Bread
     bread = np.dot(x, x)
 
-    # Cluster-robust variance with small-sample correction
-    correction = (G / (G - 1)) * ((n - 1) / (n - 1))
+    # Cluster-robust variance with small-sample HC1 correction
+    # k=1 for this single-regressor API; for multi-regressor see
+    # src.reinforcement.utils.cluster_se which handles k > 1.
+    k = 1
+    correction = (G / (G - 1)) * ((n - 1) / (n - k))
     var_beta = correction * meat / (bread**2)
 
     return np.sqrt(max(0, var_beta))

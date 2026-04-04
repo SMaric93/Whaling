@@ -1,0 +1,56 @@
+# Revision 2026 Tests — Configuration
+# =====================================================================
+
+# Year bounds for the analysis sample
+min_year: 1780
+max_year: 1930
+
+# Minimum voyage requirements
+min_captain_voyages: 1
+min_agent_voyages: 1
+
+# Pre-period / OOS cutoff (used for split-sample psi_hat)
+oos_cutoff_year: 1870
+
+# Trimming
+output_trim_lower_pct: 0.5
+output_trim_upper_pct: 99.5
+
+# Near-zero threshold: voyages at or below this percentile of q_total_index
+# are classified as "near-zero" in addition to strict zeros
+near_zero_percentile: 5
+
+# Quantiles for quantile regression step
+quantile_taus: [0.10, 0.25, 0.50, 0.75, 0.90]
+
+# Number of captain-skill bins for floor-raising tests
+n_skill_bins: 4  # quartiles
+
+# Low-skill indicator: captains in bottom this fraction of theta_hat
+low_skill_fraction: 0.25
+
+# Event study window
+event_window: 3
+event_min_pre: 2
+event_min_post: 2
+
+# Separate-sample effect construction
+# Use exact LOO (re-estimate entire AKM excluding each captain)
+# rather than the analytic leverage approximation
+use_exact_loo: true
+# Number of threads for exact LOO AKM re-estimation
+n_loo_workers: 8
+
+# Clustering
+primary_cluster: captain_id
+secondary_cluster: agent_id
+
+# Random seed
+random_seed: 42
+
+# Figure settings
+figure_dpi: 300
+figure_format: png
+
+# Output directory
+output_dir: outputs/revision_2026

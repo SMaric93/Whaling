@@ -7,6 +7,13 @@ from scipy import stats
 from src.reinforcement.utils import absorb_fixed_effects, cluster_se
 
 
+def numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
+    """Coerce a series to numeric, returning NaN-filled series if input is None."""
+    if series is None:
+        return pd.Series(np.nan, index=index, dtype=float)
+    return pd.to_numeric(series, errors="coerce")
+
+
 def normal_pvalue(coef: float, se: float) -> float:
     if not np.isfinite(coef) or not np.isfinite(se) or se <= 0:
         return np.nan
@@ -23,6 +30,10 @@ def clustered_ols(
 ) -> dict[str, object]:
     fe_cols = fe_cols or []
     required = [outcome, cluster_col] + regressors + fe_cols
+    # If any required column is missing, return the empty-result sentinel
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        return {"coef": {}, "se": {}, "p": {}, "n_obs": 0, "r_squared": np.nan}
     clean = df.dropna(subset=required).copy()
     if clean.empty:
         return {"coef": {}, "se": {}, "p": {}, "n_obs": 0, "r_squared": np.nan}

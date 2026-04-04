@@ -14,15 +14,9 @@ from .._table_common import save_table_outputs
 from ..config import BuildContext
 from ..data import load_action_dataset, load_connected_sample, load_state_dataset
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols, normal_pvalue
+from ..utils.inference import clustered_ols, normal_pvalue, numeric as _numeric
 
 BARREN_THRESHOLD = 7
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _merge_voyage_info(df: pd.DataFrame, connected: pd.DataFrame) -> pd.DataFrame:
@@ -149,6 +143,11 @@ def _panel_a(state_df: pd.DataFrame, connected: pd.DataFrame) -> tuple[list[dict
 
 
 def _prepare_switch_voyages(connected: pd.DataFrame) -> pd.DataFrame:
+    # Ensure required AKM columns exist (filled with NaN if missing)
+    for required in ["theta", "psi", "scarcity"]:
+        if required not in connected.columns:
+            connected = connected.copy()
+            connected[required] = np.nan
     voyages = connected[
         [
             "voyage_id",
@@ -310,8 +309,11 @@ def _panel_c(action: pd.DataFrame, connected: pd.DataFrame, labeled_states: pd.D
         active = _numeric(df.get("active_search_flag"), df.index).fillna(0) > 0
         df["barren_state"] = active & _numeric(df.get("consecutive_empty_days"), df.index).ge(BARREN_THRESHOLD)
 
-    barren_rates = df[df["barren_state"]].groupby("voyage_id")["exit_patch_next"].mean().rename("policy_rate")
-    overall_rates = df.groupby("voyage_id")["exit_patch_next"].mean().rename("overall_rate")
+    barren_rates_col = "exit_patch_next" if "exit_patch_next" in df.columns else None
+    if barren_rates_col is None:
+        return []
+    barren_rates = df[df["barren_state"]].groupby("voyage_id")[barren_rates_col].mean().rename("policy_rate")
+    overall_rates = df.groupby("voyage_id")[barren_rates_col].mean().rename("overall_rate")
     voyage_rates = overall_rates.to_frame().join(barren_rates, how="left").reset_index()
     voyage_rates["policy_rate"] = voyage_rates["policy_rate"].fillna(voyage_rates["overall_rate"])
 

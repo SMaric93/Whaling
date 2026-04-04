@@ -19,6 +19,7 @@ hmmlearn>=0.3.0
 networkx>=3.0
 matplotlib>=3.7.0
 statsmodels>=0.14.0
+tqdm>=4.60.0
 beautifulsoup4>=4.12.0
 pdfplumber>=0.11.0
 rapidocr-onnxruntime>=1.2.0

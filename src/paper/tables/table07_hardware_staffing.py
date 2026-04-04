@@ -7,15 +7,9 @@ from .._table_common import save_table_outputs
 from ..config import BuildContext
 from ..data import load_action_dataset, load_connected_sample, load_survival_dataset
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols
+from ..utils.inference import clustered_ols, numeric as _numeric
 
 NEG_SIGNAL_THRESHOLD = 7
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _spec_controls() -> list[tuple[str, list[str]]]:

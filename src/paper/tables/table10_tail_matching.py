@@ -8,14 +8,8 @@ from .._table_common import save_table_outputs
 from ..config import BuildContext
 from ..data import infer_basin, load_action_dataset, load_connected_sample
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols
+from ..utils.inference import clustered_ols, numeric as _numeric
 from ..utils.risk import expected_shortfall_proxy, lower_tail_reference
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _prepare_sample(connected: pd.DataFrame, action: pd.DataFrame) -> pd.DataFrame:
@@ -27,6 +21,10 @@ def _prepare_sample(connected: pd.DataFrame, action: pd.DataFrame) -> pd.DataFra
         else pd.DataFrame(columns=["voyage_id", "max_consecutive_empty_days"])
     )
     df = connected.merge(dry_spells, on="voyage_id", how="left")
+    # Ensure required AKM columns exist (filled with NaN if missing)
+    for required in ["theta", "psi", "scarcity"]:
+        if required not in df.columns:
+            df[required] = np.nan
     for col in ["q_total_index", "theta", "psi", "scarcity", "captain_experience", "max_consecutive_empty_days", "year_out"]:
         if col in df.columns:
             df[col] = _numeric(df[col], df.index)
@@ -105,8 +103,9 @@ def _panel_b(df: pd.DataFrame) -> list[dict]:
         )
 
     add_row("overall corr(theta, psi)", df)
-    for tercile, sample in scarcity_sample.groupby("scarcity_tercile", observed=True):
-        add_row(f"by scarcity tercile: {tercile}", sample)
+    if "scarcity_tercile" in scarcity_sample.columns:
+        for tercile, sample in scarcity_sample.groupby("scarcity_tercile", observed=True):
+            add_row(f"by scarcity tercile: {tercile}", sample)
     for era, sample in df.groupby("era", observed=True):
         add_row(f"by era: {era}", sample)
     for port, sample in df.groupby("home_port", observed=True):
@@ -118,8 +117,10 @@ def _panel_b(df: pd.DataFrame) -> list[dict]:
     return rows
 
 
-def _fit_matching_surface(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray]:
+def _fit_matching_surface(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray] | tuple[None, None]:
     clean = df.dropna(subset=["q_total_index", "theta", "psi", "captain_id", "agent_id"]).copy()
+    if clean.empty:
+        return None, None
     clean["scarcity"] = _numeric(clean.get("scarcity"), clean.index).fillna(_numeric(clean.get("scarcity"), clean.index).median())
     X = np.column_stack(
         [
@@ -242,7 +243,10 @@ def _supported_assignment_candidates(clean: pd.DataFrame, beta: np.ndarray) -> d
 
 
 def _panel_c(df: pd.DataFrame) -> list[dict]:
-    clean, beta = _fit_matching_surface(df)
+    result = _fit_matching_surface(df)
+    if result[0] is None:
+        return []
+    clean, beta = result
     theta = clean["theta"].to_numpy(dtype=float)
     psi = clean["psi"].to_numpy(dtype=float)
     scarcity = clean["scarcity"].to_numpy(dtype=float)

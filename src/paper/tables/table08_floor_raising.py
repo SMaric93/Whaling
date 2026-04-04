@@ -7,14 +7,8 @@ from .._table_common import save_table_outputs
 from ..config import BuildContext
 from ..data import load_action_dataset, load_connected_sample
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols, normal_pvalue
+from ..utils.inference import clustered_ols, normal_pvalue, numeric as _numeric
 from ..utils.risk import expected_shortfall_proxy, lower_tail_reference
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _prepare_sample(connected: pd.DataFrame, action: pd.DataFrame) -> pd.DataFrame:

@@ -77,6 +77,11 @@ def _format_value(value: object) -> str:
 
 
 def write_csv(path: Path, rows: Iterable[dict] | pd.DataFrame) -> None:
+    # If we have a DataFrame with columns, preserve its schema even if empty
+    if isinstance(rows, pd.DataFrame) and not rows.columns.empty:
+        ensure_dirs(path.parent)
+        rows.to_csv(path, index=False)
+        return
     rows = _rows_from_input(rows)
     if not rows:
         rows = [{"note": "no rows generated"}]
@@ -88,17 +93,22 @@ def write_csv(path: Path, rows: Iterable[dict] | pd.DataFrame) -> None:
 
 
 def write_md_preview(path: Path, rows: list[dict] | pd.DataFrame, title: str) -> None:
-    rows = _rows_from_input(rows)
-    if not rows:
-        rows = [{"note": "no rows generated"}]
-    cols = list(rows[0].keys())
+    # Preserve column schema from empty DataFrames
+    if isinstance(rows, pd.DataFrame) and rows.empty and not rows.columns.empty:
+        cols = list(rows.columns)
+        row_list: list[dict] = []
+    else:
+        row_list = _rows_from_input(rows) if not isinstance(rows, list) else rows
+        if not row_list:
+            row_list = [{"note": "no rows generated"}]
+        cols = list(row_list[0].keys())
     lines = [
         f"# {title}",
         "",
         "| " + " | ".join(_escape_markdown_cell(col) for col in cols) + " |",
         "|" + "|".join([" --- "] * len(cols)) + "|",
     ]
-    for r in rows[:30]:
+    for r in row_list[:30]:
         lines.append(
             "| "
             + " | ".join(

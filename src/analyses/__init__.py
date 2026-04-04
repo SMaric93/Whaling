@@ -21,7 +21,7 @@ from . import output_generator
 from . import counterfactual_simulations
 from . import counterfactual_robustness
 from . import counterfactual_suite
-from . import paper_tables
+
 from . import akm_tail_plots
 from . import vessel_mover_analysis
 from . import insurance_variance_test

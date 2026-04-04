@@ -45,6 +45,19 @@ def _save_figure(context: BuildContext, name: str, fig: plt.Figure, memo: str) -
     return {"name": name, "figure": str(path), "memo": str(memo_path)}
 
 
+def _empty_figure(context: BuildContext, name: str, title: str) -> dict[str, str]:
+    """Create a placeholder figure when data is unavailable."""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.text(0.5, 0.5, "No data available — run the full pipeline",
+            ha="center", va="center", fontsize=14, color=COLORS["neutral"])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    ax.set_title(title)
+    memo = f"# {name}\n\nPlaceholder: upstream data not yet generated.\n"
+    return _save_figure(context, name, fig, memo)
+
+
 def _memo(name: str, sample: str, unit: str, interpretation: str, caution: str, notes: list[str]) -> str:
     return (
         f"# {name}\n\n"
@@ -103,7 +116,11 @@ def _fig01(context: BuildContext):
 
 def _fig02(context: BuildContext):
     table = _load_table(context, "table03_hierarchical_map")
+    if table.empty or "model" not in table.columns or "captain_marginal_contribution" not in table.columns:
+        return _empty_figure(context, "fig02_map_hierarchy", "Hierarchical Destination Contributions")
     subset = table[(table["model"] == "multinomial_logit") & (table["specification"] == "4. + captain + agent")].copy()
+    if subset.empty:
+        return _empty_figure(context, "fig02_map_hierarchy", "Hierarchical Destination Contributions")
     x = np.arange(len(subset))
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.bar(x - 0.17, subset["captain_marginal_contribution"], width=0.34, label="Captain contribution", color=COLORS["captain"])
@@ -131,6 +148,8 @@ def _fig02(context: BuildContext):
 def _fig03(context: BuildContext):
     table = _load_table(context, "table04_stopping")
     subset = table[table["panel"] == "Panel B"].copy()
+    if subset.empty or "coefficient" not in subset.columns:
+        return _empty_figure(context, "fig03_stopping_margins", "Stopping Margins Under Alternative Negative Signals")
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.bar(np.arange(len(subset)), subset["coefficient"], color=COLORS["risk"])
     ax.axhline(0, color="black", linewidth=0.8)
@@ -156,9 +175,10 @@ def _fig03(context: BuildContext):
 def _fig04(context: BuildContext):
     state_df = load_state_dataset(context)
     connected = load_connected_sample(context)
-    from ..tables.table05_state_switching import _prepare_state_transitions
 
     transitions, _ = _prepare_state_transitions(state_df, connected)
+    if transitions.empty or "state_label" not in transitions.columns or "next_state" not in transitions.columns:
+        return _empty_figure(context, "fig04_state_transitions", "State-Transition Heatmap")
     matrix = (
         transitions.groupby(["state_label", "next_state"])
         .size()
@@ -192,6 +212,8 @@ def _fig04(context: BuildContext):
 def _fig05(context: BuildContext):
     table = _load_table(context, "table05_state_switching")
     subset = table[table["panel"] == "Panel C"].copy()
+    if subset.empty or "coefficient" not in subset.columns:
+        return _empty_figure(context, "fig05_switch_event_study", "Switch Event Study")
     x = np.arange(len(subset))
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     ax.errorbar(x, subset["coefficient"], yerr=subset["std_error"].fillna(0), marker="o", color=COLORS["captain"], linewidth=2)
@@ -218,6 +240,8 @@ def _fig05(context: BuildContext):
 def _fig06(context: BuildContext):
     table = _load_table(context, "table06_search_execution_exitvalue")
     subset = table[table["panel"] == "Panel B"].copy()
+    if subset.empty or "simple_difference" not in subset.columns:
+        return _empty_figure(context, "fig06_exit_value", "Value of Exit from Barren Search")
     methods = ["simple_difference", "matched_estimate", "ipw_estimate", "doubly_robust_estimate"]
     x = np.arange(len(subset))
     width = 0.18
@@ -248,6 +272,8 @@ def _fig06(context: BuildContext):
 def _fig07(context: BuildContext):
     table = _load_table(context, "table06_search_execution_exitvalue")
     subset = table[table["panel"] == "Panel A"].copy()
+    if subset.empty or "psi_hat_coefficient" not in subset.columns:
+        return _empty_figure(context, "fig07_search_vs_execution", "Search Versus Execution Decomposition")
     x = np.arange(len(subset))
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.bar(x - 0.18, subset["psi_hat_coefficient"], width=0.36, label="psi_hat", color=COLORS["agent"])
@@ -275,6 +301,8 @@ def _fig07(context: BuildContext):
 def _fig08(context: BuildContext):
     table = _load_table(context, "table08_floor_raising")
     subset = table[(table["panel"] == "Panel B") & table["row_label"].isin(["novice", "expert", "low theta", "high theta"])].copy()
+    if subset.empty or "marginal_effect_of_psi" not in subset.columns:
+        return _empty_figure(context, "fig08_floor_raising", "Downside-Risk Effects by Experience and Skill")
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.bar(np.arange(len(subset)), subset["marginal_effect_of_psi"], color=COLORS["risk"])
     ax.axhline(0, color="black", linewidth=0.8)
@@ -300,6 +328,8 @@ def _fig08(context: BuildContext):
 def _fig09(context: BuildContext):
     table = _load_table(context, "table10_tail_matching")
     subset = table[(table["panel"] == "Panel A") & table["row_label"].isin(["mean output: theta × psi", "bottom-decile risk: theta × psi", "expected shortfall: theta × psi", "long dry spell: theta × psi"])].copy()
+    if subset.empty or "coefficient" not in subset.columns:
+        return _empty_figure(context, "fig09_tail_submodularity", "Tail Submodularity and Risk Interactions")
     fig, ax = plt.subplots(figsize=(8.5, 4.5))
     ax.bar(np.arange(len(subset)), subset["coefficient"], color=[COLORS["captain"], COLORS["risk"], COLORS["risk"], COLORS["risk"]])
     ax.axhline(0, color="black", linewidth=0.8)
@@ -325,6 +355,8 @@ def _fig09(context: BuildContext):
 def _fig10(context: BuildContext):
     table = _load_table(context, "table10_tail_matching")
     subset = table[(table["panel"] == "Panel C") & table["row_label"].isin(["observed assignment", "PAM", "AAM/NAM", "constrained mean-optimal", "constrained CVaR-optimal", "constrained certainty-equivalent-optimal"])].copy()
+    if subset.empty or "mean_output" not in subset.columns:
+        return _empty_figure(context, "fig10_matching_welfare", "Matching Welfare Under Mean and Risk Objectives")
     x = np.arange(len(subset))
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.bar(x - 0.18, subset["mean_output"], width=0.36, label="Mean output", color=COLORS["captain"])

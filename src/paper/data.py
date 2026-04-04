@@ -53,8 +53,14 @@ def load_universe(context: BuildContext) -> pd.DataFrame:
 def load_connected_sample(context: BuildContext) -> pd.DataFrame:
     cached = context.root / "outputs" / "datasets" / "ml" / "outcome_ml_dataset.parquet"
     if cached.exists():
-        return _dedupe_voyages(pd.read_parquet(cached))
-    return _dedupe_voyages(build_analysis_panel(require_akm=True))
+        df = _dedupe_voyages(pd.read_parquet(cached))
+    else:
+        df = _dedupe_voyages(build_analysis_panel(require_akm=True))
+    # Guarantee AKM columns exist for downstream table builders
+    for col in ["theta", "psi", "scarcity"]:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df
 
 
 def load_action_dataset(context: BuildContext) -> pd.DataFrame:

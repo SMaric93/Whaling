@@ -23,21 +23,15 @@ def test_stage4_analysis_api_compat():
     assert callable(run_crew_mechanism_analysis)
 
 
-def test_stage5_paper_table_api_compat():
-    from src.analyses.paper_tables import (
-        generate_all_latex_tables,
-        generate_all_markdown_tables,
-        generate_table_1,
-        generate_table_a1,
-        generate_table_a9,
-    )
+def test_stage5_paper_layer_api_compat():
+    """Verify the data-driven paper layer is importable."""
+    from src.paper.config import BuildContext, MAIN_TABLES, APPENDIX_TABLES
 
-    assert generate_table_1().startswith("## Table 1")
-    assert generate_table_a1().startswith("## Table A1")
-    assert generate_table_a9().startswith("## Table A9")
-    assert "\\documentclass" in generate_all_latex_tables()
-    assert "# Maps of the Sea: Publication Tables" in generate_all_markdown_tables()
+    assert len(MAIN_TABLES) >= 10
+    assert len(APPENDIX_TABLES) >= 15
 
+    context = BuildContext()
+    assert context.root.exists()
 
 
 def test_weather_runner_accepts_default_df():

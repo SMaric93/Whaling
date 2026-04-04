@@ -17,15 +17,9 @@ from ..data import (
     load_test3_stopping_output,
 )
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols
+from ..utils.inference import clustered_ols, numeric as _numeric
 
 NEG_SIGNAL_THRESHOLD = 3
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _connected_merge(connected: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -370,13 +364,15 @@ def build(context: BuildContext):
     exported = load_test3_stopping_output(context)
     rational_exit = load_rational_exit_output(context)
 
-    frame = pd.DataFrame(
+    all_rows = (
         _panel_a_from_logit(exported, survival)
         + _panel_a_lpm(survival, connected)
         + _panel_b(action, connected, ground_quality)
         + _panel_c(action, connected, rational_exit)
         + _panel_d(survival, connected)
     )
+    expected_cols = ["panel", "row_label", "model", "coefficient", "std_error", "p_value", "marginal_effect", "n_obs", "note"]
+    frame = pd.DataFrame(all_rows, columns=expected_cols) if all_rows else pd.DataFrame(columns=expected_cols)
 
     memo = standard_footnote(
         sample="Panel A uses the exported patch-day stopping-rule sample and the connected voyage sample; Panels B and C use the action dataset's day-level search observations.",

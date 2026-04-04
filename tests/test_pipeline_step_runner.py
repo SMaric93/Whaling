@@ -144,24 +144,19 @@ def test_run_output_continues_after_individual_failures(monkeypatch):
     from src.pipeline import stage5_output
 
     monkeypatch.setattr(stage5_output, "ensure_output_dirs", lambda: None)
-    monkeypatch.setattr(stage5_output, "generate_main_tables_md", lambda: ["table_1.md"])
     monkeypatch.setattr(
         stage5_output,
-        "generate_appendix_tables_md",
-        lambda: _raise_runtime_error("appendix failed"),
+        "generate_paper_outputs",
+        lambda: _raise_runtime_error("paper build failed"),
     )
-    monkeypatch.setattr(stage5_output, "generate_all_tables_tex", lambda: "all_tables.tex")
-    monkeypatch.setattr(stage5_output, "generate_all_tables_md", lambda: "all_tables.md")
     monkeypatch.setattr(stage5_output, "copy_figures_to_paper", lambda: 3)
     monkeypatch.setattr(stage5_output, "generate_robustness_summary", lambda: None)
     monkeypatch.setattr(stage5_output, "generate_mechanism_summary", lambda: None)
 
     results = stage5_output.run_output(include_figures=True)
 
-    assert results["main_tables_md"] == ["table_1.md"]
-    assert results["appendix_tables_md"] == []
-    assert results["all_tables_tex"] == "all_tables.tex"
-    assert results["all_tables_md"] == "all_tables.md"
+    # Paper outputs should remain at default because the step failed
+    assert results["paper_outputs"] is None
     assert results["figures_copied"] == 3
 
 

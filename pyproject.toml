@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whaling-pipeline"
-version = "0.626"
+version = "0.636"
 description = "Venture Capital of the Sea: Whaling Data Pipeline"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,7 +18,9 @@ dependencies = [
     "pyproj>=3.4.0",
     "hmmlearn>=0.3.0",
     "networkx>=3.0",
-    "matplotlib>=3.7.0"
+    "matplotlib>=3.7.0",
+    "tqdm>=4.60.0",
+    "statsmodels>=0.14.0"
 ]
 
 [project.optional-dependencies]
@@ -31,10 +33,22 @@ linkage = [
 torch = [
     "torch>=2.0.0"
 ]
+wsl = [
+    "beautifulsoup4>=4.12.0",
+    "pdfplumber>=0.11.0",
+    "rapidocr-onnxruntime>=1.2.0",
+    "pypdfium2>=5.6.0",
+    "rapidfuzz>=3.14.0"
+]
 all = [
     "pytest>=7.0.0",
     "recordlinkage>=0.15",
-    "torch>=2.0.0"
+    "torch>=2.0.0",
+    "beautifulsoup4>=4.12.0",
+    "pdfplumber>=0.11.0",
+    "rapidocr-onnxruntime>=1.2.0",
+    "pypdfium2>=5.6.0",
+    "rapidfuzz>=3.14.0"
 ]
 
 [project.scripts]

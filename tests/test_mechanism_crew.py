@@ -339,54 +339,8 @@ class TestMateToCapitanCareerPath:
         assert result == {}, "Expected empty dict for insufficient promoted mates"
 
 
-# ---------------------------------------------------------------------------
-# Tests: Table A9 generation
-# ---------------------------------------------------------------------------
-
-class TestTableA9Generation:
-    """Test paper table generators for Table A9."""
-
-    def test_markdown_output_starts_with_header(self):
-        from src.analyses.paper_tables import generate_table_a9
-
-        md = generate_table_a9()
-        assert md.startswith("## Table A9"), f"Unexpected start: {md[:50]}"
-
-    def test_markdown_contains_scarcity_content(self):
-        """Table A9 is now scarcity definition robustness (flat list)."""
-        from src.analyses.paper_tables import generate_table_a9_md
-
-        md = generate_table_a9_md()
-        assert "Sparse State" in md, "Missing scarcity definition column"
-        assert "3-Year Lag" in md, "Missing baseline row"
-
-    def test_latex_output_has_table_environment(self):
-        from src.analyses.paper_tables import generate_table_a9_tex
-
-        tex = generate_table_a9_tex()
-        assert r"\begin{table}" in tex
-        assert r"\end{table}" in tex
-        assert r"\label{tab:tableA9}" in tex
-
-    def test_latex_contains_scarcity_content(self):
-        """A9 LaTeX should have scarcity robustness content, not mate panels."""
-        from src.analyses.paper_tables import generate_table_a9_tex
-
-        tex = generate_table_a9_tex()
-        assert "Sparse State" in tex or "3-Year Lag" in tex
-
-    def test_a9_in_all_markdown_tables(self):
-        from src.analyses.paper_tables import generate_all_markdown_tables
-
-        all_md = generate_all_markdown_tables()
-        assert "Table A9" in all_md
-
-    def test_a9_in_all_latex_tables(self):
-        from src.analyses.paper_tables import generate_all_latex_tables
-
-        all_tex = generate_all_latex_tables()
-        assert "tableA9" in all_tex
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

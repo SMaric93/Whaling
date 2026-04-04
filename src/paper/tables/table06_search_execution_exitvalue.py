@@ -8,15 +8,9 @@ from .._table_common import save_table_outputs
 from ..config import BuildContext
 from ..data import load_action_dataset, load_connected_sample, load_next_round_output
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols
+from ..utils.inference import clustered_ols, numeric as _numeric
 
 BARREN_THRESHOLD = 7
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _merge_voyage_info(df: pd.DataFrame, connected: pd.DataFrame) -> pd.DataFrame:
@@ -67,7 +61,8 @@ def _panel_a(action: pd.DataFrame, connected: pd.DataFrame) -> list[dict]:
     df = _merge_voyage_info(action.copy(), connected)
     active = _numeric(df.get("active_search_flag"), df.index).fillna(0) > 0
     encounter_any = df.get("encounter", pd.Series("NoEnc", index=df.index)).fillna("NoEnc").astype(str).ne("NoEnc")
-    strike_any = (_numeric(df.get("n_tried"), df.index).fillna(0) > 0) | encounter_any & df["encounter"].astype(str).eq("Strike")
+    encounter_col = df.get("encounter", pd.Series("NoEnc", index=df.index)).fillna("NoEnc").astype(str)
+    strike_any = (_numeric(df.get("n_tried"), df.index).fillna(0) > 0) | (encounter_any & encounter_col.eq("Strike"))
     capture_any = _numeric(df.get("n_struck"), df.index).fillna(0) > 0
 
     rows = [
@@ -132,7 +127,8 @@ def _compute_forward_metrics(action: pd.DataFrame, connected: pd.DataFrame) -> p
     df["exit_patch_next"] = _numeric(df.get("exit_patch_next"), df.index)
     df["n_struck_num"] = _numeric(df.get("n_struck"), df.index).fillna(0)
     df["active_search_flag"] = _numeric(df.get("active_search_flag"), df.index).fillna(0)
-    df = df.sort_values(["voyage_id", "voyage_day", "obs_date"]).copy()
+    sort_cols = [c for c in ["voyage_id", "voyage_day", "obs_date"] if c in df.columns]
+    df = df.sort_values(sort_cols).copy() if sort_cols else df.copy()
     df["encounter_any"] = df.get("encounter", pd.Series("NoEnc", index=df.index)).fillna("NoEnc").astype(str).ne("NoEnc").astype(float)
     df["exploitation_day"] = df["encounter_any"]
 

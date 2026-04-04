@@ -32,14 +32,8 @@ from ..tables.table10_tail_matching import (
     _supported_assignment_candidates,
 )
 from ..utils.footnotes import standard_footnote
-from ..utils.inference import clustered_ols, normal_pvalue
+from ..utils.inference import clustered_ols, normal_pvalue, numeric as _numeric
 from ..utils.risk import expected_shortfall_proxy, lower_tail_reference
-
-
-def _numeric(series: pd.Series | None, index: pd.Index | None = None) -> pd.Series:
-    if series is None:
-        return pd.Series(np.nan, index=index, dtype=float)
-    return pd.to_numeric(series, errors="coerce")
 
 
 def _safe_read_csv(path: Path) -> pd.DataFrame:
@@ -239,19 +233,23 @@ def _table_a02(context: BuildContext):
 def _table_a03(context: BuildContext):
     universe = load_universe(context)
     connected = load_connected_sample(context)
-    network = pd.read_parquet(context.root / "outputs" / "datasets" / "ml" / "network_dataset.parquet")
+    network_path = context.root / "outputs" / "datasets" / "ml" / "network_dataset.parquet"
+    network = pd.read_parquet(network_path) if network_path.exists() else pd.DataFrame()
     rows = [
         {"panel": "Panel A", "row_label": "Universe voyages", "value": int(len(universe))},
         {"panel": "Panel A", "row_label": "Connected-set voyages", "value": int(len(connected))},
-        {"panel": "Panel A", "row_label": "Connected-set share (%)", "value": float(len(connected) / len(universe) * 100)},
+        {"panel": "Panel A", "row_label": "Connected-set share (%)", "value": float(len(connected) / len(universe) * 100) if len(universe) > 0 else np.nan},
         {"panel": "Panel A", "row_label": "Connected captains", "value": int(connected["captain_id"].nunique())},
         {"panel": "Panel A", "row_label": "Connected agents", "value": int(connected["agent_id"].nunique())},
-        {"panel": "Panel B", "row_label": "Captain-agent edges", "value": int(len(network))},
-        {"panel": "Panel B", "row_label": "Unique captains in network", "value": int(network["person_id_1"].nunique())},
-        {"panel": "Panel B", "row_label": "Unique agents in network", "value": int(network["person_id_2"].nunique())},
-        {"panel": "Panel B", "row_label": "Mean exposure count", "value": float(_numeric(network["exposure_count"]).mean())},
-        {"panel": "Panel B", "row_label": "Early-career edge share (%)", "value": float(_numeric(network["early_career_flag"]).mean() * 100)},
     ]
+    if not network.empty:
+        rows.extend([
+            {"panel": "Panel B", "row_label": "Captain-agent edges", "value": int(len(network))},
+            {"panel": "Panel B", "row_label": "Unique captains in network", "value": int(network["person_id_1"].nunique())},
+            {"panel": "Panel B", "row_label": "Unique agents in network", "value": int(network["person_id_2"].nunique())},
+            {"panel": "Panel B", "row_label": "Mean exposure count", "value": float(_numeric(network["exposure_count"]).mean())},
+            {"panel": "Panel B", "row_label": "Early-career edge share (%)", "value": float(_numeric(network["early_career_flag"]).mean() * 100)},
+        ])
     frame = pd.DataFrame(rows)
     return _save_appendix(
         name="tableA03_connected_set",
@@ -351,6 +349,10 @@ def _table_a04(context: BuildContext):
 
 def _table_a05(context: BuildContext):
     connected = load_connected_sample(context).copy()
+    # Ensure required AKM columns exist (filled with NaN if missing)
+    for required in ["theta", "psi", "scarcity"]:
+        if required not in connected.columns:
+            connected[required] = np.nan
     action = load_action_dataset(context)
     rows: list[dict] = []
     rows.extend(
@@ -538,7 +540,9 @@ def _table_a07(context: BuildContext):
 
 
 def _table_a08(context: BuildContext):
-    action = load_action_dataset(context).sort_values(["voyage_id", "obs_date"]).copy()
+    action = load_action_dataset(context)
+    sort_cols = [c for c in ["voyage_id", "obs_date"] if c in action.columns]
+    action = action.sort_values(sort_cols).copy() if sort_cols else action.copy()
     shipped = load_patch_sample(context)
     rows: list[dict] = []
     if not shipped.empty:
@@ -888,7 +892,10 @@ def _table_a14(context: BuildContext):
 
 
 def _bootstrap_matching_rows(df: pd.DataFrame) -> list[dict]:
-    clean, beta = _fit_matching_surface(df)
+    result = _fit_matching_surface(df)
+    if result[0] is None:
+        return []
+    clean, beta = result
     theta = clean["theta"].to_numpy(dtype=float)
     psi = clean["psi"].to_numpy(dtype=float)
     scarcity = clean["scarcity"].fillna(clean["scarcity"].median()).to_numpy(dtype=float)
@@ -1051,12 +1058,16 @@ def _table_a17(context: BuildContext):
 def _table_a18(context: BuildContext):
     universe = load_universe(context)
     archival = load_next_round_output(context, "archival_mechanisms.csv")
-    rows = [
-        {"panel": "Panel A", "row_label": "Voyages with labor data", "share_pct": float(universe["has_labor_data"].fillna(False).mean() * 100)},
-        {"panel": "Panel A", "row_label": "Voyages with route data", "share_pct": float(universe["has_route_data"].fillna(False).mean() * 100)},
-        {"panel": "Panel A", "row_label": "Voyages with VQI data", "share_pct": float(universe["has_vqi_data"].fillna(False).mean() * 100)},
-        {"panel": "Panel A", "row_label": "Voyages with logbook data", "share_pct": float(universe["has_logbook_data"].fillna(False).mean() * 100)},
+    coverage_fields = [
+        ("has_labor_data", "Voyages with labor data"),
+        ("has_route_data", "Voyages with route data"),
+        ("has_vqi_data", "Voyages with VQI data"),
+        ("has_logbook_data", "Voyages with logbook data"),
     ]
+    rows = []
+    for col, label in coverage_fields:
+        series = universe[col].fillna(False) if col in universe.columns else pd.Series(False, index=universe.index)
+        rows.append({"panel": "Panel A", "row_label": label, "share_pct": float(series.mean() * 100)})
     if not archival.empty:
         for _, row in archival.iterrows():
             checked_columns = row.get("checked_columns")
