@@ -1,15 +1,15 @@
 #!/bin/bash --login
 ###############################################################################
-# WSL Extraction Pipeline — MSU ICER HPCC (8×NVIDIA H200)
+# WSL Extraction Pipeline — MSU ICER HPCC (8×NVIDIA L40S)
 #
 # Fully self-contained SLURM script for extracting vessel events from
 # 3,703 Whalemen's Shipping List (1843-1914) PDFs.
 #
 # Architecture:
 #   8× vLLM instances (1 per GPU) → 8× throughput
-#   PDF → render image → vLLM VLM (Qwen3-VL-32B) → structured JSON → JSONL
+#   PDF → render image → vLLM VLM (Qwen3-VL-32B-AWQ) → structured JSON → JSONL
 #
-# Each H200 runs an independent vLLM server with the 32B model (~64 GB bf16).
+# Each L40S runs an independent vLLM server with the 32B AWQ model (~18 GB).
 # Python workers distribute pages round-robin across all 8 servers.
 # No OCR needed — the VLM reads the page images directly.
 #
@@ -22,18 +22,18 @@
 # Resume after interruption:
 #   sbatch scripts/hpcc_extract.sb   # auto-resumes from checkpoint
 #
-# Estimated runtime: ~20-40 minutes for full corpus on 8×H200.
-#                    ~1-2 minutes for a single-year test run.
+# Estimated runtime: ~30-60 minutes for full corpus on 8×L40S.
+#                    ~2-3 minutes for a single-year test run.
 ###############################################################################
 
 #SBATCH --job-name=wsl_extract
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=h200:4
+#SBATCH --gpus-per-node=4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=512G
-#SBATCH --time=168:00:00
-#SBATCH --partition=general-long-gpu
+#SBATCH --mem=256G
+#SBATCH --time=4:00:00
+#SBATCH --partition=general-short
 #SBATCH --output=%x-%j.SLURMout
 #SBATCH --error=%x-%j.SLURMerr
 #SBATCH --mail-type=END,FAIL
@@ -71,28 +71,35 @@ done
 # ═══════════════════════════════════════════════════════════════════════════════
 PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 CONDA_ENV_NAME="wsl_extract"
-MODEL_ID="Qwen/Qwen3-VL-32B-Instruct"
+MODEL_ID="QuantTrio/Qwen3-VL-32B-Instruct-AWQ"
 HF_CACHE="/mnt/research/CEO_Complementarities/maricste/hf_cache"
-OUTPUT_DIR="${PROJECT_DIR}/data/extracted"
+FINAL_OUTPUT_DIR="/mnt/research/CEO_Complementarities/maricste/data/extracted"
+SCRATCH_BASE="/mnt/scratch/maricste/wsl_extract_${SLURM_JOB_ID:-local}"
+OUTPUT_DIR="${SCRATCH_BASE}"
 PDF_DIR="/mnt/home/maricste/PDFs"
-NUM_GPUS=4
-BASE_PORT=8100   # Servers on ports 8100-8107
+# Auto-detect GPU count from allocated resources
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+NUM_GPUS=${NUM_GPUS:-4}
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
+BASE_PORT=8100
 
 export HF_HOME="${HF_CACHE}"
 export HF_HUB_CACHE="${HF_CACHE}"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
-export TMPDIR="${HF_CACHE}/tmp"
-export XDG_CACHE_HOME="${HF_CACHE}"
+export TMPDIR="${SCRATCH_BASE}/tmp"
+export TEMP="${SCRATCH_BASE}/tmp"
+export TMP="${SCRATCH_BASE}/tmp"
+export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
 export HF_HUB_DISABLE_XET=1
 
 mkdir -p "${OUTPUT_DIR}" "${TMPDIR}"
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  WSL Extraction Pipeline — 8×H200 Parallel                 ║"
+echo "║  WSL Extraction Pipeline — AWQ 4-bit                       ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Job ID:  ${SLURM_JOB_ID:-local}"
 echo "║  Node:    $(hostname)"
-echo "║  GPUs:    ${NUM_GPUS}×H200"
+echo "║  GPUs:    ${NUM_GPUS}× ${GPU_NAME}"
 echo "║  Model:   ${MODEL_ID}"
 if [ -n "${TEST_YEAR}" ]; then
 echo "║  Mode:    TEST (year ${TEST_YEAR} only)"
@@ -121,8 +128,13 @@ fi
 conda activate "${CONDA_ENV_NAME}"
 
 # Install packages (idempotent — pip skips already-installed)
+# Use scratch for pip/conda caches to avoid home quota issues
+export PIP_CACHE_DIR="${SCRATCH_BASE}/.pip_cache"
+export CONDA_PKGS_DIRS="${SCRATCH_BASE}/.conda_pkgs"
+mkdir -p "${PIP_CACHE_DIR}" "${CONDA_PKGS_DIRS}"
+
 pip install --quiet --upgrade pip
-pip install --quiet \
+pip install --quiet --cache-dir "${PIP_CACHE_DIR}" \
     "vllm>=0.8.0" \
     "transformers>=4.52.0" \
     "qwen-vl-utils" \
@@ -142,8 +154,8 @@ echo "  GPUs:    $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) de
 echo ""
 echo "[2/4] Downloading model (if not cached)..."
 
-# Research space is at group quota (50GB). Use local_dir download to home instead.
-MODEL_LOCAL_DIR="${PROJECT_DIR}/models/Qwen3-VL-32B-Instruct"
+# Download model to scratch (fast local I/O, no quota issues)
+MODEL_LOCAL_DIR="${SCRATCH_BASE}/models/Qwen3-VL-32B-Instruct-AWQ"
 mkdir -p "${MODEL_LOCAL_DIR}"
 
 python3 -c "
@@ -178,14 +190,14 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
 
     CUDA_VISIBLE_DEVICES=${gpu_id} python3 -m vllm.entrypoints.openai.api_server \
         --model "${MODEL_LOCAL_DIR}" \
-        --dtype bfloat16 \
+        --quantization awq \
+        --dtype float16 \
         --max-model-len 16384 \
         --max-num-seqs 4 \
-        --gpu-memory-utilization 0.92 \
+        --gpu-memory-utilization 0.90 \
         --port ${port} \
         --trust-remote-code \
         --served-model-name "${MODEL_ID}" \
-        --no-enable-log-requests \
         --limit-mm-per-prompt '{"image": 1}' \
         > "${OUTPUT_DIR}/vllm_gpu${gpu_id}.log" 2>&1 &
     VLLM_PIDS+=($!)
@@ -234,7 +246,7 @@ echo "  ${WORKING_GPUS} of $(echo ${VLLM_PIDS[@]} | wc -w) servers ready (GPUs:$
 echo ""
 echo "[4/4] Running extraction across $(find ${PDF_DIR} -name '*.pdf' | wc -l) PDFs..."
 
-export NUM_GPUS BASE_PORT MODEL_ID OUTPUT_DIR PDF_DIR TEST_YEAR
+export NUM_GPUS BASE_PORT MODEL_ID OUTPUT_DIR PDF_DIR TEST_YEAR FINAL_OUTPUT_DIR
 
 srun -c "${SLURM_CPUS_PER_TASK:-32}" python3 - << 'PYEOF'
 """
@@ -262,9 +274,11 @@ VLLM_URLS = [f"http://localhost:{BASE_PORT + i}/v1/chat/completions"
              for i in range(NUM_GPUS)]
 MODEL_ID = os.environ["MODEL_ID"]
 OUTPUT_DIR = Path(os.environ["OUTPUT_DIR"])
+FINAL_DIR = Path(os.environ.get("FINAL_OUTPUT_DIR", str(OUTPUT_DIR)))
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
 PDF_DIR = Path(os.environ["PDF_DIR"])
-JSONL_FILE = OUTPUT_DIR / "wsl_events.jsonl"
-PROGRESS_FILE = OUTPUT_DIR / "wsl_progress.json"
+JSONL_FILE = FINAL_DIR / "wsl_events.jsonl"
+PROGRESS_FILE = FINAL_DIR / "wsl_progress.json"
 RENDER_DPI = 200
 MAX_TOKENS = 8192
 
@@ -276,13 +290,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(OUTPUT_DIR / "extraction.log", mode="a"),
+        logging.FileHandler(FINAL_DIR / "extraction.log", mode="a"),
     ],
 )
 log = logging.getLogger("wsl")
 
 # ─── Extraction Prompt ─────────────────────────────────────────────────────
-PROMPT = """/no_think
+PROMPT = """
 You are an expert reader of the Whalemen's Shipping List (WSL), a weekly newspaper published in New Bedford, Massachusetts (1843-1914). Each page may contain MULTIPLE section types. Extract ALL information into the structured JSON format below.
 
 ## SECTION 1: VESSEL EVENTS
@@ -345,18 +359,10 @@ Return ONLY valid JSON. No explanation."""
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 def img_to_base64(img_array):
-    """Convert numpy array to enhanced JPEG base64 for VLM input."""
-    pil = Image.fromarray(img_array)
-    # Convert to grayscale for consistent enhancement
-    if pil.mode != 'L':
-        pil = pil.convert('L')
-    # Enhance contrast and sharpness for faded historical newsprint
-    pil = ImageEnhance.Contrast(pil).enhance(1.5)
-    pil = ImageEnhance.Sharpness(pil).enhance(2.0)
-    # Convert back to RGB for JPEG encoding
-    pil = pil.convert('RGB')
+    """Convert numpy array to JPEG base64 for VLM input (raw RGB, no enhancement)."""
+    pil = Image.fromarray(img_array).convert('RGB')
     buf = BytesIO()
-    pil.save(buf, format="JPEG", quality=88)
+    pil.save(buf, format="JPEG", quality=95)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
@@ -364,19 +370,29 @@ def vllm_vision(url, img_b64, prompt, max_tokens=MAX_TOKENS):
     """Call vLLM and return (text, logprobs_list)."""
     payload = {
         "model": MODEL_ID,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-            {"type": "text", "text": prompt},
-        ]}],
+        "messages": [
+            {"role": "system", "content": "You are an expert reader of historical maritime documents. Output strict JSON only."},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ]},
+        ],
         "max_tokens": max_tokens,
         "temperature": 0.0,
-        "frequency_penalty": 1.5,
+        "top_p": 1.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
         "logprobs": True,
     }
     for attempt in range(3):
         try:
-            r = requests.post(url, json=payload, timeout=300)
-            r.raise_for_status()
+            r = requests.post(url, json=payload, timeout=600)
+            if r.status_code != 200:
+                log.error(f"vLLM {r.status_code} ({url}): {r.text[:500]}")
+                if attempt == 2:
+                    return "", []
+                time.sleep(2 ** attempt)
+                continue
             choice = r.json()["choices"][0]
             text = choice["message"]["content"]
             # Extract per-token logprobs
@@ -428,6 +444,11 @@ def normalize(e):
     if isinstance(lon, str):
         try: lon = float(lon)
         except: lon = None
+    # Validate coordinate ranges
+    if isinstance(lat, (int, float)) and not (-90 <= lat <= 90):
+        lat = None
+    if isinstance(lon, (int, float)) and not (-180 <= lon <= 180):
+        lon = None
     return {
         "vessel_name": (e.get("v") or "").strip(),
         "vessel_type": (e.get("t") or "").strip().lower() or None,
@@ -522,6 +543,7 @@ def process_page(args):
             "n_prices": len(raw_prices),
             "n_notices": len(raw_notices),
             "output_chars": len(raw),
+            "raw_llm_response": raw,
             "confidence": {
                 "mean": round(mean_conf, 4) if mean_conf is not None else None,
                 "min": round(min_conf, 4) if min_conf is not None else None,
@@ -578,7 +600,7 @@ def main():
     page_times = []
     pdf_events = {}
 
-    with ThreadPoolExecutor(max_workers=NUM_GPUS) as executor:
+    with ThreadPoolExecutor(max_workers=NUM_GPUS * 4) as executor:
         futures = {executor.submit(process_page, item): item for item in work_items}
 
         for future in as_completed(futures):
@@ -649,7 +671,7 @@ if __name__ == "__main__":
     main()
 PYEOF
 
-# ─── Cleanup ───────────────────────────────────────────────────────────────
+# ─── Shutdown vLLM servers first (free GPU memory for clean exit) ─────────
 echo ""
 echo "Shutting down all vLLM servers..."
 for pid in "${VLLM_PIDS[@]}"; do
@@ -658,10 +680,15 @@ done
 for pid in "${VLLM_PIDS[@]}"; do
     wait $pid 2>/dev/null || true
 done
+echo "  All servers stopped."
+
+# Results already written directly to research space — no copy needed
+echo "Results at: ${FINAL_OUTPUT_DIR}"
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  Job complete at $(date)"
-echo "║  Output: ${OUTPUT_DIR}/wsl_events.jsonl"
+echo "║  Scratch: ${OUTPUT_DIR}/wsl_events.jsonl"
+echo "║  Final:   ${FINAL_OUTPUT_DIR}/wsl_events.jsonl"
 echo "╚══════════════════════════════════════════════════════════════╝"
 
 # Print resource information (ICER best practice)
