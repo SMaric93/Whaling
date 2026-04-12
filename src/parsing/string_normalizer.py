@@ -72,6 +72,30 @@ def normalize_name(
     
     return result if result else None
 
+def map_normalize_name(series):
+    """Vectorized normalization via unique value caching."""
+    if series.empty:
+        return series
+    unique_vals = series.dropna().unique()
+    mapping = {val: normalize_name(val) for val in unique_vals}
+    return series.map(mapping)
+
+def map_normalize_vessel_name(series):
+    """Vectorized vessel normalization via unique value caching."""
+    if series.empty:
+        return series
+    unique_vals = series.dropna().unique()
+    mapping = {val: normalize_vessel_name(val) for val in unique_vals}
+    return series.map(mapping)
+
+def map_normalize_port_name(series):
+    """Vectorized port normalization via unique value caching."""
+    if series.empty:
+        return series
+    unique_vals = series.dropna().unique()
+    mapping = {val: normalize_port_name(val) for val in unique_vals}
+    return series.map(mapping)
+
 
 def normalize_vessel_name(name: Optional[str]) -> Optional[str]:
     """

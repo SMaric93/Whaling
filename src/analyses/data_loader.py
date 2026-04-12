@@ -25,6 +25,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 def load_voyage_data(
     config: Optional[SampleConfig] = None,
     use_climate_data: bool = False,
+    columns: Optional[list] = None,
 ) -> pd.DataFrame:
     """
     Load and prepare voyage data for analysis.
@@ -35,6 +36,8 @@ def load_voyage_data(
         Sample configuration. Uses DEFAULT_SAMPLE if not provided.
     use_climate_data : bool
         If True, load analysis_voyage_with_climate.parquet for R7-R9.
+    columns : list, optional
+        Only load these specific columns (plus required ones). Major I/O optimization.
         
     Returns
     -------
@@ -57,7 +60,22 @@ def load_voyage_data(
     else:
         data_path = DATA_DIR / "analysis_voyage.parquet"
     
-    df = pd.read_parquet(data_path)
+    # Fast paths for required filtering columns
+    required_cols = {"year_out", "captain_id", "agent_id", "q_total_index"}
+    if columns is not None:
+        # Some versions of parquet file might use the clean names
+        required_cols.update(["captain_name_clean", "agent_name_clean", "vessel_name_clean"])
+        cols_to_load = list(set(columns) | required_cols)
+        # Check available columns to avoid exceptions
+        try:
+            import pyarrow.parquet as pq
+            available = pq.read_schema(data_path).names
+            cols_to_load = [c for c in cols_to_load if c in available]
+        except Exception:
+            pass
+        df = pd.read_parquet(data_path, columns=cols_to_load)
+    else:
+        df = pd.read_parquet(data_path)
 
     # If the parquet has clean names but no hashed entity IDs,
     # rename to the canonical id columns expected downstream.

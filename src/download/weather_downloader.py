@@ -505,50 +505,50 @@ def compute_voyage_hurricane_exposure(
                     "is_hurricane": point["wind_kt"] >= 64,
                 })
     
-    # For each voyage, compute exposure during likely transit months
-    # Assume voyages depart and have highest Atlantic exposure in first 2-3 months
-    exposure_records = []
-    
-    for _, voyage in voyages.iterrows():
-        voyage_id = voyage.get("voyage_id")
-        year_out = voyage.get("year_out")
-        
-        if pd.isna(year_out):
-            exposure_records.append({
-                "voyage_id": voyage_id,
-                "hurricane_exposure_count": None,
-                "hurricane_corridor_intensity": None,
-            })
-            continue
-        
-        year_out = int(year_out)
-        
-        # Check months typical for Atlantic transit (assume departure in summer/fall)
-        # June-November is hurricane season
+    # Pre-aggregate hurricane stats by year for summer/fall months (June-November)
+    yearly_hurricane_stats = {}
+    for year in range(1850, 1931):
         exposure_count = 0
         max_intensity = 0
         unique_storms = set()
-        
-        for month in range(6, 12):  # June-November
-            key = (year_out, month)
+        for month in range(6, 12):
+            key = (year, month)
             if key in storm_by_year_month:
                 for storm_point in storm_by_year_month[key]:
                     unique_storms.add(storm_point["storm_id"])
                     if storm_point["wind_kt"] and storm_point["wind_kt"] > max_intensity:
                         max_intensity = storm_point["wind_kt"]
-        
-        exposure_records.append({
-            "voyage_id": voyage_id,
-            "hurricane_exposure_count": len(unique_storms),
-            "hurricane_corridor_intensity": max_intensity if max_intensity > 0 else None,
-        })
+        if unique_storms:
+            yearly_hurricane_stats[year] = {
+                "hurricane_exposure_count": len(unique_storms),
+                "hurricane_corridor_intensity": max_intensity,
+            }
+            
+    # Vectorized merge
+    exposure_records = []
     
-    df = pd.DataFrame(exposure_records)
+    def get_voyage_exposure(year_out):
+        if pd.isna(year_out):
+            return None, None
+        year_out = int(year_out)
+        stats = yearly_hurricane_stats.get(year_out, {})
+        return stats.get("hurricane_exposure_count", 0), stats.get("hurricane_corridor_intensity", 0)
+
+    stats_df = pd.DataFrame(
+        voyages["year_out"].apply(get_voyage_exposure).tolist(),
+        columns=["hurricane_exposure_count", "hurricane_corridor_intensity"]
+    )
     
-    n_with_exposure = (df["hurricane_exposure_count"] > 0).sum()
+    exposure_df = pd.DataFrame({
+        "voyage_id": voyages["voyage_id"],
+        "hurricane_exposure_count": stats_df["hurricane_exposure_count"],
+        "hurricane_corridor_intensity": stats_df["hurricane_corridor_intensity"],
+    })
+    
+    n_with_exposure = (exposure_df["hurricane_exposure_count"] > 0).sum()
     print(f"  {n_with_exposure:,} voyages with hurricane corridor exposure")
     
-    return df
+    return exposure_df
 
 
 # =============================================================================

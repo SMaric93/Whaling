@@ -78,7 +78,9 @@ PDF_DIR="/mnt/home/maricste/PDFs"
 NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 NUM_GPUS=${NUM_GPUS:-4}
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-BASE_PORT=8100
+# Derive unique port per job to avoid collisions when multiple jobs land on same node
+# Use last 4 digits of SLURM_JOB_ID mapped to a safe port range (8100-9999)
+BASE_PORT=$((8100 + (${SLURM_JOB_ID:-$$} % 1900)))
 
 # ─── Fix: point HF caches to persistent research space ─────────────────────
 export HF_HOME="${HF_CACHE}"
@@ -189,6 +191,37 @@ print(f'  Model ready at: {local_dir}')
 echo ""
 echo "[3/4] Starting ${NUM_GPUS} vLLM servers (staggered launch)..."
 
+# Dynamically adjust vLLM config based on GPU VRAM
+GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+GPU_MEM_MB=${GPU_MEM_MB:-0}
+echo "  GPU VRAM: ${GPU_MEM_MB} MB"
+
+if [ "${GPU_MEM_MB}" -lt 40000 ]; then
+    # V100S (32GB) — very tight fit
+    MAX_MODEL_LEN=4096
+    MAX_NUM_SEQS=2
+    GPU_MEM_UTIL=0.95
+    echo "  Config: V100S mode (max_model_len=${MAX_MODEL_LEN}, max_num_seqs=${MAX_NUM_SEQS})"
+elif [ "${GPU_MEM_MB}" -lt 50000 ]; then
+    # L40S (48GB) — tight: only ~3GB KV cache at 0.88, need smaller context
+    MAX_MODEL_LEN=8192
+    MAX_NUM_SEQS=4
+    GPU_MEM_UTIL=0.95
+    echo "  Config: L40S mode (max_model_len=${MAX_MODEL_LEN}, max_num_seqs=${MAX_NUM_SEQS})"
+elif [ "${GPU_MEM_MB}" -lt 90000 ]; then
+    # A100 (80GB) — plenty of room
+    MAX_MODEL_LEN=16384
+    MAX_NUM_SEQS=8
+    GPU_MEM_UTIL=0.90
+    echo "  Config: A100 mode (max_model_len=${MAX_MODEL_LEN}, max_num_seqs=${MAX_NUM_SEQS})"
+else
+    # H200 (141GB) — massive headroom
+    MAX_MODEL_LEN=16384
+    MAX_NUM_SEQS=16
+    GPU_MEM_UTIL=0.85
+    echo "  Config: H200 mode (max_model_len=${MAX_MODEL_LEN}, max_num_seqs=${MAX_NUM_SEQS})"
+fi
+
 VLLM_PIDS=()
 for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     port=$((BASE_PORT + gpu_id))
@@ -197,16 +230,15 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=${gpu_id} python3 -m vllm.entrypoints.openai.api_server \
         --model "${MODEL_LOCAL_DIR}" \
         --dtype auto \
-        --max-model-len 16384 \
-        --max-num-seqs 8 \
-        --gpu-memory-utilization 0.85 \
+        --max-model-len ${MAX_MODEL_LEN} \
+        --max-num-seqs ${MAX_NUM_SEQS} \
+        --gpu-memory-utilization ${GPU_MEM_UTIL} \
         --port ${port} \
         --trust-remote-code \
         --served-model-name "${MODEL_ID}" \
         --limit-mm-per-prompt '{"image": 1}' \
-        --async-scheduling \
         --mm-processor-cache-gb 0 \
-        > "${OUTPUT_DIR}/vllm_gpu${gpu_id}.log" 2>&1 &
+        > "${FINAL_OUTPUT_DIR}/vllm_gpu${gpu_id}_${SLURM_JOB_ID:-local}.log" 2>&1 &
     VLLM_PIDS+=($!)
 
     # Stagger launches to prevent GPU 0 race condition
@@ -310,10 +342,11 @@ else:
     PROGRESS_FILE = FINAL_DIR / "wsl_progress.json"
 
 RENDER_DPI = 100   # Down from 120 — fewer vision tokens per page
-MAX_TOKENS = 8192  # Keep full budget for 200+ event dense pages
+MAX_TOKENS = 4096  # Must be < max_model_len to leave room for prompt + image tokens
 
-# Worker pool: NUM_GPUS × 6 to saturate vLLM continuous batching
-WORKER_MULTIPLIER = 6
+# Worker pool: NUM_GPUS × multiplier to saturate vLLM continuous batching
+# On 1-GPU with max_num_seqs=4, 3 workers avoids excessive contention
+WORKER_MULTIPLIER = 3
 
 write_lock = threading.Lock()
 progress_lock = threading.Lock()
@@ -379,6 +412,14 @@ Return ONLY valid JSON. No explanation. No markdown."""
 
 # ─── Post-processing constants ─────────────────────────────────────────────
 VALID_EVENT_TYPES = {"dep", "arr", "spk", "rpt", "inp", "wrk"}
+EVENT_TYPE_MAP = {
+    "in port": "inp", "inport": "inp", "in_port": "inp",
+    "sailed": "dep", "sail": "dep", "departure": "dep", "departed": "dep",
+    "arrived": "arr", "arrival": "arr",
+    "spoken": "spk", "spk'd": "spk",
+    "reported": "rpt", "report": "rpt",
+    "wreck": "wrk", "wrecked": "wrk", "condemned": "wrk", "lost": "wrk",
+}
 VALID_VESSEL_TYPES = {"ship", "bark", "brig", "sch"}
 VESSEL_TYPE_MAP = {
     "bk": "bark", "brk": "bark", "bg": "brig", "schooner": "sch",
@@ -389,12 +430,21 @@ VESSEL_TYPE_SUFFIXES = [
     " bark", " bk", " ship", " brig", " sch",
 ]
 PORT_CORRECTIONS = {
-    "antucket": "Nantucket", "anticent": "Nantucket",
+    "antucket": "Nantucket", "anticent": "Nantucket", "nantkt": "Nantucket",
     "n bedford": "New Bedford", "n. bedford": "New Bedford",
-    "new bedfored": "New Bedford",
+    "new bedfored": "New Bedford", "nb": "New Bedford", "n b": "New Bedford",
     "n london": "New London", "n. london": "New London",
+    "s harbor": "Sag Harbor", "s. harbor": "Sag Harbor",
+    "greenpt": "Greenport", "p town": "Provincetown", "prov town": "Provincetown",
+    "new bedford": "New Bedford", "nantucket": "Nantucket", "new london": "New London",
+    "newport": "Newport", "mattapoisett": "Mattapoisett",
+    "holmes hole": "Holmes Hole", "holmes' hole": "Holmes Hole",
+    "olmes' hole": "Holmes Hole",
+    "fairhaven": "Fairhaven", "wareham": "Wareham",
+    "cold spring": "Cold Spring Harbor", "stonington": "Stonington",
+    "westport": "Westport", "mystic": "Mystic",
 }
-MONTH_RE = re.compile(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", re.IGNORECASE)
+MONTH_RE = re.compile(r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Mch)\b", re.IGNORECASE)
 COMPANY_RE = re.compile(r"(&| Co\b| Sons\b| Brothers\b| Bros\b)", re.IGNORECASE)
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
@@ -527,6 +577,10 @@ def vllm_vision(url, img_b64, prompt, max_tokens=MAX_TOKENS):
         "top_p": 1.0,
         "frequency_penalty": 0.0,
         "presence_penalty": 0.0,
+        # Disable Qwen3 thinking mode — forces direct JSON output without <think> blocks
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
     img_kb = len(img_b64) * 3 // 4 // 1024
     trace(f"VLLM_VISION_START url={url} img_kb={img_kb} max_tokens={max_tokens}")
@@ -705,7 +759,18 @@ def post_process(ev, issue_year=None):
     # ── Layer 4: Hard validation ──
     et = ev.get("event_type", "")
     if et and et not in VALID_EVENT_TYPES:
-        flags.append(f"invalid_event_type:{et}")
+        # Try normalization before flagging
+        normalized = EVENT_TYPE_MAP.get(et.lower())
+        if normalized:
+            ev["event_type"] = normalized
+        elif MONTH_RE.match(et):
+            # Date leaked into event_type field — rescue it
+            if not ev.get("date"):
+                ev["date"] = et
+            ev["event_type"] = "dep"  # Registry entries are typically departures
+            flags.append("date_in_event_type_corrected")
+        else:
+            flags.append(f"invalid_event_type:{et}")
 
     vt = ev.get("vessel_type")
     if vt and vt not in VALID_VESSEL_TYPES and vt != "steamer":
@@ -1003,7 +1068,8 @@ def process_page(args):
             "events": events,
             "n_events": len(events),
             "output_chars": len(raw),
-            "raw_llm_response": raw,
+            # Truncate raw LLM response to save space (full output in trace log)
+            "raw_llm_response": raw[:500] + f"... [{len(raw)} chars total]" if len(raw) > 500 else raw,
             "timing": {
                 "render_ms": round(render_ms, 1),
                 "encode_ms": round(enc_ms, 1),

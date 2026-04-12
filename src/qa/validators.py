@@ -13,8 +13,54 @@ import logging
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import re
 from config import VALIDATION_CONFIG
 from ml.anomaly_detection import compute_anomaly_scores
+
+def validate_schema_against_dictionary(df: pd.DataFrame, file_name: str) -> List[ValidationResult]:
+    """Validates that dataframe columns match those documented in data_dictionary.md."""
+    dict_path = Path(__file__).parent.parent.parent / "docs" / "data_dictionary.md"
+    if not dict_path.exists():
+        return []
+    
+    content = dict_path.read_text()
+    section_pattern = re.compile(rf"## {file_name}(.*?)(?:## |$)", re.DOTALL)
+    match = section_pattern.search(content)
+    if not match:
+        return []
+    
+    section_content = match.group(1)
+    var_pattern = re.compile(r"\|\s*`([a-zA-Z0-9_]+)`\s*\|")
+    expected_vars = set(var_pattern.findall(section_content))
+    
+    actual_vars = set(df.columns)
+    missing_in_df = expected_vars - actual_vars
+    missing_in_dict = actual_vars - expected_vars
+    
+    results = []
+    if missing_in_df:
+        results.append(ValidationResult(
+            check_name="schema_missing_in_df",
+            passed=False,
+            message=f"Missing {len(missing_in_df)} documented columns: {list(missing_in_df)[:5]}",
+            affected_count=len(missing_in_df),
+            details={"missing": list(missing_in_df)}
+        ))
+    if missing_in_dict:
+        results.append(ValidationResult(
+            check_name="schema_missing_in_dictionary",
+            passed=True,  # Warning only
+            message=f"Found {len(missing_in_dict)} undocumented columns: {list(missing_in_dict)[:5]}...",
+            affected_count=len(missing_in_dict),
+            details={"undocumented": list(missing_in_dict)}
+        ))
+    if not missing_in_df and not missing_in_dict:
+        results.append(ValidationResult(
+            check_name="schema_match",
+            passed=True,
+            message="Dataframe schema perfectly matches data_dictionary.md"
+        ))
+    return results
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -254,6 +300,8 @@ def validate_analysis_captain_year(df: pd.DataFrame) -> List[ValidationResult]:
             "whaling_voyages_count",
         ],
     )
+    
+    results.extend(validate_schema_against_dictionary(df, "analysis_captain_year.parquet"))
     
     return results
 

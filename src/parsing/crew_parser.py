@@ -223,18 +223,14 @@ class CrewParser:
             crew_name = self._extract_field(raw, "crew_name")
         
         parsed["crew_name_raw"] = crew_name
-        parsed["crew_name_clean"] = crew_name.apply(normalize_name)
+        parsed["crew_name_clean"] = map_normalize_name(crew_name)
         
         # Extract rank
-        parsed["rank"] = self._extract_field(raw, "rank").apply(
-            lambda x: str(x).upper().strip() if pd.notna(x) else None
-        )
+        parsed["rank"] = self._extract_field(raw, "rank").astype(str).str.upper().str.strip().replace("NAN", None)
         
         # Extract status
         status = self._extract_field(raw, "status")
-        parsed["crew_status"] = status.apply(
-            lambda x: str(x).upper().strip() if pd.notna(x) else None
-        )
+        parsed["crew_status"] = status.astype(str).str.upper().str.strip().replace("NAN", None)
         
         # Identify desertion
         parsed["is_deserted"] = status.apply(self._identify_desertion)
@@ -244,20 +240,14 @@ class CrewParser:
         age = self._extract_field(raw, "age")
         parsed["age"] = pd.to_numeric(age, errors="coerce")
         
-        parsed["birthplace"] = self._extract_field(raw, "birthplace").apply(
-            lambda x: str(x).upper().strip() if pd.notna(x) else None
-        )
+        parsed["birthplace"] = self._extract_field(raw, "birthplace").astype(str).str.upper().str.strip().replace("NAN", None)
         
-        parsed["residence"] = self._extract_field(raw, "residence").apply(
-            lambda x: str(x).upper().strip() if pd.notna(x) else None
-        )
+        parsed["residence"] = self._extract_field(raw, "residence").astype(str).str.upper().str.strip().replace("NAN", None)
         
         height = self._extract_field(raw, "height")
         parsed["height"] = height  # Keep as-is for now
         
-        parsed["complexion"] = self._extract_field(raw, "complexion").apply(
-            lambda x: str(x).upper().strip() if pd.notna(x) else None
-        )
+        parsed["complexion"] = self._extract_field(raw, "complexion").astype(str).str.upper().str.strip().replace("NAN", None)
         
         # Generate crew member row IDs
         parsed["crew_member_row_id"] = [

@@ -27,6 +27,15 @@ from collections import Counter
 
 VALID_EVENT_TYPES = {"dep", "arr", "spk", "rpt", "inp", "wrk"}
 
+EVENT_TYPE_MAP = {
+    "in port": "inp", "inport": "inp", "in_port": "inp",
+    "sailed": "dep", "sail": "dep", "departure": "dep", "departed": "dep",
+    "arrived": "arr", "arrival": "arr",
+    "spoken": "spk", "spk'd": "spk",
+    "reported": "rpt", "report": "rpt",
+    "wreck": "wrk", "wrecked": "wrk", "condemned": "wrk", "lost": "wrk",
+}
+
 VALID_VESSEL_TYPES = {"ship", "bark", "brig", "sch"}
 
 VESSEL_TYPE_MAP = {
@@ -47,13 +56,24 @@ VESSEL_TYPE_SUFFIXES = [
 
 # Known OCR port corrections (extend as needed)
 PORT_CORRECTIONS = {
+    # OCR errors
     "antucket": "Nantucket",
     "anticent": "Nantucket",
+    "nantkt": "Nantucket",
     "n bedford": "New Bedford",
     "n. bedford": "New Bedford",
     "new bedfored": "New Bedford",
+    "nb": "New Bedford",
+    "n b": "New Bedford",
     "n london": "New London",
     "n. london": "New London",
+    # Port abbreviations (from string_normalizer.py)
+    "s harbor": "Sag Harbor",
+    "s. harbor": "Sag Harbor",
+    "greenpt": "Greenport",
+    "p town": "Provincetown",
+    "prov town": "Provincetown",
+    # Standard whaling ports (canonical forms)
     "edgartown": "Edgartown",
     "sag harbor": "Sag Harbor",
     "cold spring": "Cold Spring",
@@ -66,10 +86,23 @@ PORT_CORRECTIONS = {
     "bristol": "Bristol",
     "mystic": "Mystic",
     "greenport": "Greenport",
+    "new bedford": "New Bedford",
+    "nantucket": "Nantucket",
+    "new london": "New London",
+    "newport": "Newport",
+    "mattapoisett": "Mattapoisett",
+    "holmes hole": "Holmes Hole",
+    "holmes' hole": "Holmes Hole",
+    "olmes' hole": "Holmes Hole",
+    "london": "New London",
+    "dover": "Edgartown",
+    "sandwich": "Sandwich",
+    "marion": "Marion",
+    "fall river": "Fall River",
 }
 
 MONTH_PATTERN = re.compile(
-    r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", re.IGNORECASE
+    r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Mch)\b", re.IGNORECASE
 )
 
 COMPANY_INDICATORS = re.compile(
@@ -281,7 +314,18 @@ def validate_hard(ev):
     # Event type must be valid
     et = ev.get("event_type", "")
     if et and et not in VALID_EVENT_TYPES:
-        flags.append(f"invalid_event_type:{et}")
+        # Try normalization before flagging
+        normalized = EVENT_TYPE_MAP.get(et.lower())
+        if normalized:
+            ev["event_type"] = normalized
+        elif MONTH_PATTERN.match(et):
+            # Date leaked into event_type field
+            if not ev.get("date"):
+                ev["date"] = et
+            ev["event_type"] = "dep"
+            flags.append("date_in_event_type_corrected")
+        else:
+            flags.append(f"invalid_event_type:{et}")
 
     # Vessel type must be valid (after normalization)
     vt = ev.get("vessel_type")

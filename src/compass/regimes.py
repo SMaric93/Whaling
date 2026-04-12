@@ -189,6 +189,21 @@ def label_regimes(model, mu: np.ndarray, sd: np.ndarray) -> Dict[int, str]:
             labels[k] = "return"
 
     logger.info("Regime labels: %s", labels)
+    
+    # Audit separation between search and transit
+    transit_mean = means_raw[transit_idx]
+    search_mean = means_raw[search_idx]
+    
+    # Simple Euclidean distance as a separation heuristic
+    separation = float(np.linalg.norm(transit_mean - search_mean))
+    logger.info("Regime separation (L2 norm between transit and search): %.3f", separation)
+    
+    if separation < 0.5:
+        logger.warning(
+            "Poor separation (%.3f) between transit and search regimes! "
+            "Downstream PCA index may be noisy.", separation
+        )
+
     return labels
 
 

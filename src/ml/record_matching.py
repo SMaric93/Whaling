@@ -147,6 +147,18 @@ def fit_match_probability_model(
             notes="insufficient_pseudo_labels",
         )
 
+    # Audit for easy match bias in positive labels
+    pos_df = clean[pos.loc[labeled.index]]
+    jw_cols = [c for c in clean.columns if 'jw' in c.lower() or 'score' in c.lower() or 'exact' in c.lower()]
+    for c in jw_cols:
+        if pos_df[c].mean() > 0.95:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Linkage Audit Warning: Positive training set may be biased toward 'easy' matches. "
+                f"Mean of '{c}' in positive set is suspiciously high ({pos_df[c].mean():.3f}). "
+                f"This can lead to underestimating matches for entities with common names."
+            )
+
     y = pos.loc[labeled.index].astype(int).to_numpy()
     model = RandomForestClassifier(
         n_estimators=200,

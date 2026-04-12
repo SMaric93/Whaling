@@ -84,7 +84,7 @@ class VoyageAssembler:
     
     def _asof_merge_vessel_register(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Perform as-of merge to attach vessel quality proxy.
+        Perform as-of merge to attach vessel quality proxy using pd.merge_asof.
         
         For each voyage, find the vessel register entry with the
         closest year <= year_out (or nearest available if none prior).
@@ -97,66 +97,77 @@ class VoyageAssembler:
             df["vqi_asof_extrapolated"] = True
             return df
         
-        result = df.copy()
-        result["vqi_proxy"] = np.nan
-        result["vqi_asof_year"] = np.nan
-        result["vqi_asof_exact"] = False
-        result["vqi_asof_extrapolated"] = False
-        
-        # Build lookup by vessel
         vessel_reg = self._vessel_register.dropna(subset=["vessel_name_clean", "year", "vqi_proxy"])
-        
         if len(vessel_reg) == 0:
             logger.warning("No usable vessel register entries with VQI proxy")
-            return result
-        
-        # Group register by vessel
-        vessel_years = vessel_reg.groupby("vessel_name_clean").apply(
-            lambda g: g.set_index("year")["vqi_proxy"].to_dict()
-        ).to_dict()
-        
-        def find_asof_vqi(row):
-            vessel_id = row.get("vessel_id")
-            vessel_name = row.get("vessel_name_clean")
-            voyage_year = row.get("year_out")
+            df["vqi_proxy"] = np.nan
+            df["vqi_asof_year"] = np.nan
+            df["vqi_asof_exact"] = False
+            df["vqi_asof_extrapolated"] = False
+            return df
             
-            if pd.isna(voyage_year):
-                return np.nan, np.nan, False, True
-            
-            # Look up by vessel name
-            if vessel_name not in vessel_years:
-                return np.nan, np.nan, False, True
-            
-            year_dict = vessel_years[vessel_name]
-            available_years = sorted(year_dict.keys())
-            
-            if not available_years:
-                return np.nan, np.nan, False, True
-            
-            # Find nearest prior year
-            prior_years = [y for y in available_years if y <= voyage_year]
-            
-            if prior_years:
-                best_year = max(prior_years)
-                return year_dict[best_year], best_year, (best_year == voyage_year), False
-            else:
-                # No prior year, use nearest future (extrapolated)
-                best_year = min(available_years)
-                return year_dict[best_year], best_year, False, True
+        result = df.copy()
         
-        # Apply asof logic
-        vqi_results = result.apply(find_asof_vqi, axis=1, result_type="expand")
-        vqi_results.columns = ["vqi_proxy", "vqi_asof_year", "vqi_asof_exact", "vqi_asof_extrapolated"]
+        # To use merge_asof, both dataframes must be sorted by the key
+        # Handle NaN year_out separately
+        nan_years = result[result["year_out"].isna()].copy()
+        valid_years = result[result["year_out"].notna()].copy()
         
-        result["vqi_proxy"] = vqi_results["vqi_proxy"]
-        result["vqi_asof_year"] = vqi_results["vqi_asof_year"]
-        result["vqi_asof_exact"] = vqi_results["vqi_asof_exact"]
-        result["vqi_asof_extrapolated"] = vqi_results["vqi_asof_extrapolated"]
+        valid_years["year_out_sort"] = valid_years["year_out"].astype(int)
+        valid_years = valid_years.sort_values("year_out_sort")
         
-        matched = result["vqi_proxy"].notna().sum()
-        logger.info(f"VQI as-of merge matched {matched} of {len(result)} voyages")
+        vessel_reg_sorted = vessel_reg.sort_values("year").copy()
+        vessel_reg_sorted["year"] = vessel_reg_sorted["year"].astype(int)
         
-        return result
+        # Backward match (nearest prior year)
+        backward_merged = pd.merge_asof(
+            valid_years,
+            vessel_reg_sorted[["vessel_name_clean", "year", "vqi_proxy"]],
+            left_on="year_out_sort",
+            right_on="year",
+            by="vessel_name_clean",
+            direction="backward",
+            suffixes=("", "_bwd")
+        )
+        
+        # Forward match (nearest future year, for those with no prior year)
+        forward_merged = pd.merge_asof(
+            valid_years,
+            vessel_reg_sorted[["vessel_name_clean", "year", "vqi_proxy"]],
+            left_on="year_out_sort",
+            right_on="year",
+            by="vessel_name_clean",
+            direction="forward",
+            suffixes=("", "_fwd")
+        )
+        
+        # Combine logic: use backward if available, otherwise forward (extrapolated)
+        vqi_proxy = backward_merged["vqi_proxy"].fillna(forward_merged["vqi_proxy"])
+        asof_year = backward_merged["year"].fillna(forward_merged["year"])
+        
+        is_exact = (asof_year == valid_years["year_out_sort"].values)
+        is_extrap = backward_merged["vqi_proxy"].isna() & forward_merged["vqi_proxy"].notna()
+        
+        valid_years["vqi_proxy"] = vqi_proxy.values
+        valid_years["vqi_asof_year"] = asof_year.values
+        valid_years["vqi_asof_exact"] = is_exact
+        valid_years["vqi_asof_extrapolated"] = is_extrap.values
+        
+        valid_years = valid_years.drop(columns=["year_out_sort"])
+        
+        # Handle nan_years
+        nan_years["vqi_proxy"] = np.nan
+        nan_years["vqi_asof_year"] = np.nan
+        nan_years["vqi_asof_exact"] = False
+        nan_years["vqi_asof_extrapolated"] = True
+        
+        # Recombine and restore original index order
+        result_final = pd.concat([valid_years, nan_years]).loc[result.index]
+        
+        matched = result_final["vqi_proxy"].notna().sum()
+        logger.info(f"VQI as-of merge matched {matched} of {len(result_final)} voyages")
+        
+        return result_final
     
     def assemble(self, force_reload: bool = False) -> pd.DataFrame:
         """
