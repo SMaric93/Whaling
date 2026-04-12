@@ -1,38 +1,38 @@
 #!/bin/bash --login
 ###############################################################################
-# WSL Extraction Pipeline — MSU ICER HPCC (4×NVIDIA L40S)
+# WSL Extraction Pipeline V2 — MSU ICER HPCC (4×NVIDIA L40S)
 #
-# Fully self-contained SLURM script for extracting vessel events from
-# 3,703 Whalemen's Shipping List (1843-1914) PDFs.
-#
-# Architecture:
-#   N vLLM instances (1 per working GPU) — dynamic GPU health detection
-#   PDF → render @120DPI → 2×2 tiled crops → vLLM VLM → JSON → merge/dedup → JSONL
-#
-# Each L40S runs an independent vLLM server with the 32B FP8 model.
-# Dense pages are split into 2×2 overlapping crops for faster inference.
-# Python workers distribute pages round-robin across healthy servers.
+# Architecture changes vs V1:
+#   - Single-shot full-page inference (no 2×2 tiling)
+#   - Page router with section-aware classification
+#   - Prompt V2 with column anchoring, few-shot example, remarks field
+#   - Staggered vLLM launches, higher concurrency, fixed HF caching
+#   - 4-layer inline post-processing + 3-level validation
+#   - SLURM job array support (one year per job)
 #
 # Usage:
 #   export HF_TOKEN="your_token_here"
-#   sbatch scripts/hpcc_extract.sb              # full corpus
-#   sbatch scripts/hpcc_extract.sb --test        # single year (default 1850)
-#   sbatch scripts/hpcc_extract.sb --test 1860   # single year (custom)
+#   sbatch scripts/hpcc_extract_v2.sb              # full corpus
+#   sbatch scripts/hpcc_extract_v2.sb --test        # single year (default 1850)
+#   sbatch scripts/hpcc_extract_v2.sb --test 1860   # single year (custom)
+#
+# Job array mode (processes one year per SLURM job):
+#   sbatch --array=1843-1914 scripts/hpcc_extract_v2.sb
 #
 # Resume after interruption:
-#   sbatch scripts/hpcc_extract.sb   # auto-resumes from checkpoint
+#   sbatch scripts/hpcc_extract_v2.sb   # auto-resumes from checkpoint
 ###############################################################################
 
-#SBATCH --job-name=wsl_extract
+#SBATCH --job-name=wsl_v2
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+#SBATCH --mem=192G
 #SBATCH --time=4:00:00
 #SBATCH --partition=general-short
-#SBATCH --output=%x-%j.SLURMout
-#SBATCH --error=%x-%j.SLURMerr
+#SBATCH --output=%x-%j_%a.SLURMout
+#SBATCH --error=%x-%j_%a.SLURMerr
 #SBATCH --mail-type=END,FAIL
 ##SBATCH --mail-user=YOUR_NETID@msu.edu  # Uncomment and set your email
 
@@ -80,8 +80,9 @@ NUM_GPUS=${NUM_GPUS:-4}
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
 BASE_PORT=8100
 
+# ─── Fix: point HF caches to persistent research space ─────────────────────
 export HF_HOME="${HF_CACHE}"
-export HF_HUB_CACHE="${HF_CACHE}"
+export HF_HUB_CACHE="${HF_CACHE}/hub"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 export TMPDIR="${SCRATCH_BASE}/tmp"
 export TEMP="${SCRATCH_BASE}/tmp"
@@ -91,15 +92,23 @@ export HF_HUB_DISABLE_XET=1
 
 mkdir -p "${OUTPUT_DIR}" "${TMPDIR}"
 
+# ─── SLURM job array support ───────────────────────────────────────────────
+ARRAY_YEAR="${SLURM_ARRAY_TASK_ID:-}"
+if [ -n "${ARRAY_YEAR}" ]; then
+    # Job array mode: this job handles one year
+    TEST_YEAR="${ARRAY_YEAR}"
+fi
+
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  WSL Extraction Pipeline — AWQ 4-bit                       ║"
+echo "║  WSL Extraction Pipeline V2 — Single-Shot Full-Page        ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Job ID:  ${SLURM_JOB_ID:-local}"
+echo "║  Array:   ${ARRAY_YEAR:-none}"
 echo "║  Node:    $(hostname)"
 echo "║  GPUs:    ${NUM_GPUS}× ${GPU_NAME}"
 echo "║  Model:   ${MODEL_ID}"
 if [ -n "${TEST_YEAR}" ]; then
-echo "║  Mode:    TEST (year ${TEST_YEAR} only)"
+echo "║  Mode:    YEAR ${TEST_YEAR}"
 else
 echo "║  Mode:    FULL CORPUS"
 fi
@@ -146,13 +155,13 @@ echo "  CUDA:    $(nvidia-smi --query-gpu=driver_version --format=csv,noheader |
 echo "  GPUs:    $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) detected"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 2: Download Model (once, shared cache)
+# Step 2: Download Model (once, shared cache on persistent research space)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[2/4] Downloading model (if not cached)..."
+echo "[2/4] Checking model cache..."
 
-# Download model to scratch (fast local I/O, no quota issues)
-MODEL_LOCAL_DIR="${SCRATCH_BASE}/models/Qwen3-VL-32B-Instruct-AWQ"
+# Use persistent research space for model — no re-download on each job
+MODEL_LOCAL_DIR="${HF_CACHE}/models/Qwen3-VL-32B-Instruct-FP8"
 mkdir -p "${MODEL_LOCAL_DIR}"
 
 python3 -c "
@@ -175,10 +184,10 @@ print(f'  Model ready at: {local_dir}')
 "
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 3: Launch vLLM Servers (1 per GPU, dynamic health detection)
+# Step 3: Launch vLLM Servers (staggered, 1 per GPU)
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[3/4] Starting ${NUM_GPUS} vLLM servers (one per GPU)..."
+echo "[3/4] Starting ${NUM_GPUS} vLLM servers (staggered launch)..."
 
 VLLM_PIDS=()
 for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
@@ -189,8 +198,8 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
         --model "${MODEL_LOCAL_DIR}" \
         --dtype auto \
         --max-model-len 16384 \
-        --max-num-seqs 4 \
-        --gpu-memory-utilization 0.90 \
+        --max-num-seqs 8 \
+        --gpu-memory-utilization 0.85 \
         --port ${port} \
         --trust-remote-code \
         --served-model-name "${MODEL_ID}" \
@@ -199,6 +208,12 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
         --mm-processor-cache-gb 0 \
         > "${OUTPUT_DIR}/vllm_gpu${gpu_id}.log" 2>&1 &
     VLLM_PIDS+=($!)
+
+    # Stagger launches to prevent GPU 0 race condition
+    if [ $gpu_id -lt $((NUM_GPUS - 1)) ]; then
+        echo "    (waiting 15s before next launch...)"
+        sleep 15
+    fi
 done
 
 echo "  Waiting for all servers to initialize..."
@@ -246,21 +261,23 @@ NUM_GPUS=$WORKING_GPUS
 echo "  ${WORKING_GPUS} of $(echo ${VLLM_PIDS[@]} | wc -w) servers ready (ports: ${HEALTHY_PORTS})"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 4: Extraction Pipeline
+# Step 4: Extraction Pipeline V2
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[4/4] Running extraction across $(find ${PDF_DIR} -name '*.pdf' | wc -l) PDFs..."
+echo "[4/4] Running V2 extraction..."
 
 export NUM_GPUS HEALTHY_PORTS MODEL_ID OUTPUT_DIR PDF_DIR TEST_YEAR FINAL_OUTPUT_DIR
 
 srun -c "${SLURM_CPUS_PER_TASK:-32}" python3 - << 'PYEOF'
 """
-WSL Extraction Worker — DIAGNOSTIC BUILD with per-operation tracing.
+WSL Extraction Worker V2 — Single-Shot Full-Page Architecture.
 
-Every operation is timed and logged with thread ID. A watchdog thread
-reports on hung workers every 60 seconds. Pre-flight checks verify
-that all vLLM servers can actually handle image requests before the
-main extraction loop begins.
+Key changes from V1:
+  - No tiling — every page is processed as a single full-page image
+  - Page router classifies pages (shipping_table, registry, narrative, skip)
+  - Prompt V2 with column anchoring, few-shot, and remarks field
+  - Inline post-processing (4-layer normalization + validation)
+  - ThreadPool workers = NUM_GPUS × 6 (fixes queue starvation)
 """
 import os, sys, time, json, re, glob, base64, logging, threading, traceback
 from pathlib import Path
@@ -282,12 +299,21 @@ OUTPUT_DIR = Path(os.environ["OUTPUT_DIR"])
 FINAL_DIR = Path(os.environ.get("FINAL_OUTPUT_DIR", str(OUTPUT_DIR)))
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
 PDF_DIR = Path(os.environ["PDF_DIR"])
-JSONL_FILE = FINAL_DIR / "wsl_events.jsonl"
-PROGRESS_FILE = FINAL_DIR / "wsl_progress.json"
-RENDER_DPI = 120
-MAX_TOKENS = 8192
-CROP_MAX_TOKENS = 3072
-OVERLAP_FRAC = 0.10  # 10% overlap for 2×2 crops
+TEST_YEAR = os.environ.get("TEST_YEAR", "")
+
+# ─── Output file naming (per-year if job array, else unified) ──────────────
+if TEST_YEAR:
+    JSONL_FILE = FINAL_DIR / f"wsl_events_{TEST_YEAR}.jsonl"
+    PROGRESS_FILE = FINAL_DIR / f"wsl_progress_{TEST_YEAR}.json"
+else:
+    JSONL_FILE = FINAL_DIR / "wsl_events.jsonl"
+    PROGRESS_FILE = FINAL_DIR / "wsl_progress.json"
+
+RENDER_DPI = 100   # Down from 120 — fewer vision tokens per page
+MAX_TOKENS = 8192  # Keep full budget for 200+ event dense pages
+
+# Worker pool: NUM_GPUS × 6 to saturate vLLM continuous batching
+WORKER_MULTIPLIER = 6
 
 write_lock = threading.Lock()
 progress_lock = threading.Lock()
@@ -304,18 +330,19 @@ class FlushFileHandler(logging.FileHandler):
         super().emit(record)
         self.flush()
 
+log_suffix = f"_{TEST_YEAR}" if TEST_YEAR else ""
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] [T-%(thread)d] %(message)s",
     handlers=[
         FlushHandler(),
-        FlushFileHandler(str(FINAL_DIR / "extraction.log"), mode="a"),
+        FlushFileHandler(str(FINAL_DIR / f"extraction_v2{log_suffix}.log"), mode="a"),
     ],
 )
-log = logging.getLogger("wsl")
+log = logging.getLogger("wsl_v2")
 
-# Also write a separate trace log for timing data
-trace_log_path = FINAL_DIR / "trace.log"
+# Separate trace log for timing data
+trace_log_path = FINAL_DIR / f"trace_v2{log_suffix}.log"
 trace_fh = open(trace_log_path, "a", buffering=1)  # line-buffered
 
 def trace(msg):
@@ -325,26 +352,55 @@ def trace(msg):
     line = f"{ts} [T-{tid}] {msg}\n"
     trace_fh.write(line)
 
-# ─── Extraction Prompt (event-only, compact) ──────────────────────────────
-PROMPT = """Extract every vessel event visible on this page of the Whalemen's Shipping List.
 
-Event types: dep (departed/sailed/cleared), arr (arrived), spk (spoken), rpt (reported), inp (in port), wrk (wrecked/condemned).
+# ─── Extraction Prompt V2 ─────────────────────────────────────────────────
+PROMPT = """Extract vessel events from this Whalemen's Shipping List page.
+The dense tables follow this column order from left to right:
+VESSELS' NAMES | MASTERS | AGENTS | SAILED | WHERE BOUND | LAST REPORT | OIL
 
-Return JSON: {"events": [{"v":"vessel name","t":"ship|bark|brig|sch","c":"captain surname","e":"dep|arr|spk|rpt|inp|wrk","p":"port","d":"date", ...}]}
-Optional fields (include ONLY when the value is present on the page): "hp" (home port), "dest" (destination), "lat"/"lon" (signed numbers, S/W negative), "sp"/"wh"/"bn" (sperm oil bbls, whale oil bbls, bone lbs), "days" (days out), "agent" (owner/agent company), "by" (reporting vessel).
+Section headers in ALL CAPS (e.g., "NEW BEDFORD", "NANTUCKET") define the home
+port for all subsequent rows until the next header.
 
 Rules:
-- "c" = captain's SURNAME only (not a company)
-- Omit any field whose value is null or unknown
-- Each vessel appears ONLY ONCE per event
-- If no vessel events are visible, return {"events":[]}
+1. Extract exactly what you see using the spatial column order above.
+2. "c" is the captain's surname ONLY. "agent" is the owner/company. Do NOT swap.
+3. "t" must be one of: ship, bark, brig, sch. Do NOT include type in "v".
+4. "hp" is the home port, inherited from the nearest section header above.
+5. "remarks": Put narrative text, coordinates, multi-port lists, or status notes
+   here. Do NOT pollute "d" or "dest".
+6. CRITICAL: Omit keys entirely if the value is missing or null.
+7. "sp"/"wh"/"bn": integers ONLY. If not a clear number, omit.
 
-Return ONLY valid JSON. No explanation."""
+Example:
+{"v":"A. Tyler","t":"bark","c":"Carroll","agent":"C Mitchell & Co","e":"dep","p":"Dartmouth","d":"July 29, 47","hp":"New Bedford","dest":"Pacific","sp":150,"remarks":"leaking, bound home"}
+
+Return: {"events": [{...}, ...]}
+Return ONLY valid JSON. No explanation. No markdown."""
+
+# ─── Post-processing constants ─────────────────────────────────────────────
+VALID_EVENT_TYPES = {"dep", "arr", "spk", "rpt", "inp", "wrk"}
+VALID_VESSEL_TYPES = {"ship", "bark", "brig", "sch"}
+VESSEL_TYPE_MAP = {
+    "bk": "bark", "brk": "bark", "bg": "brig", "schooner": "sch",
+    "ox": None, "rig": None, "steamer": "steamer",
+}
+VESSEL_TYPE_SUFFIXES = [
+    ", bark", ", bk", ", brk", ", ship", ", brig", ", sch", ", schooner",
+    " bark", " bk", " ship", " brig", " sch",
+]
+PORT_CORRECTIONS = {
+    "antucket": "Nantucket", "anticent": "Nantucket",
+    "n bedford": "New Bedford", "n. bedford": "New Bedford",
+    "new bedfored": "New Bedford",
+    "n london": "New London", "n. london": "New London",
+}
+MONTH_RE = re.compile(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", re.IGNORECASE)
+COMPANY_RE = re.compile(r"(&| Co\b| Sons\b| Brothers\b| Bros\b)", re.IGNORECASE)
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 def img_to_base64(img_array):
-    """Convert numpy array to JPEG base64 for VLM input (raw RGB, no enhancement)."""
+    """Convert numpy array to JPEG base64 for VLM input."""
     pil = Image.fromarray(img_array).convert('RGB')
     buf = BytesIO()
     pil.save(buf, format="JPEG", quality=90)
@@ -352,105 +408,83 @@ def img_to_base64(img_array):
     return b64, len(buf.getvalue())
 
 
-def tile_image(img_array, overlap_frac=OVERLAP_FRAC):
-    """Split an image into 2×2 overlapping crops.
-    
-    Returns list of 4 crop arrays: [top-left, top-right, bottom-left, bottom-right].
-    Each crop overlaps with its neighbors by overlap_frac of the dimension.
+def _str(val):
+    """Safely convert any value to string. Handles int/float/None."""
+    if val is None:
+        return ""
+    if not isinstance(val, str):
+        return str(val)
+    return val
+
+
+# ─── Page Classification (replaces is_dense_page + should_skip_page) ──────
+
+def classify_page(pdf_path, pg_idx, n_pages):
+    """Classify page type for routing and metadata.
+
+    Returns (page_type, route_reason) where page_type is one of:
+      skip, shipping_table, registry, narrative, mixed, sparse
     """
-    h, w = img_array.shape[:2]
-    oh = int(h * overlap_frac / 2)  # half-overlap in pixels
-    ow = int(w * overlap_frac / 2)
-    mid_h = h // 2
-    mid_w = w // 2
-    crops = [
-        img_array[0:mid_h + oh, 0:mid_w + ow],          # top-left
-        img_array[0:mid_h + oh, mid_w - ow:w],           # top-right
-        img_array[mid_h - oh:h, 0:mid_w + ow],           # bottom-left
-        img_array[mid_h - oh:h, mid_w - ow:w],           # bottom-right
-    ]
-    return crops
+    # Page 1: always skip (masthead/ads)
+    if pg_idx == 0 and n_pages >= 4:
+        return "skip", "front_page"
 
-
-def _dedup_key(ev):
-    """Create a fuzzy dedup key for a raw event dict.
-    
-    Normalizes aggressively to catch crop-boundary OCR variations:
-    - Strip vessel type suffixes (', bark', ', ship', etc.)
-    - Remove punctuation, collapse whitespace
-    - Use first 8 chars of vessel name (handles trailing OCR noise)
-    """
-    v = (ev.get('v') or '').strip().lower()
-    # Remove vessel type suffixes that models sometimes append
-    for suffix in [', bark', ', ship', ', brig', ', sch', ', schooner',
-                   ' bark', ' ship', ' brig', ' sch']:
-        if v.endswith(suffix):
-            v = v[:-len(suffix)]
-    # Remove punctuation, collapse spaces
-    v = re.sub(r'[^a-z0-9 ]', '', v).strip()
-    v = re.sub(r'\s+', ' ', v)
-    # Use first 8 chars to handle trailing OCR noise
-    v = v[:8]
-    e = (ev.get('e') or '').strip().lower()[:3]  # dep/arr/spk etc
-    d_raw = ev.get('d') or ''
-    if not isinstance(d_raw, str):
-        d_raw = str(d_raw)
-    d = re.sub(r'[^a-z0-9]', '', d_raw.strip().lower())  # normalize date
-    return (v, e, d)
-
-
-def merge_crop_events(all_crop_events):
-    """Merge events from multiple crops, deduplicating by fuzzy vessel+event+date."""
-    seen = set()
-    merged = []
-    for events in all_crop_events:
-        for ev in events:
-            key = _dedup_key(ev)
-            if key not in seen:
-                seen.add(key)
-                merged.append(ev)
-    return merged
-
-
-def is_dense_page(pdf_path, pg_idx):
-    """Heuristic: check if a page is likely dense (many events) or sparse.
-    
-    For scanned microfilm PDFs with no text layer, we use page position:
-    - Pages 2-3 in a 4-page PDF are the shipping intelligence pages (dense tables)
-    - Page 4 is mixed (some tables, some ads) — tile to be safe
-    - Pages with a text layer: use keyword occurrence counting
-    """
+    # Try text layer for classification
     try:
         with pdfium_lock:
             doc = pdfium.PdfDocument(pdf_path)
-            n_pages = len(doc)
             textpage = doc[pg_idx].get_textpage()
             text = textpage.get_text_bounded().lower()
             doc.close()
-        # If no usable text layer, use page position heuristic
-        if len(text) < 100:
-            # Pages 2 and 3 (0-indexed: 1 and 2) are typically the dense shipping pages
-            is_shipping = pg_idx in (1, 2) and n_pages >= 3
-            # Page 4 (0-indexed: 3) is mixed — tile if >= 4 pages
-            is_mixed = pg_idx == 3 and n_pages >= 4
-            result = is_shipping or is_mixed
-            trace(f"DENSE_CHECK text_len={len(text)} no_text_layer=True pg_idx={pg_idx} n_pages={n_pages} dense={result}")
-            return result
-        # Text layer exists — count keyword occurrences
-        keywords = ['arrived', 'sailed', 'departed', 'spoken',
-                    'reported', 'capt', 'bark', 'ship', 'brig',
-                    'sch', 'bbls', 'new bedford', 'nantucket']
-        total_hits = sum(text.count(w) for w in keywords)
-        result = total_hits >= 15
-        trace(f"DENSE_CHECK text_len={len(text)} keyword_hits={total_hits} dense={result}")
-        return result
     except Exception:
-        return True  # If we can't check, assume dense (conservative)
+        text = ""
 
+    # Ad detection
+    ad_kw = sum(1 for w in ["for sale", "advertisement", "wanted",
+                             "insurance", "commission merchant"]
+                if w in text)
+    shipping_kw = sum(1 for w in ["arrived", "sailed", "departed", "spoken",
+                                    "reported", "in port", "capt"]
+                       if w in text)
+    if ad_kw >= 2 and shipping_kw == 0:
+        return "skip", "advertisement"
+
+    # If no usable text layer, use page position heuristic
+    if len(text) < 100:
+        if pg_idx in (1, 2) and n_pages >= 3:
+            return "shipping_table", "dense_position"
+        elif pg_idx == 3 and n_pages >= 4:
+            return "mixed", "page4_position"
+        else:
+            return "sparse", "default"
+
+    # Text-based classification
+    # Check for fleet registry markers (listing all vessels of a port)
+    registry_kw = sum(1 for w in ["list of vessels", "fleet", "whole number",
+                                    "belonging to"] if w in text)
+    if registry_kw >= 1 and shipping_kw < 5:
+        return "registry", "fleet_registry_text"
+
+    # Memoranda/narrative
+    if "memoranda" in text or "marine intelligence" in text:
+        if shipping_kw >= 3:
+            return "shipping_table", "memoranda_with_shipping"
+        return "narrative", "memoranda"
+
+    # Default: classify by shipping keyword density
+    if shipping_kw >= 8:
+        return "shipping_table", "text_keywords_dense"
+    elif shipping_kw >= 3:
+        return "mixed", "text_keywords_mixed"
+    else:
+        return "sparse", "default"
+
+
+# ─── VLM Interaction ──────────────────────────────────────────────────────
 
 def vllm_request(url, payload, timeout=600):
     """Send a single request to vLLM. Returns (response_text, status_code, elapsed_s, error_msg)."""
-    trace(f"HTTP_POST_START url={url} payload_keys={list(payload.keys())} timeout={timeout}")
+    trace(f"HTTP_POST_START url={url} timeout={timeout}")
     t0 = time.time()
     try:
         r = requests.post(url, json=payload, timeout=timeout)
@@ -511,6 +545,8 @@ def vllm_vision(url, img_b64, prompt, max_tokens=MAX_TOKENS):
     return ""
 
 
+# ─── Response Parsing ──────────────────────────────────────────────────────
+
 def parse_result(raw):
     """Parse LLM output into list of event dicts."""
     text = raw.strip()
@@ -544,43 +580,12 @@ def parse_result(raw):
     return events
 
 
-def should_skip_page(pdf_path, pg_idx, n_pages):
-    """Cheap CPU-side check to skip non-shipping pages."""
-    if pg_idx == 0 and n_pages >= 4:
-        return True, "front_page"
-    try:
-        with pdfium_lock:
-            trace(f"SKIP_CHECK_PDF_OPEN path={os.path.basename(pdf_path)} pg={pg_idx}")
-            doc = pdfium.PdfDocument(pdf_path)
-            textpage = doc[pg_idx].get_textpage()
-            text = textpage.get_text_bounded().lower()
-            doc.close()
-            trace(f"SKIP_CHECK_PDF_DONE text_len={len(text)}")
-        shipping_kw = sum(1 for w in ["arrived", "sailed", "departed", "spoken",
-                                       "reported", "in port", "capt"]
-                          if w in text)
-        ad_kw = sum(1 for w in ["for sale", "advertisement", "wanted",
-                                 "insurance", "commission merchant"]
-                    if w in text)
-        if ad_kw >= 2 and shipping_kw == 0:
-            return True, "advertisement"
-    except Exception as e:
-        log.warning(f"skip_page check failed for {pdf_path}:p{pg_idx}: {e}")
-        trace(f"SKIP_CHECK_ERROR {e}")
-    return False, None
-
-
-def _str(val):
-    """Safely convert any value to string. Handles int/float/None from model output."""
-    if val is None:
-        return ""
-    if not isinstance(val, str):
-        return str(val)
-    return val
-
+# ─── Normalization ─────────────────────────────────────────────────────────
 
 def normalize(e):
-    """Normalize a compact-key event dict to full field names."""
+    """Normalize a compact-key event dict to full field names.
+    Preserves raw values in _raw sub-dict for auditability.
+    """
     lat = e.get("lat")
     lon = e.get("lon")
     if isinstance(lat, str):
@@ -593,7 +598,8 @@ def normalize(e):
         lat = None
     if isinstance(lon, (int, float)) and not (-180 <= lon <= 180):
         lon = None
-    return {
+
+    result = {
         "vessel_name": _str(e.get("v")).strip(),
         "vessel_type": _str(e.get("t")).strip().lower() or None,
         "captain": _str(e.get("c")).strip() or None,
@@ -610,14 +616,170 @@ def normalize(e):
         "days_out": _str(e.get("days")).strip() or None,
         "agent": _str(e.get("agent")).strip() or None,
         "reported_by": _str(e.get("by")).strip() or None,
+        "remarks": _str(e.get("remarks")).strip() or None,
     }
+    # Preserve raw LLM output for audit
+    result["_raw"] = {k: v for k, v in e.items() if v is not None}
+    return result
 
+
+# ─── Inline Post-Processing (4-Layer) ─────────────────────────────────────
+
+def post_process(ev, issue_year=None):
+    """Run 4-layer post-processing on a single normalized event."""
+    # Store raw values (Layer 1)
+    for field in ("vessel_name", "captain", "agent", "date", "port", "home_port"):
+        raw_key = f"{field}_raw"
+        if raw_key not in ev:
+            ev[raw_key] = ev.get(field)
+
+    flags = []
+
+    # ── Layer 2: Structural normalization ──
+    # Vessel type map
+    vt = ev.get("vessel_type")
+    if vt and vt not in VALID_VESSEL_TYPES:
+        ev["vessel_type"] = VESSEL_TYPE_MAP.get(vt, None)
+
+    # Strip vessel type from name
+    name = ev.get("vessel_name", "")
+    if name:
+        name_lower = name.lower()
+        for sfx in VESSEL_TYPE_SUFFIXES:
+            if name_lower.endswith(sfx):
+                ev["vessel_name"] = name[:-len(sfx)].strip()
+                if not ev.get("vessel_type"):
+                    t_str = sfx.strip().lstrip(", ").lower()
+                    ev["vessel_type"] = VESSEL_TYPE_MAP.get(t_str, t_str)
+                break
+
+    # Oil value coercion
+    for field in ("oil_sperm_bbls", "oil_whale_bbls", "bone_lbs"):
+        val = ev.get(field)
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("clean", "not stated", "none", "no report", ""):
+                ev[field] = None
+                continue
+            digits = re.sub(r"[^\d]", "", s)
+            if digits:
+                try:
+                    ev[field] = int(digits)
+                except ValueError:
+                    ev[field] = None
+            else:
+                ev[field] = None
+        elif isinstance(val, (int, float)) and val < 0:
+            ev[field] = None
+            flags.append(f"negative_{field}")
+
+    # ── Layer 3: Semantic cleaning ──
+    # Captain company detection
+    captain = ev.get("captain") or ""
+    if captain and COMPANY_RE.search(captain):
+        if not ev.get("agent"):
+            ev["agent"] = captain
+        ev["captain"] = None
+        flags.append("captain_was_company")
+    # Surname extraction
+    elif " " in captain:
+        parts = captain.split()
+        if len(parts) == 2 and (len(parts[0]) <= 5 or parts[0].endswith(".")):
+            ev["captain"] = parts[-1]
+
+    # Port OCR correction
+    for field in ("port", "home_port"):
+        val = ev.get(field)
+        if val:
+            val_lower = val.strip().lower()
+            if val_lower in PORT_CORRECTIONS:
+                ev[field] = PORT_CORRECTIONS[val_lower]
+
+    # Field swap detection (date in port)
+    port = ev.get("port") or ""
+    date = ev.get("date") or ""
+    if port and MONTH_RE.match(port) and not MONTH_RE.match(date):
+        ev["port"], ev["date"] = date or None, port
+        flags.append("port_date_swap_corrected")
+
+    # ── Layer 4: Hard validation ──
+    et = ev.get("event_type", "")
+    if et and et not in VALID_EVENT_TYPES:
+        flags.append(f"invalid_event_type:{et}")
+
+    vt = ev.get("vessel_type")
+    if vt and vt not in VALID_VESSEL_TYPES and vt != "steamer":
+        flags.append(f"invalid_vessel_type:{vt}")
+        ev["vessel_type"] = None
+
+    lat = ev.get("latitude")
+    if isinstance(lat, (int, float)) and not (-90 <= lat <= 90):
+        ev["latitude"] = None
+        flags.append("invalid_latitude")
+    lon = ev.get("longitude")
+    if isinstance(lon, (int, float)) and not (-180 <= lon <= 180):
+        ev["longitude"] = None
+        flags.append("invalid_longitude")
+
+    # Section validation: registry detection
+    if date and issue_year:
+        m = re.search(r"\b(\d{2,4})\b", date)
+        if m:
+            yr = int(m.group(1))
+            if yr < 100:
+                yr += 1800
+            if issue_year - yr > 2:
+                flags.append("likely_registry_not_weekly")
+
+    # Confidence score
+    score = 1.0
+    if not ev.get("vessel_name"):
+        score -= 0.3
+    if not ev.get("event_type"):
+        score -= 0.2
+    if not ev.get("captain") and not ev.get("agent"):
+        score -= 0.15
+    if not ev.get("date"):
+        score -= 0.1
+    if not ev.get("port"):
+        score -= 0.1
+
+    ev["_flags"] = flags if flags else None
+    ev["_confidence"] = round(max(0.0, score), 2)
+    return ev
+
+
+# ─── Deduplication ─────────────────────────────────────────────────────────
+
+def _norm_dedup(s):
+    if not s:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def dedup_events(events):
+    """Deduplicate events with richer key than V1."""
+    seen = set()
+    result = []
+    for ev in events:
+        key = (
+            _norm_dedup(ev.get("vessel_name", ""))[:12],
+            _norm_dedup(ev.get("captain", "")),
+            ev.get("event_type", ""),
+            _norm_dedup(ev.get("date", "")),
+            _norm_dedup(ev.get("port", "")),
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(ev)
+    return result
+
+
+# ─── Progress ──────────────────────────────────────────────────────────────
 
 def load_progress():
     if PROGRESS_FILE.exists():
         return json.loads(PROGRESS_FILE.read_text())
     return {"completed": {}, "total_events": 0, "total_pages": 0}
-
 
 def save_progress(prog):
     tmp = PROGRESS_FILE.with_suffix(".tmp")
@@ -625,14 +787,11 @@ def save_progress(prog):
     tmp.rename(PROGRESS_FILE)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pre-flight diagnostics
-# ═══════════════════════════════════════════════════════════════════════════
+# ─── Pre-flight ────────────────────────────────────────────────────────────
 
 def preflight_text_check(url, idx):
     """Send a trivial text-only request to verify the server responds."""
     log.info(f"PREFLIGHT[{idx}] text check → {url}")
-    trace(f"PREFLIGHT_TEXT_START idx={idx} url={url}")
     payload = {
         "model": MODEL_ID,
         "messages": [{"role": "user", "content": "Say OK"}],
@@ -641,25 +800,19 @@ def preflight_text_check(url, idx):
     }
     text, status, elapsed, err = vllm_request(url, payload, timeout=30)
     if status == 200:
-        log.info(f"PREFLIGHT[{idx}] ✓ text OK in {elapsed:.2f}s → {repr(text[:50])}")
-        trace(f"PREFLIGHT_TEXT_OK idx={idx} elapsed={elapsed:.2f}s")
+        log.info(f"PREFLIGHT[{idx}] ✓ text OK in {elapsed:.2f}s")
         return True
     else:
-        log.error(f"PREFLIGHT[{idx}] ✗ text FAILED status={status} elapsed={elapsed:.2f}s err={err}")
-        trace(f"PREFLIGHT_TEXT_FAIL idx={idx} status={status}")
+        log.error(f"PREFLIGHT[{idx}] ✗ text FAILED status={status} err={err}")
         return False
-
 
 def preflight_image_check(url, idx):
     """Send a tiny 64x64 white image to verify VLM image handling works."""
     log.info(f"PREFLIGHT[{idx}] image check → {url}")
-    trace(f"PREFLIGHT_IMG_START idx={idx} url={url}")
-    # Create a tiny white image
     img = Image.new("RGB", (64, 64), (255, 255, 255))
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=50)
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
     payload = {
         "model": MODEL_ID,
         "messages": [
@@ -673,23 +826,21 @@ def preflight_image_check(url, idx):
     }
     text, status, elapsed, err = vllm_request(url, payload, timeout=120)
     if status == 200:
-        log.info(f"PREFLIGHT[{idx}] ✓ image OK in {elapsed:.2f}s → {repr(text[:50])}")
-        trace(f"PREFLIGHT_IMG_OK idx={idx} elapsed={elapsed:.2f}s")
+        log.info(f"PREFLIGHT[{idx}] ✓ image OK in {elapsed:.2f}s")
         return True
     else:
-        log.error(f"PREFLIGHT[{idx}] ✗ image FAILED status={status} elapsed={elapsed:.2f}s err={err}")
-        trace(f"PREFLIGHT_IMG_FAIL idx={idx} status={status}")
+        log.error(f"PREFLIGHT[{idx}] ✗ image FAILED status={status} err={err}")
         return False
-
 
 def run_preflight():
     """Verify all vLLM servers can handle both text and image requests."""
     log.info("=" * 60)
-    log.info("PREFLIGHT DIAGNOSTICS")
+    log.info("PREFLIGHT DIAGNOSTICS — V2")
     log.info("=" * 60)
     log.info(f"Servers: {VLLM_URLS}")
     log.info(f"Model: {MODEL_ID}")
     log.info(f"DPI: {RENDER_DPI}, MaxTokens: {MAX_TOKENS}")
+    log.info(f"Worker multiplier: {WORKER_MULTIPLIER}")
 
     healthy_urls = []
     for idx, url in enumerate(VLLM_URLS):
@@ -711,17 +862,14 @@ def run_preflight():
     return healthy_urls
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Watchdog thread
-# ═══════════════════════════════════════════════════════════════════════════
+# ─── Watchdog ──────────────────────────────────────────────────────────────
 
-# Track active worker state
-worker_state = {}  # thread_id -> {"page_key": str, "stage": str, "start": float}
+worker_state = {}
 worker_state_lock = threading.Lock()
 
 def watchdog_loop(stop_event):
     """Periodically report on what each worker is doing."""
-    while not stop_event.wait(60):  # every 60 seconds
+    while not stop_event.wait(60):
         with worker_state_lock:
             if not worker_state:
                 continue
@@ -735,49 +883,49 @@ def watchdog_loop(stop_event):
                 log.info(f"  {status} T-{tid}: {state['page_key']} stage={state['stage']} elapsed={elapsed:.0f}s")
             log.info("───────────────────────")
 
-
 def set_worker_state(page_key, stage):
-    """Update the current worker's state for watchdog monitoring."""
     tid = threading.current_thread().ident
     with worker_state_lock:
         worker_state[tid] = {"page_key": page_key, "stage": stage, "start": time.time()}
 
-
 def clear_worker_state():
-    """Clear the current worker's state."""
     tid = threading.current_thread().ident
     with worker_state_lock:
         worker_state.pop(tid, None)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Page processing with full tracing
+# Page processing — V2 (single-shot, no tiling)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def process_page(args):
-    """Process a single page with per-operation tracing."""
+    """Process a single page: classify → render → single-shot VLM → parse → post-process."""
     pdf_path, pg_idx, gpu_id, n_pages = args
     pdf_name = os.path.basename(pdf_path)
     year = os.path.basename(os.path.dirname(pdf_path))
     pg = pg_idx + 1
     page_key = f"{pdf_name}:p{pg}"
-    url = VLLM_URLS[gpu_id % len(VLLM_URLS)]  # safety: modulo in case gpu_id > len
+    url = VLLM_URLS[gpu_id % len(VLLM_URLS)]
 
     trace(f"PAGE_START page_key={page_key} gpu_id={gpu_id} url={url}")
-    set_worker_state(page_key, "skip_check")
+    set_worker_state(page_key, "classify")
     page_t0 = time.time()
 
-    # ── Skip check ──
-    skip, skip_reason = should_skip_page(pdf_path, pg_idx, n_pages)
-    if skip:
-        trace(f"PAGE_SKIPPED page_key={page_key} reason={skip_reason}")
+    # ── Page classification ──
+    page_type, route_reason = classify_page(pdf_path, pg_idx, n_pages)
+    trace(f"PAGE_CLASSIFIED page_key={page_key} type={page_type} reason={route_reason}")
+
+    if page_type == "skip":
+        trace(f"PAGE_SKIPPED page_key={page_key} reason={route_reason}")
         result = {
             "pdf": pdf_name, "year": int(year), "page": pg,
             "page_key": page_key,
+            "page_type": page_type,
+            "page_route": route_reason,
             "extracted_at": datetime.now().isoformat(),
             "gpu_id": -1, "llm_time_s": 0,
             "events": [], "n_events": 0,
-            "output_chars": 0, "skipped": skip_reason,
+            "output_chars": 0, "skipped": route_reason,
         }
         with write_lock:
             with open(JSONL_FILE, "a") as f:
@@ -798,103 +946,57 @@ def process_page(args):
         render_ms = (time.time() - t_render) * 1000
         trace(f"PDF_RENDER_DONE page_key={page_key} shape={img.shape} ms={render_ms:.0f}")
 
-        # ── Decide tiling strategy ──
-        dense = is_dense_page(pdf_path, pg_idx)
-        use_tiling = dense
-        trace(f"TILING_DECISION page_key={page_key} dense={dense} use_tiling={use_tiling}")
+        # ── Single-shot VLM extraction (NO TILING) ──
+        set_worker_state(page_key, "base64_encode")
+        t_enc = time.time()
+        b64, jpg_bytes = img_to_base64(img)
+        enc_ms = (time.time() - t_enc) * 1000
+        trace(f"BASE64_DONE page_key={page_key} jpg_kb={jpg_bytes//1024} ms={enc_ms:.0f}")
 
-        if use_tiling:
-            # ── Tiled extraction (2×2 crops) ──
-            set_worker_state(page_key, "tiling")
-            crops = tile_image(img)
-            trace(f"TILED page_key={page_key} n_crops={len(crops)} crop_shapes={[c.shape for c in crops]}")
+        set_worker_state(page_key, "vllm_inference")
+        trace(f"VLLM_CALL_START page_key={page_key} url={url}")
+        t_llm = time.time()
+        raw = vllm_vision(url, b64, PROMPT)
+        llm_time = time.time() - t_llm
+        trace(f"VLLM_CALL_DONE page_key={page_key} elapsed={llm_time:.2f}s chars={len(raw)}")
 
-            all_crop_raw = []
-            all_crop_events = []
-            total_llm_time = 0
-            total_jpg_bytes = 0
+        if not raw:
+            log.warning(f"EMPTY RESPONSE for {page_key} after {llm_time:.1f}s")
+            trace(f"VLLM_EMPTY page_key={page_key}")
 
-            for ci, crop in enumerate(crops):
-                crop_key = f"{page_key}:crop{ci}"
-                set_worker_state(page_key, f"crop{ci}_encode")
-                b64, jb = img_to_base64(crop)
-                total_jpg_bytes += jb
-                trace(f"CROP_ENCODE page_key={crop_key} jpg_kb={jb//1024} shape={crop.shape}")
+        # ── Parse ──
+        set_worker_state(page_key, "parse")
+        t_parse = time.time()
+        raw_events = parse_result(raw)
+        events = [normalize(e) for e in raw_events]
+        parse_ms = (time.time() - t_parse) * 1000
+        trace(f"PARSE_DONE page_key={page_key} raw_events={len(raw_events)} events={len(events)} ms={parse_ms:.0f}")
 
-                set_worker_state(page_key, f"crop{ci}_inference")
-                trace(f"CROP_CALL_START page_key={crop_key} url={url}")
-                t_llm = time.time()
-                raw_crop = vllm_vision(url, b64, PROMPT, max_tokens=CROP_MAX_TOKENS)
-                crop_llm = time.time() - t_llm
-                total_llm_time += crop_llm
-                trace(f"CROP_CALL_DONE page_key={crop_key} elapsed={crop_llm:.2f}s chars={len(raw_crop)}")
+        # ── Post-process (inline, 4-layer) ──
+        set_worker_state(page_key, "post_process")
+        issue_year = int(year) if year.isdigit() else None
+        events = [post_process(ev, issue_year=issue_year) for ev in events]
 
-                all_crop_raw.append(raw_crop)
-                crop_events = parse_result(raw_crop)
-                all_crop_events.append(crop_events)
-                trace(f"CROP_PARSED page_key={crop_key} events={len(crop_events)}")
-
-            # ── Merge and deduplicate crop results ──
-            set_worker_state(page_key, "merge_dedup")
-            raw_events = merge_crop_events(all_crop_events)
-            events = [normalize(e) for e in raw_events]
-            raw = "\n---CROP---\n".join(all_crop_raw)
-            llm_time = total_llm_time
-            jpg_bytes = total_jpg_bytes
-            trace(f"MERGE_DONE page_key={page_key} pre_dedup={sum(len(c) for c in all_crop_events)} post_dedup={len(events)}")
-
-        else:
-            # ── Single-shot extraction (sparse page) ──
-            set_worker_state(page_key, "base64_encode")
-            t_enc = time.time()
-            b64, jpg_bytes = img_to_base64(img)
-            enc_ms = (time.time() - t_enc) * 1000
-            trace(f"BASE64_DONE page_key={page_key} jpg_kb={jpg_bytes//1024} b64_kb={len(b64)//1024} ms={enc_ms:.0f}")
-
-            set_worker_state(page_key, "vllm_inference")
-            trace(f"VLLM_CALL_START page_key={page_key} url={url}")
-            t_llm = time.time()
-            raw = vllm_vision(url, b64, PROMPT)
-            llm_time = time.time() - t_llm
-            trace(f"VLLM_CALL_DONE page_key={page_key} elapsed={llm_time:.2f}s chars={len(raw)}")
-
-            if not raw:
-                log.warning(f"EMPTY RESPONSE for {page_key} after {llm_time:.1f}s")
-                trace(f"VLLM_EMPTY page_key={page_key}")
-
-            set_worker_state(page_key, "parse")
-            t_parse = time.time()
-            raw_events = parse_result(raw)
-            events = [normalize(e) for e in raw_events]
-            parse_ms = (time.time() - t_parse) * 1000
-            trace(f"PARSE_DONE page_key={page_key} raw_events={len(raw_events)} events={len(events)} ms={parse_ms:.0f}")
-
-        # ── Final deduplication (always) ──
-        seen_keys = set()
-        deduped = []
-        for ev in events:
-            key = (ev.get('vessel_name','').lower(),
-                   ev.get('captain','') or '',
-                   ev.get('event_type',''),
-                   ev.get('date',''),
-                   (ev.get('port','') or '').lower())
-            if key not in seen_keys:
-                seen_keys.add(key)
-                deduped.append(ev)
-        events = deduped
+        # ── Deduplicate ──
+        n_before_dedup = len(events)
+        events = dedup_events(events)
+        if n_before_dedup > len(events):
+            trace(f"DEDUP page_key={page_key} before={n_before_dedup} after={len(events)}")
 
         total_ms = (time.time() - page_t0) * 1000
         trace(f"PAGE_DONE page_key={page_key} events={len(events)} total_ms={total_ms:.0f} llm_ms={llm_time*1000:.0f}")
 
-        # Log first 100 chars of raw response for debugging
+        # Log progress
         raw_preview = raw[:200].replace("\n", "\\n") if raw else "(empty)"
-        log.info(f"✓ {page_key}: {len(events)} events in {llm_time:.1f}s | raw_preview={raw_preview[:100]}")
+        log.info(f"✓ {page_key} [{page_type}]: {len(events)} events in {llm_time:.1f}s | raw_preview={raw_preview[:100]}")
 
         result = {
             "pdf": pdf_name,
             "year": int(year),
             "page": pg,
             "page_key": page_key,
+            "page_type": page_type,
+            "page_route": route_reason,
             "extracted_at": datetime.now().isoformat(),
             "gpu_id": gpu_id,
             "llm_time_s": round(llm_time, 2),
@@ -902,10 +1004,9 @@ def process_page(args):
             "n_events": len(events),
             "output_chars": len(raw),
             "raw_llm_response": raw,
-            "tiled": use_tiling,
-            "n_crops": len(crops) if use_tiling else 1,
             "timing": {
                 "render_ms": round(render_ms, 1),
+                "encode_ms": round(enc_ms, 1),
                 "llm_ms": round(llm_time * 1000, 1),
                 "total_ms": round(total_ms, 1),
             },
@@ -939,15 +1040,17 @@ def process_page(args):
 def main():
     global VLLM_URLS, NUM_GPUS
     log.info("=" * 60)
-    log.info("WSL EXTRACTION WORKER — DIAGNOSTIC BUILD")
+    log.info("WSL EXTRACTION WORKER — V2 (SINGLE-SHOT, NO TILING)")
     log.info("=" * 60)
     log.info(f"Config: DPI={RENDER_DPI} MAX_TOKENS={MAX_TOKENS} NUM_GPUS={NUM_GPUS}")
+    log.info(f"Worker pool: {NUM_GPUS} × {WORKER_MULTIPLIER} = {NUM_GPUS * WORKER_MULTIPLIER} workers")
     log.info(f"URLs: {VLLM_URLS}")
     log.info(f"Output: {JSONL_FILE}")
+    if TEST_YEAR:
+        log.info(f"Year filter: {TEST_YEAR}")
 
     # ── Pre-flight ──
     healthy_urls = run_preflight()
-    # Update globals to use only healthy URLs
     VLLM_URLS = healthy_urls
     NUM_GPUS = len(healthy_urls)
     log.info(f"Using {NUM_GPUS} healthy servers: {VLLM_URLS}")
@@ -956,12 +1059,11 @@ def main():
     progress = load_progress()
     completed_pdfs = set(progress.get("completed", {}).keys())
 
-    test_year = os.environ.get("TEST_YEAR", "")
     pdf_paths = sorted(glob.glob(str(PDF_DIR / "*/*.pdf")))
-    if test_year:
+    if TEST_YEAR:
         pdf_paths = [p for p in pdf_paths
-                     if os.path.basename(os.path.dirname(p)) == test_year]
-        log.info(f"TEST MODE: filtered to year {test_year} → {len(pdf_paths)} PDFs")
+                     if os.path.basename(os.path.dirname(p)) == TEST_YEAR]
+        log.info(f"YEAR FILTER: {TEST_YEAR} → {len(pdf_paths)} PDFs")
     pending = [p for p in pdf_paths if p not in completed_pdfs]
     log.info(f"Corpus: {len(pdf_paths)} PDFs | Completed: {len(completed_pdfs)} | "
              f"Pending: {len(pending)}")
@@ -997,9 +1099,10 @@ def main():
     page_times = []
     pdf_events = {}
 
-    with ThreadPoolExecutor(max_workers=NUM_GPUS) as executor:
-        log.info(f"ThreadPool started with {NUM_GPUS} workers")
-        trace(f"THREADPOOL_START workers={NUM_GPUS} pages={len(work_items)}")
+    n_workers = NUM_GPUS * WORKER_MULTIPLIER
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        log.info(f"ThreadPool started with {n_workers} workers (queue starvation fix)")
+        trace(f"THREADPOOL_START workers={n_workers} pages={len(work_items)}")
 
         futures = {}
         for i, item in enumerate(work_items):
@@ -1045,7 +1148,7 @@ def main():
                 with progress_lock:
                     save_progress(progress)
 
-            # Log every 10 pages (more frequently for diagnostics)
+            # Log every 10 pages
             if total_pages % 10 == 0:
                 elapsed = time.time() - t_start
                 avg_t = np.mean(page_times[-100:]) if page_times else 0
@@ -1074,7 +1177,7 @@ def main():
     avg = np.mean(page_times) if page_times else 0
     tput = total_pages / elapsed * 3600 if elapsed > 0 else 0
     log.info(f"\n{'='*60}")
-    log.info(f"EXTRACTION COMPLETE")
+    log.info(f"EXTRACTION V2 COMPLETE")
     log.info(f"{'='*60}")
     log.info(f"PDFs:       {len(progress['completed']):,}")
     log.info(f"Pages:      {total_pages:,}")
@@ -1089,7 +1192,7 @@ if __name__ == "__main__":
     main()
 PYEOF
 
-# ─── Shutdown vLLM servers first (free GPU memory for clean exit) ─────────
+# ─── Shutdown vLLM servers ────────────────────────────────────────────────
 echo ""
 echo "Shutting down all vLLM servers..."
 for pid in "${VLLM_PIDS[@]}"; do
@@ -1105,8 +1208,7 @@ echo "Results at: ${FINAL_OUTPUT_DIR}"
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  Job complete at $(date)"
-echo "║  Scratch: ${OUTPUT_DIR}/wsl_events.jsonl"
-echo "║  Final:   ${FINAL_OUTPUT_DIR}/wsl_events.jsonl"
+echo "║  Output: ${FINAL_OUTPUT_DIR}"
 echo "╚══════════════════════════════════════════════════════════════╝"
 
 # Print resource information (ICER best practice)
