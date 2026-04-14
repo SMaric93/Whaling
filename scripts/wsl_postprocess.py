@@ -28,12 +28,25 @@ from collections import Counter
 VALID_EVENT_TYPES = {"dep", "arr", "spk", "rpt", "inp", "wrk"}
 
 EVENT_TYPE_MAP = {
+    # In port variants
     "in port": "inp", "inport": "inp", "in_port": "inp",
+    "in": "inp", "ir port": "inp",
+    "in port, ll'g": "inp", "in port fit'g": "inp", "in port,fit'g": "inp",
+    # Departure variants
     "sailed": "dep", "sail": "dep", "departure": "dep", "departed": "dep",
+    "to sail": "dep", "cleared": "dep", "despatched": "dep",
+    # Arrival variants
     "arrived": "arr", "arrival": "arr",
-    "spoken": "spk", "spk'd": "spk",
-    "reported": "rpt", "report": "rpt",
+    "returned": "arr", "landed": "arr",
+    # Spoken variants
+    "spoken": "spk", "spk'd": "spk", "spoke": "spk", "sp": "spk",
+    "heard from": "rpt",
+    # Reported variants
+    "reported": "rpt", "report": "rpt", "rep": "rpt",
+    # Wreck / loss variants
     "wreck": "wrk", "wrecked": "wrk", "condemned": "wrk", "lost": "wrk",
+    "cond": "wrk", "sold": "wrk", "sunk": "wrk", "burnt": "wrk",
+    "crushed": "wrk", "loss": "wrk",
 }
 
 VALID_VESSEL_TYPES = {"ship", "bark", "brig", "sch"}
@@ -49,10 +62,27 @@ VESSEL_TYPE_MAP = {
 }
 
 # Suffixes that indicate vessel type bled into vessel name
-VESSEL_TYPE_SUFFIXES = [
+# V3: Sorted by length descending to prevent partial-match issues
+VESSEL_TYPE_SUFFIXES = sorted([
     ", bark", ", bk", ", brk", ", ship", ", brig", ", sch", ", schooner",
     " bark", " bk", " ship", " brig", " sch",
-]
+], key=len, reverse=True)
+
+# V3: Biophysical limits for cargo quantities
+MAX_OIL_BBLS = 5000   # Historical max per voyage: ~4000-5000 barrels
+MAX_BONE_LBS = 60000  # Historical max per voyage: ~50,000 lbs
+
+# V3: Unicode fraction map for cargo parsing
+FRACTIONS = {"¼": 0.25, "½": 0.5, "¾": 0.75}
+
+# V3: Port stop-list for detecting column-alignment hallucinations
+KNOWN_PORTS_LOWER = {
+    "nantucket", "new bedford", "new london", "fairhaven", "san francisco",
+    "provincetown", "boston", "new york", "honolulu", "edgartown",
+    "sag harbor", "cold spring harbor", "greenport", "stonington",
+    "westport", "mystic", "warren", "mattapoisett", "newport",
+    "dartmouth", "holmes hole", "wareham",
+}
 
 # Known OCR port corrections (extend as needed)
 PORT_CORRECTIONS = {
@@ -172,35 +202,76 @@ def strip_type_from_name(ev):
     return ev
 
 
+def _parse_cargo_number(val, max_limit):
+    """Parse a cargo quantity with strict validation.
+
+    V3 fixes:
+      - 'clean' → 0 (true zero, not None — ship caught 0 whales)
+      - Rejects values with alphabetic characters (e.g. '1 whale')
+      - Handles unicode fractions (e.g. '7½' → 7.5)
+      - Extracts only the first contiguous digit block (prevents
+        '1 1/2' → '112' and '18,000' stays '18000')
+      - Applies biophysical ceiling (nullifies impossible values)
+    """
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        if val < 0:
+            return None
+        if val > max_limit:
+            return None
+        return int(val) if val == int(val) else val
+
+    s = str(val).strip()
+    if not s:
+        return None
+    s_lower = s.lower()
+
+    # V3: "clean" means 0 whales caught — true zero, not missing data.
+    # Treating this as None would drop valid $0-revenue observations from
+    # the econometric panel, biasing estimated returns upward.
+    if s_lower in ("clean", "cl", "cln"):
+        return 0
+
+    # Genuinely missing data
+    if s_lower in ("not stated", "none", "no report", "ns", "n/s", ""):
+        return None
+
+    # Reject obvious non-quantity text (has letters → not a number)
+    if re.search(r"[a-df-z]", s_lower):  # allow 'e' for scientific notation edge case
+        return None
+
+    # Handle unicode fractions (e.g., "7½")
+    for ch, frac in FRACTIONS.items():
+        if ch in s:
+            base = s.replace(ch, "").strip()
+            base = re.sub(r"[^\d]", "", base)
+            if base and base.isdigit():
+                result = int(base) + frac
+                return result if result <= max_limit else None
+            return frac if frac <= max_limit else None
+
+    # Extract FIRST contiguous sequence of digits
+    # (prevents "1 1/2" → "112" and handles "18,000" → "18" correctly
+    #  since we take the first block; for comma-separated numbers,
+    #  remove commas first)
+    cleaned = s.replace(",", "")
+    m = re.search(r"\d+", cleaned)
+    if m:
+        extracted = int(m.group())
+        return extracted if extracted <= max_limit else None
+
+    return None
+
+
 def coerce_oil_values(ev):
-    """Convert oil/bone string values to integers where possible."""
-    for field in ("oil_sperm_bbls", "oil_whale_bbls", "bone_lbs"):
-        val = ev.get(field)
-        if val is None:
-            continue
-        if isinstance(val, (int, float)):
-            ev[field] = int(val) if val >= 0 else None
-            continue
-        if isinstance(val, str):
-            s = val.strip().lower()
-            # Qualitative values → null
-            if s in ("clean", "not stated", "none", "no report", ""):
-                ev[field] = None
-                if s and s != "":
-                    # Preserve the qualitative note in remarks
-                    remarks = ev.get("remarks") or ""
-                    if s not in remarks.lower():
-                        ev["remarks"] = f"{remarks}; {field}={val}".lstrip("; ")
-                continue
-            # Try to parse as integer (strip non-digits)
-            digits = re.sub(r"[^\d]", "", s)
-            if digits:
-                try:
-                    ev[field] = int(digits)
-                except ValueError:
-                    ev[field] = None
-            else:
-                ev[field] = None
+    """Convert oil/bone string values to integers where possible.
+
+    V3: Uses strict cargo parser with biophysical limits.
+    """
+    ev["oil_sperm_bbls"] = _parse_cargo_number(ev.get("oil_sperm_bbls"), MAX_OIL_BBLS)
+    ev["oil_whale_bbls"] = _parse_cargo_number(ev.get("oil_whale_bbls"), MAX_OIL_BBLS)
+    ev["bone_lbs"] = _parse_cargo_number(ev.get("bone_lbs"), MAX_BONE_LBS)
     return ev
 
 
@@ -324,6 +395,19 @@ def validate_hard(ev):
                 ev["date"] = et
             ev["event_type"] = "dep"
             flags.append("date_in_event_type_corrected")
+        elif et.lower().startswith("arrived "):
+            # "arrived november 27, 71" — full arrival string leaked
+            date_part = et[8:].strip()
+            if not ev.get("date") and date_part:
+                ev["date"] = date_part
+            ev["event_type"] = "arr"
+            flags.append("date_in_event_type_corrected")
+        elif re.match(r"^\d{1,2},?\s*'\d{2}$", et):
+            # Bare date fragment like "12, '10" or "3, '10"
+            if not ev.get("date"):
+                ev["date"] = et
+            ev["event_type"] = "dep"
+            flags.append("date_in_event_type_corrected")
         else:
             flags.append(f"invalid_event_type:{et}")
 
@@ -380,8 +464,35 @@ def validate_section(ev, issue_year=None):
     return ev, flags
 
 
-def validate_soft(ev):
-    """Compute a confidence score based on field completeness and consistency."""
+def validate_alignment(ev):
+    """V3: Detect column-alignment hallucinations using port stop-list."""
+    flags = []
+    vessel = (ev.get("vessel_name") or "").strip().lower()
+    captain = (ev.get("captain") or "").strip().lower()
+
+    # Vessel name is actually a port name (column misalignment)
+    if vessel in KNOWN_PORTS_LOWER:
+        flags.append(f"vessel_is_port_name:{vessel}")
+
+    # Captain name is actually a port name
+    if captain in KNOWN_PORTS_LOWER:
+        flags.append(f"captain_is_port_name:{captain}")
+        ev["captain"] = None  # Nullify — clearly wrong
+
+    # Echo detection: vessel and captain are identical (VLM hallucination)
+    if vessel and captain and vessel == captain:
+        flags.append("vessel_captain_echo")
+
+    return ev, flags
+
+
+def validate_soft(ev, all_flags=None):
+    """Compute a confidence score based on field completeness, consistency,
+    and quality flags.
+
+    V3: Confidence is now penalized by validation flags, making it a usable
+    filter for downstream analysis.
+    """
     score = 1.0
     penalties = []
 
@@ -407,6 +518,20 @@ def validate_soft(ev):
     if captain and len(captain) < 2:
         score -= 0.1
         penalties.append("very_short_captain")
+
+    # V3: Flag-based penalties (makes confidence reflect actual quality)
+    if all_flags:
+        for f in all_flags:
+            if f.startswith("vessel_is_port_name"):
+                score -= 0.4
+            elif f.startswith("captain_is_port_name"):
+                score -= 0.15
+            elif f == "vessel_captain_echo":
+                score -= 0.3
+            elif f.startswith("invalid_event_type"):
+                score -= 0.1
+            elif f == "likely_registry_not_weekly":
+                score -= 0.05
 
     return ev, max(0.0, round(score, 2)), penalties
 
@@ -459,7 +584,10 @@ def deduplicate_events(events):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def post_process_event(ev, issue_year=None):
-    """Run all 4 layers on a single event. Returns (event, flags, confidence)."""
+    """Run all 5 layers on a single event. Returns (event, flags, confidence).
+
+    V3: Added alignment validation layer and flag-based confidence scoring.
+    """
     # Layer 1: Raw preservation
     ev = preserve_raw(ev)
 
@@ -478,9 +606,15 @@ def post_process_event(ev, issue_year=None):
     # Layer 4: Validation
     ev, hard_flags = validate_hard(ev)
     ev, section_flags = validate_section(ev, issue_year)
-    ev, confidence, soft_penalties = validate_soft(ev)
 
-    all_flags = hard_flags + section_flags
+    # V3 Layer 5: Column-alignment detection (port stop-list)
+    ev, alignment_flags = validate_alignment(ev)
+
+    all_flags = hard_flags + section_flags + alignment_flags
+
+    # V3: Confidence now reflects flags
+    ev, confidence, soft_penalties = validate_soft(ev, all_flags=all_flags)
+
     ev["_flags"] = all_flags if all_flags else None
     ev["_confidence"] = confidence
 
