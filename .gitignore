@@ -1,3 +1,4 @@
+.venv/
 venv/
 venv2/
 __pycache__/
@@ -28,6 +29,13 @@ data/
 # Output folders
 output/
 outputs/
+
+# Models
+models/
+
+# Logs
+nohup.out
+*.log
 
 # OS files
 .DS_Store

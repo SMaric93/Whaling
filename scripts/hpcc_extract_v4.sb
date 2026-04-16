@@ -1,0 +1,1980 @@
+#!/bin/bash --login
+###############################################################################
+# WSL Extraction Pipeline V4 — MSU ICER HPCC
+#
+# Changes from V3:
+#   - Image preprocessing pipeline (5 stages):
+#       1. Frame crop: remove black microfilm borders/neighbor-page slivers
+#       2. Table segmentation: isolate shipping table from ad columns
+#       3. Deskew: Hough-line based small-angle correction
+#       4. Horizontal banding: split dense tables into 3 overlapping bands
+#       5. Conditional cleanup: background flatten + despeckle (degraded only)
+#   - Band-level VLM inference: each band gets its own VLM call
+#   - Events merged and deduplicated across bands
+#   - Preprocessing metadata attached to output JSON
+#   - opencv-python-headless added to dependencies
+#
+# Inherited from V3:
+#   - Router-based prompt selection (table, narrative, registry)
+#   - Page-level checkpoint manifest
+#   - finish_reason + sidecar debug files
+#   - Strict cargo parsing with biophysical limits
+#   - Port stop-list column-alignment detection
+#   - Flag-based confidence scoring
+#
+# Usage:
+#   sbatch scripts/hpcc_extract_v4.sb                # full corpus
+#   sbatch scripts/hpcc_extract_v4.sb --test         # single year (1850)
+#   sbatch scripts/hpcc_extract_v4.sb --test 1860    # single year (custom)
+#   sbatch --array=1843-1914 scripts/hpcc_extract_v4.sb  # one year per job
+###############################################################################
+
+#SBATCH --job-name=wsl_v4
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=192G
+#SBATCH --time=4:00:00
+#SBATCH --partition=general-short
+#SBATCH --constraint="a100|h200|l40s"
+#SBATCH --output=/mnt/research/CEO_Complementarities/maricste/data/extracted/logs/%x-%j_%a.out
+#SBATCH --error=/mnt/research/CEO_Complementarities/maricste/data/extracted/logs/%x-%j_%a.err
+#SBATCH --mail-type=END,FAIL
+
+set -euo pipefail
+
+# ─── Cleanup trap ───────────────────────────────────────────────────────────
+cleanup() {
+    echo "Received signal, cleaning up vLLM servers..."
+    for pid in "${VLLM_PIDS[@]:-}"; do
+        kill $pid 2>/dev/null
+    done
+    wait 2>/dev/null || true
+    exit 1
+}
+trap cleanup SIGTERM SIGINT SIGHUP
+
+# ─── Parse --test flag ──────────────────────────────────────────────────────
+TEST_YEAR=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --test)
+            TEST_YEAR="${2:-1850}"
+            if [[ "${2:-}" =~ ^[0-9]{4}$ ]]; then shift; fi
+            shift
+            ;;
+        *) shift ;;
+    esac
+done
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+CONDA_ENV_NAME="wsl_extract"
+MODEL_ID="Qwen/Qwen3-VL-32B-Instruct-FP8"
+HF_CACHE="/mnt/research/CEO_Complementarities/maricste/hf_cache"
+FINAL_OUTPUT_DIR="/mnt/research/CEO_Complementarities/maricste/data/extracted"
+SCRATCH_BASE="/mnt/scratch/maricste/wsl_extract_${SLURM_JOB_ID:-local}"
+OUTPUT_DIR="${SCRATCH_BASE}"
+PDF_DIR="/mnt/home/maricste/PDFs"
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+NUM_GPUS=${NUM_GPUS:-4}
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
+BASE_PORT=$((8100 + (${SLURM_JOB_ID:-$$} % 1900)))
+
+export HF_HOME="${HF_CACHE}"
+export HF_HUB_CACHE="${HF_CACHE}/hub"
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
+export TMPDIR="${SCRATCH_BASE}/tmp"
+export TEMP="${SCRATCH_BASE}/tmp"
+export TMP="${SCRATCH_BASE}/tmp"
+export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
+export HF_HUB_DISABLE_XET=1
+
+mkdir -p "${OUTPUT_DIR}" "${TMPDIR}"
+
+# ─── SLURM job array support ───────────────────────────────────────────────
+ARRAY_YEAR="${SLURM_ARRAY_TASK_ID:-}"
+if [ -n "${ARRAY_YEAR}" ]; then
+    TEST_YEAR="${ARRAY_YEAR}"
+fi
+
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  WSL Extraction Pipeline V4 — Preprocessor + Banding       ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+echo "║  Job ID:  ${SLURM_JOB_ID:-local}"
+echo "║  Array:   ${ARRAY_YEAR:-none}"
+echo "║  Node:    $(hostname)"
+echo "║  GPUs:    ${NUM_GPUS}× ${GPU_NAME}"
+echo "║  Model:   ${MODEL_ID}"
+if [ -n "${TEST_YEAR}" ]; then
+echo "║  Mode:    YEAR ${TEST_YEAR}"
+else
+echo "║  Mode:    FULL CORPUS"
+fi
+echo "║  Time:    $(date)"
+echo "╚══════════════════════════════════════════════════════════════╝"
+nvidia-smi -L 2>/dev/null || true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 1: Environment Setup
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[1/4] Setting up environment..."
+
+module purge
+module load Conda/3
+module load CUDA/12.4.0
+
+if ! conda env list | grep -q "^${CONDA_ENV_NAME} "; then
+    echo "  Creating conda environment: ${CONDA_ENV_NAME}"
+    conda create -y --name "${CONDA_ENV_NAME}" python=3.11 pip
+fi
+conda activate "${CONDA_ENV_NAME}"
+
+export PIP_CACHE_DIR="${SCRATCH_BASE}/.pip_cache"
+export CONDA_PKGS_DIRS="${SCRATCH_BASE}/.conda_pkgs"
+mkdir -p "${PIP_CACHE_DIR}" "${CONDA_PKGS_DIRS}"
+
+pip install --quiet --upgrade pip
+pip install --quiet --cache-dir "${PIP_CACHE_DIR}" \
+    "vllm>=0.11.0" \
+    "transformers>=4.57.0" \
+    "qwen-vl-utils" \
+    "pypdfium2" \
+    "Pillow" \
+    "numpy" \
+    "requests" \
+    "opencv-python-headless"
+
+echo "  Python:  $(python3 --version)"
+echo "  vLLM:    $(python3 -c 'import vllm; print(vllm.__version__)' 2>/dev/null)"
+echo "  CUDA:    $(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo 'unknown')"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 2: Download Model
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[2/4] Checking model cache..."
+
+MODEL_LOCAL_DIR="${HF_CACHE}/models/Qwen3-VL-32B-Instruct-FP8"
+mkdir -p "${MODEL_LOCAL_DIR}"
+
+python3 -c "
+import os, glob
+os.environ['HF_HUB_DISABLE_XET'] = '1'
+
+local_dir = '${MODEL_LOCAL_DIR}'
+existing = glob.glob(os.path.join(local_dir, '*.safetensors'))
+if existing:
+    print(f'  Model already present ({len(existing)} safetensor files)')
+else:
+    print(f'  Downloading to {local_dir}...')
+    from huggingface_hub import snapshot_download
+    snapshot_download('${MODEL_ID}', local_dir=local_dir, max_workers=2)
+    print('  Download complete')
+print(f'  Model ready at: {local_dir}')
+"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 3: Launch vLLM Servers
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[3/4] Starting ${NUM_GPUS} vLLM servers (staggered launch)..."
+
+GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || true)
+GPU_MEM_MB=${GPU_MEM_MB:-0}
+echo "  GPU VRAM: ${GPU_MEM_MB} MB"
+
+if [ "${GPU_MEM_MB}" -lt 40000 ]; then
+    MAX_MODEL_LEN=4096; MAX_NUM_SEQS=2; GPU_MEM_UTIL=0.95
+    echo "  Config: V100S mode"
+elif [ "${GPU_MEM_MB}" -lt 50000 ]; then
+    MAX_MODEL_LEN=8192; MAX_NUM_SEQS=4; GPU_MEM_UTIL=0.95
+    echo "  Config: L40S mode (46GB)"
+elif [ "${GPU_MEM_MB}" -lt 90000 ]; then
+    MAX_MODEL_LEN=16384; MAX_NUM_SEQS=8; GPU_MEM_UTIL=0.90
+    echo "  Config: A100 mode (80GB)"
+else
+    MAX_MODEL_LEN=32768; MAX_NUM_SEQS=24; GPU_MEM_UTIL=0.90
+    echo "  Config: H200 mode (141GB) — 32k context, 24 seqs"
+fi
+
+VLLM_PIDS=()
+for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
+    port=$((BASE_PORT + gpu_id))
+    echo "  GPU ${gpu_id} → port ${port}"
+
+    OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=${gpu_id} python3 -m vllm.entrypoints.openai.api_server \
+        --model "${MODEL_LOCAL_DIR}" \
+        --dtype auto \
+        --generation-config vllm \
+        --max-model-len ${MAX_MODEL_LEN} \
+        --max-num-seqs ${MAX_NUM_SEQS} \
+        --gpu-memory-utilization ${GPU_MEM_UTIL} \
+        --port ${port} \
+        --trust-remote-code \
+        --served-model-name "${MODEL_ID}" \
+        --limit-mm-per-prompt.image 1 \
+        --limit-mm-per-prompt.video 0 \
+        --mm-processor-cache-gb 0 \
+        > "${OUTPUT_DIR}/vllm_gpu${gpu_id}_${SLURM_JOB_ID:-local}.log" 2>&1 &
+    VLLM_PIDS+=($!)
+
+    if [ $gpu_id -lt $((NUM_GPUS - 1)) ]; then
+        echo "    (waiting 15s before next launch...)"
+        sleep 15
+    fi
+done
+
+echo "  Waiting for all servers to initialize..."
+WORKING_GPUS=0
+WORKING_GPU_IDS=""
+for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
+    port=$((BASE_PORT + gpu_id))
+    SERVER_READY=0
+    for i in $(seq 1 420); do
+        if curl -s "http://localhost:${port}/v1/models" 2>/dev/null | grep -q "Qwen"; then
+            echo "  ✓ GPU ${gpu_id} ready (${i}s)"
+            SERVER_READY=1
+            WORKING_GPUS=$((WORKING_GPUS + 1))
+            WORKING_GPU_IDS="${WORKING_GPU_IDS} ${gpu_id}"
+            break
+        fi
+        if ! kill -0 ${VLLM_PIDS[$gpu_id]} 2>/dev/null; then
+            echo "  ✗ GPU ${gpu_id} process died."
+            break
+        fi
+        sleep 1
+    done
+    if [ $SERVER_READY -eq 0 ]; then
+        echo "  ⚠ GPU ${gpu_id} failed — continuing without it"
+        kill ${VLLM_PIDS[$gpu_id]} 2>/dev/null || true
+    fi
+done
+
+if [ $WORKING_GPUS -eq 0 ]; then
+    echo "ERROR: No GPU servers started. Aborting."
+    for pid in "${VLLM_PIDS[@]}"; do kill $pid 2>/dev/null; done
+    exit 1
+fi
+
+HEALTHY_PORTS=""
+for gpu_id in ${WORKING_GPU_IDS}; do
+    port=$((BASE_PORT + gpu_id))
+    HEALTHY_PORTS="${HEALTHY_PORTS}${port},"
+done
+HEALTHY_PORTS="${HEALTHY_PORTS%,}"
+
+NUM_GPUS=$WORKING_GPUS
+echo "  ${WORKING_GPUS} servers ready (ports: ${HEALTHY_PORTS})"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Step 4: Extraction Pipeline V4
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[4/4] Running V4 extraction..."
+
+# V3: Export MAX_NUM_SEQS so Python can scale worker pool dynamically
+export NUM_GPUS HEALTHY_PORTS MODEL_ID OUTPUT_DIR PDF_DIR TEST_YEAR FINAL_OUTPUT_DIR MAX_NUM_SEQS MAX_MODEL_LEN
+
+srun -c "${SLURM_CPUS_PER_TASK:-32}" python3 - << 'PYEOF'
+"""
+WSL Extraction Worker V4 — Preprocessor + Band-Level VLM Inference.
+
+Changes from V3:
+  - Image preprocessing (crop, segment, deskew, band, cleanup)
+  - Band-level VLM calls: each band gets its own inference call
+  - Events merged and deduplicated across bands
+  - Preprocessing metadata in output JSON
+  - opencv-python-headless for image transformations
+
+Inherited from V3:
+  - Prompt routed by page type
+  - Page-level manifest checkpoint
+  - finish_reason + sidecar debugging
+  - Strict cargo parsing with biophysical limits
+  - Port stop-list, flag-based confidence
+"""
+import os, sys, time, json, re, glob, base64, logging, threading, traceback
+from pathlib import Path
+from datetime import datetime, timedelta
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import numpy as np
+import pypdfium2 as pdfium
+from PIL import Image
+import requests
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+# ─── Config ────────────────────────────────────────────────────────────────
+HEALTHY_PORTS = [int(p) for p in os.environ["HEALTHY_PORTS"].split(",")]
+VLLM_URLS = [f"http://localhost:{p}/v1/chat/completions" for p in HEALTHY_PORTS]
+NUM_GPUS = len(VLLM_URLS)
+MODEL_ID = os.environ["MODEL_ID"]
+OUTPUT_DIR = Path(os.environ["OUTPUT_DIR"])
+FINAL_DIR = Path(os.environ.get("FINAL_OUTPUT_DIR", str(OUTPUT_DIR)))
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
+PDF_DIR = Path(os.environ["PDF_DIR"])
+TEST_YEAR = os.environ.get("TEST_YEAR", "")
+
+# Output file naming — write to scratch during extraction, copy to FINAL_DIR at end
+if TEST_YEAR:
+    JSONL_FILE = OUTPUT_DIR / f"wsl_events_{TEST_YEAR}.jsonl"
+    MANIFEST_FILE = OUTPUT_DIR / f"wsl_manifest_{TEST_YEAR}.jsonl"
+    FINAL_JSONL = FINAL_DIR / f"wsl_events_{TEST_YEAR}.jsonl"
+    FINAL_MANIFEST = FINAL_DIR / f"wsl_manifest_{TEST_YEAR}.jsonl"
+else:
+    JSONL_FILE = OUTPUT_DIR / "wsl_events.jsonl"
+    MANIFEST_FILE = OUTPUT_DIR / "wsl_manifest.jsonl"
+    FINAL_JSONL = FINAL_DIR / "wsl_events.jsonl"
+    FINAL_MANIFEST = FINAL_DIR / "wsl_manifest.jsonl"
+
+# Seed scratch copies from FINAL_DIR so manifest-based resume works
+import shutil
+for src, dst in [(FINAL_JSONL, JSONL_FILE), (FINAL_MANIFEST, MANIFEST_FILE)]:
+    if src.exists() and not dst.exists():
+        shutil.copy2(src, dst)
+
+RAW_SIDECAR_DIR = FINAL_DIR / "raw_pages" / (TEST_YEAR or "all")
+try:
+    RAW_SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass  # Non-fatal: sidecars are optional debug artifacts
+
+RENDER_DPI = 150  # V4: bumped from 100 — preprocessing thresholds calibrated at 150 DPI
+MAX_TOKENS = 8192  # Default; overridden per-route below
+EXTRACTOR_VERSION = "v4.0"
+
+# Per-route token budgets — dynamically capped by MAX_OUTPUT_TOKENS
+# H200 opt run analysis (1850):
+#   mixed still truncating at 8192 (avg 160 events, max ~6.4k tokens observed but still growing)
+#   sparse still truncating at 4096 (avg 74 events, max ~2.9k tokens)
+#   shipping_table: 2 outlier pages need ~32k tokens (391 events)
+# Strategy: set budgets generously; the dynamic cap keeps L40S/A100 safe.
+TOKEN_BUDGET = {
+    "shipping_table": 30720,  # full H200 ceiling; banded dense pages
+    "registry":       4096,
+    "mixed":         30720,   # densest p4 pages produce ~13k tokens (334 events)
+    "narrative":      4096,
+    "sparse":        16384,   # p5 pages misclassified as sparse; actually dense (~8k tokens)
+}
+
+# V3: Dynamic worker scaling from MAX_NUM_SEQS
+MAX_NUM_SEQS = int(os.environ.get("MAX_NUM_SEQS", "4"))
+WORKER_MULTIPLIER = max(3, int(MAX_NUM_SEQS * 1.5))
+
+# Server context window — used to cap token budgets so they don't exceed
+# MAX_MODEL_LEN minus prompt overhead (~2k tokens for prompt + vision)
+SERVER_MAX_MODEL_LEN = int(os.environ.get("MAX_MODEL_LEN", "16384"))
+MAX_OUTPUT_TOKENS = max(2048, SERVER_MAX_MODEL_LEN - 2048)
+
+# Biophysical limits for cargo quantities
+MAX_OIL_BBLS = 5000
+MAX_BONE_LBS = 60000
+
+write_lock = threading.Lock()
+pdfium_lock = threading.Lock()
+
+# ─── Logging ───────────────────────────────────────────────────────────────
+class FlushHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+class FlushFileHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+log_suffix = f"_{TEST_YEAR}" if TEST_YEAR else ""
+log_handlers = [FlushHandler()]
+try:
+    log_handlers.append(FlushFileHandler(str(OUTPUT_DIR / f"extraction_v4{log_suffix}.log"), mode="a"))
+except OSError:
+    pass  # Quota — fall back to stderr only
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] [T-%(thread)d] %(message)s",
+    handlers=log_handlers,
+)
+log = logging.getLogger("wsl_v4")
+
+try:
+    trace_log_path = OUTPUT_DIR / f"trace_v4{log_suffix}.log"
+    trace_fh = open(trace_log_path, "a", buffering=1)
+except OSError:
+    trace_fh = open(os.devnull, "w")  # Quota — discard trace
+
+def trace(msg):
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    tid = threading.current_thread().ident
+    trace_fh.write(f"{ts} [T-{tid}] {msg}\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V3 CHANGE #1: Prompt router — different prompts per page type
+# ═══════════════════════════════════════════════════════════════════════════
+
+PROMPT_TABLE = """Extract vessel events from this Whalemen's Shipping List page.
+The dense tables follow this column order from left to right:
+VESSELS' NAMES | MASTERS | AGENTS | SAILED | WHERE BOUND | LAST REPORT | OIL
+
+Section headers in ALL CAPS (e.g., "NEW BEDFORD", "NANTUCKET") define the home
+port for all subsequent rows until the next header.
+
+Rules:
+1. Extract exactly what you see using the spatial column order above.
+2. "c" is the captain's surname ONLY. "agent" is the owner/company. Do NOT swap.
+3. "t" must be one of: ship, bark, brig, sch. Do NOT include type in "v".
+4. "hp" is the home port, inherited from the nearest section header above.
+5. "remarks": Put narrative text, coordinates, multi-port lists, or status notes
+   here. Do NOT pollute "d" or "dest".
+6. CRITICAL: Omit keys entirely if the value is missing or null.
+7. "sp"/"wh"/"bn": integers ONLY. If not a clear number, omit.
+
+Example:
+{"v":"A. Tyler","t":"bark","c":"Carroll","agent":"C Mitchell & Co","e":"dep","p":"Dartmouth","d":"July 29, 47","hp":"New Bedford","dest":"Pacific","sp":150,"remarks":"leaking, bound home"}
+
+Return: {"events": [{...}, ...]}
+Return ONLY valid JSON. No explanation. No markdown."""
+
+PROMPT_NARRATIVE = """Extract vessel events mentioned on this Whalemen's Shipping List page.
+This page contains narrative text, arrival/departure reports, or marine intelligence.
+Look for mentions of vessels with their status (arrived, sailed, spoken, reported, etc).
+
+For each event, extract:
+- "v": vessel name
+- "t": vessel type (ship, bark, brig, sch) if mentioned
+- "c": captain surname
+- "e": event type — one of: dep, arr, spk, rpt, inp, wrk, cnd, cap
+- "d": date if mentioned
+- "p": port or location
+- "hp": home port if mentioned
+- "sp"/"wh"/"bn": oil sperm (bbls), oil whale (bbls), bone (lbs) — integers ONLY
+- "remarks": any additional details, coordinates, cargo notes
+
+If the page has NO vessel events (advertisements, editorials only), return: {"events": []}
+
+Return: {"events": [{...}, ...]}
+Return ONLY valid JSON. No explanation. No markdown."""
+
+PROMPT_REGISTRY = """Extract the vessel registry entries from this Whalemen's Shipping List page.
+This appears to be a comprehensive fleet listing. Each row represents a vessel currently
+at sea or recently returned.
+
+For each vessel, extract:
+- "v": vessel name
+- "t": vessel type (ship, bark, brig, sch)
+- "c": captain surname
+- "agent": owner/agent company
+- "e": "dep" (these are registry entries tracking departures)
+- "d": departure date
+- "hp": home port (from section header)
+- "dest": destination / whaling ground
+- "sp"/"wh"/"bn": latest reported oil/bone quantities — integers ONLY
+- "remarks": any status notes
+
+Return: {"events": [{...}, ...]}
+Return ONLY valid JSON. No explanation. No markdown."""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Constants
+# ═══════════════════════════════════════════════════════════════════════════
+
+VALID_EVENT_TYPES = {"dep","arr","spk","rpt","inp","wrk","cnd","cap","ret","sold","lost"}
+VALID_VESSEL_TYPES = {"ship","bark","brig","sch"}
+EVENT_TYPE_MAP = {
+    "sailed": "dep", "departed": "dep", "cleared": "dep", "departure": "dep",
+    "left": "dep", "sd": "dep", "sld": "dep", "sniled": "dep",
+    "arrived": "arr", "arrival": "arr", "arrd": "arr", "returned home": "arr",
+    "came in": "arr", "home": "arr", "returned": "arr", "got in": "arr",
+    "spoken": "spk", "spoke": "spk", "spk with": "spk",
+    "reported": "rpt", "heard from": "rpt", "seen": "rpt", "reports": "rpt",
+    "in port": "inp", "at": "inp", "in": "inp", "lying at": "inp",
+    "wrecked": "wrk", "wreck": "wrk", "lost": "wrk", "condemned": "cnd",
+    "captured": "cap", "taken": "cap", "seized": "cap",
+    "sold": "sold", "withdrawn": "sold",
+}
+VESSEL_TYPE_MAP = {
+    "bk": "bark", "bk.": "bark", "barque": "bark", "barke": "bark",
+    "sh": "ship", "sh.": "ship", "shp": "ship",
+    "bg": "brig", "bg.": "brig",
+    "schr": "sch", "schooner": "sch", "sch.": "sch", "schr.": "sch",
+    "steamer": "steamer",
+}
+# V3: Sorted by length descending to prevent partial-match bugs
+VESSEL_TYPE_SUFFIXES = sorted([
+    ", bark", ", bk", ", brk", ", ship", ", brig", ", sch", ", schooner",
+    " bark", " bk", " ship", " brig", " sch",
+], key=len, reverse=True)
+PORT_CORRECTIONS = {
+    "antucket": "Nantucket", "anticent": "Nantucket", "nantkt": "Nantucket",
+    "n bedford": "New Bedford", "n. bedford": "New Bedford",
+    "new bedfored": "New Bedford", "nb": "New Bedford", "n b": "New Bedford",
+    "n london": "New London", "n. london": "New London",
+    "s harbor": "Sag Harbor", "s. harbor": "Sag Harbor",
+    "greenpt": "Greenport", "p town": "Provincetown", "prov town": "Provincetown",
+    "new bedford": "New Bedford", "nantucket": "Nantucket", "new london": "New London",
+    "newport": "Newport", "mattapoisett": "Mattapoisett",
+    "holmes hole": "Holmes Hole", "holmes' hole": "Holmes Hole",
+    "olmes' hole": "Holmes Hole",
+    "fairhaven": "Fairhaven", "wareham": "Wareham",
+    "cold spring": "Cold Spring Harbor", "stonington": "Stonington",
+    "westport": "Westport", "mystic": "Mystic",
+}
+# V3: Port stop-list for detecting column misalignment
+KNOWN_PORTS_LOWER = {
+    "nantucket", "new bedford", "new london", "fairhaven", "san francisco",
+    "provincetown", "boston", "new york", "honolulu", "edgartown",
+    "sag harbor", "cold spring harbor", "greenport", "stonington",
+    "westport", "mystic", "warren", "mattapoisett", "newport",
+    "dartmouth", "holmes hole", "wareham",
+}
+MONTH_RE = re.compile(
+    r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|"
+    r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Mch)\b",
+    re.IGNORECASE,
+)
+COMPANY_RE = re.compile(r"(&| Co\b| Sons\b| Brothers\b| Bros\b)", re.IGNORECASE)
+
+# V3: Unicode fraction map for cargo parsing
+FRACTIONS = {"¼": 0.25, "½": 0.5, "¾": 0.75}
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────
+
+def img_to_base64(img_array):
+    pil = Image.fromarray(img_array).convert('RGB')
+    buf = BytesIO()
+    pil.save(buf, format="JPEG", quality=90)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return b64, len(buf.getvalue())
+
+
+def _str(val):
+    if val is None:
+        return ""
+    if not isinstance(val, str):
+        return str(val)
+    return val
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V4: Image Preprocessing Pipeline (embedded from wsl_preprocess.py)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def crop_frame(img, dark_thresh=80, min_content_frac=0.15, margin_frac=0.005):
+    """Remove black microfilm borders and neighbor-page slivers."""
+    if cv2 is None:
+        return img, (0, img.shape[0], 0, img.shape[1])
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img.copy()
+    paper = gray > dark_thresh
+    row_paper = paper.mean(axis=1)
+    col_paper = paper.mean(axis=0)
+    row_is_page = row_paper > min_content_frac
+    col_is_page = col_paper > min_content_frac
+    if not row_is_page.any() or not col_is_page.any():
+        return img, (0, h, 0, w)
+    y1 = int(np.argmax(row_is_page))
+    y2 = int(h - np.argmax(row_is_page[::-1]))
+    x1 = int(np.argmax(col_is_page))
+    x2 = int(w - np.argmax(col_is_page[::-1]))
+    my = max(int(h * margin_frac), 2)
+    mx = max(int(w * margin_frac), 2)
+    y1, y2 = max(0, y1 - my), min(h, y2 + my)
+    x1, x2 = max(0, x1 - mx), min(w, x2 + mx)
+    removed_frac = 1.0 - ((y2 - y1) * (x2 - x1)) / (h * w)
+    if removed_frac < 0.02:
+        return img, (0, h, 0, w)
+    return img[y1:y2, x1:x2].copy(), (y1, y2, x1, x2)
+
+
+def _vertical_projection(gray, ink_thresh=180):
+    return (gray < ink_thresh).astype(np.float32).mean(axis=0)
+
+def _horizontal_projection(gray, ink_thresh=180):
+    return (gray < ink_thresh).astype(np.float32).mean(axis=1)
+
+
+def _find_deepest_valley(profile, search_start_frac, search_end_frac,
+                         min_depth_ratio=0.4, min_width=5):
+    """Find deepest relative valley in a 1-D projection profile."""
+    n = len(profile)
+    i1, i2 = int(n * search_start_frac), int(n * search_end_frac)
+    region = profile[i1:i2]
+    if len(region) < min_width * 3:
+        return None
+    med = float(np.median(region))
+    if med < 0.01:
+        return None
+    k = max(5, len(region) // 40)
+    if k % 2 == 0: k += 1
+    smooth = np.convolve(region, np.ones(k) / k, mode='same')
+    min_idx = int(np.argmin(smooth))
+    min_val = float(smooth[min_idx])
+    depth_ratio = 1.0 - min_val / med
+    if depth_ratio < min_depth_ratio:
+        return None
+    half_depth = med - (med - min_val) * 0.5
+    below_half = smooth < half_depth
+    left = min_idx
+    while left > 0 and below_half[left - 1]: left -= 1
+    right = min_idx
+    while right < len(below_half) - 1 and below_half[right + 1]: right += 1
+    width = right - left + 1
+    if width < min_width:
+        return None
+    return (i1 + min_idx, width, depth_ratio)
+
+
+def _count_significant_valleys(profile, min_depth_ratio=0.40, min_width=5):
+    """Count deep valleys to detect intra-table column gutters."""
+    n = len(profile)
+    k = max(5, n // 40)
+    if k % 2 == 0: k += 1
+    smooth = np.convolve(profile, np.ones(k) / k, mode='same')
+    med = float(np.median(smooth))
+    if med < 0.01:
+        return 0
+    threshold = med * (1 - min_depth_ratio)
+    below = smooth < threshold
+    count, in_valley, valley_start = 0, False, 0
+    for i in range(n):
+        if below[i] and not in_valley:
+            valley_start = i; in_valley = True
+        elif not below[i] and in_valley:
+            if i - valley_start >= min_width: count += 1
+            in_valley = False
+    if in_valley and n - valley_start >= min_width: count += 1
+    return count
+
+
+def _find_header_bottom(gray, top_frac=0.15):
+    """Find header row bottom using horizontal projection."""
+    h = gray.shape[0]
+    search_region = int(h * top_frac)
+    proj = _horizontal_projection(gray[:search_region, :])
+    kernel = max(3, search_region // 50)
+    if kernel % 2 == 0: kernel += 1
+    smoothed = np.convolve(proj, np.ones(kernel) / kernel, mode='same')
+    found_content = False
+    for i in range(len(smoothed)):
+        if smoothed[i] > 0.02: found_content = True
+        elif found_content and smoothed[i] < 0.005: return i + 2
+    return int(h * 0.04)
+
+
+def segment_table(img, page_type="shipping_table"):
+    """Isolate shipping table from ads using relative valley detection."""
+    if cv2 is None or page_type not in ("shipping_table", "mixed"):
+        return img, None, {"segmented": False}
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img.copy()
+    header_bottom = _find_header_bottom(gray, top_frac=0.20 if page_type == "mixed" else 0.10)
+    body_gray = gray[header_bottom:, :]
+    vproj = _vertical_projection(body_gray)
+
+    # Multi-valley guard: ≥4 valleys = column gutters, skip segmentation
+    n_valleys = _count_significant_valleys(vproj, min_depth_ratio=0.40, min_width=5)
+    if n_valleys >= 4:
+        header_height = max(header_bottom, 15)
+        return img, img[:header_height, :].copy(), {
+            "segmented": True, "x_cropped": False,
+            "multi_valley_guard": n_valleys, "header_height": header_height,
+            "table_frac": 1.0, "original_size": (h, w),
+        }
+
+    right_valley = _find_deepest_valley(vproj, 0.55, 0.95, min_depth_ratio=0.40, min_width=30)
+    table_x2 = w
+    if right_valley is not None:
+        table_x2 = right_valley[0]
+
+    left_valley = _find_deepest_valley(vproj, 0.03, 0.35, min_depth_ratio=0.35, min_width=5)
+    table_x1 = 0
+    if left_valley is not None:
+        table_x1 = left_valley[0] + left_valley[1]
+
+    x_cropped = (table_x2 < w * 0.90) or (table_x1 > w * 0.05)
+    if not x_cropped:
+        table_x1, table_x2 = 0, w
+
+    header_height = max(header_bottom, 15)
+    return (
+        img[:, table_x1:table_x2].copy(),
+        img[:header_height, table_x1:table_x2].copy(),
+        {"segmented": True, "x_cropped": x_cropped, "table_x1": table_x1,
+         "table_x2": table_x2, "table_frac": (table_x2 - table_x1) / w,
+         "header_height": header_height, "original_size": (h, w),
+         "n_valleys_total": n_valleys},
+    )
+
+
+def _find_row_gaps(gray, min_gap_height=2, ink_thresh=200, gap_thresh=0.005):
+    """Find horizontal whitespace gaps between text rows."""
+    proj = (gray < ink_thresh).astype(np.float32).mean(axis=1)
+    gaps, in_gap, gap_start = [], False, 0
+    for i in range(len(proj)):
+        if proj[i] < gap_thresh and not in_gap:
+            gap_start = i; in_gap = True
+        elif proj[i] >= gap_thresh and in_gap:
+            if i - gap_start >= min_gap_height:
+                gaps.append(((gap_start + i) // 2, i - gap_start))
+            in_gap = False
+    return gaps
+
+
+def band_table(table_img, header_img=None, n_bands=3, overlap_px=20,
+               min_height_for_banding=500):
+    """Split dense table into full-width horizontal bands with overlap."""
+    if cv2 is None:
+        return [table_img], {"banded": False, "reason": "no_cv2"}
+    h, w = table_img.shape[:2]
+    if h < min_height_for_banding:
+        return [table_img], {"banded": False, "reason": "too_short"}
+    gray = cv2.cvtColor(table_img, cv2.COLOR_RGB2GRAY) if len(table_img.shape) == 3 else table_img
+    row_gaps = _find_row_gaps(gray, min_gap_height=2)
+    band_h = h // n_bands
+    split_ys = []
+    for i in range(1, n_bands):
+        ideal_y = i * band_h
+        best_y, best_dist = ideal_y, float('inf')
+        for gap_y, gap_h in row_gaps:
+            dist = abs(gap_y - ideal_y)
+            if dist < band_h * 0.20 and dist < best_dist:
+                best_dist = dist; best_y = gap_y
+        split_ys.append(best_y)
+    bands = []
+    for i in range(n_bands):
+        y1 = max(0, split_ys[i - 1] - overlap_px) if i > 0 else 0
+        y2 = min(h, split_ys[i] + overlap_px) if i < n_bands - 1 else h
+        band = table_img[y1:y2, :].copy()
+        if header_img is not None:
+            if header_img.shape[1] != band.shape[1]:
+                hdr = cv2.resize(header_img, (band.shape[1], header_img.shape[0]))
+            else:
+                hdr = header_img
+            band = np.vstack([hdr, band])
+        bands.append(band)
+    return bands, {"banded": True, "n_bands": len(bands), "split_ys": split_ys,
+                   "overlap_px": overlap_px, "band_heights": [b.shape[0] for b in bands]}
+
+
+def pp_deskew(img, max_angle=2.0, min_lines=5):
+    """Small-angle deskew using Hough lines."""
+    if cv2 is None:
+        return img, None
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100,
+                            minLineLength=w // 4, maxLineGap=10)
+    if lines is None or len(lines) < min_lines:
+        return img, None
+    angles = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        if abs(dx) < 20: continue
+        angle = np.degrees(np.arctan2(y2 - y1, dx))
+        if abs(angle) < max_angle * 2: angles.append(angle)
+    if len(angles) < min_lines:
+        return img, None
+    median_angle = float(np.median(angles))
+    if abs(median_angle) < 0.1 or abs(median_angle) > max_angle:
+        return img, None
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+    return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE), median_angle
+
+
+def _assess_degradation(gray):
+    """Score from 0 (clean) to 1 (severely degraded)."""
+    h, w = gray.shape[:2]
+    reasons, score = [], 0.0
+    strip_ys = [int(h * f) for f in [0.2, 0.4, 0.6, 0.8]]
+    bg_samples = np.concatenate([gray[y:y + 5, :] for y in strip_ys if y + 5 < h])
+    bg_brightness = float(np.percentile(bg_samples, 90))
+    if bg_brightness < 200: score += 0.25; reasons.append(f"dark_bg={bg_brightness:.0f}")
+    if bg_brightness < 160: score += 0.25; reasons.append("very_dark_bg")
+    text_darkness = float(np.percentile(bg_samples, 10))
+    contrast = bg_brightness - text_darkness
+    if contrast < 80: score += 0.3; reasons.append(f"low_contrast={contrast:.0f}")
+    otsu_thresh, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    binary = (gray < otsu_thresh).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    eroded = cv2.erode(binary, kernel, iterations=1)
+    total_dark = max(int(binary.sum()), 1)
+    speckle_frac = int(binary.sum() - eroded.sum()) / total_dark
+    if speckle_frac > 0.4: score += 0.2; reasons.append(f"speckle={speckle_frac:.2f}")
+    return min(score, 1.0), reasons
+
+
+def conditional_cleanup(img, force=False, threshold=0.35):
+    """Apply mild background flattening on degraded pages only."""
+    if cv2 is None:
+        return img, {"cleaned": False}
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img.copy()
+    degradation, reasons = _assess_degradation(gray)
+    if not force and degradation < threshold:
+        return img, {"cleaned": False, "degradation": round(degradation, 3), "reasons": reasons}
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51))
+    background = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+    norm = gray.astype(np.float32) - background.astype(np.float32)
+    norm -= norm.min()
+    mx = norm.max()
+    norm = (norm / mx * 255).astype(np.uint8) if mx > 0 else gray
+    cleaned = cv2.medianBlur(norm, 3)
+    if len(img.shape) == 3:
+        cleaned = cv2.cvtColor(cleaned, cv2.COLOR_GRAY2RGB)
+    return cleaned, {"cleaned": True, "degradation": round(degradation, 3), "reasons": reasons}
+
+
+def preprocess_page(img, page_type="shipping_table",
+                    enable_banding=True, n_bands=3,
+                    enable_deskew=True, enable_cleanup=True):
+    """Full 5-stage WSL preprocessing pipeline.
+
+    Returns:
+        images: list of RGB arrays (1 for simple pages, n_bands for dense tables)
+        meta: dict with per-stage metadata
+    """
+    meta = {"original_size": (img.shape[0], img.shape[1]),
+            "page_type": page_type, "stages": []}
+
+    # Stage 1: Frame crop
+    cropped, crop_box = crop_frame(img)
+    if crop_box != (0, img.shape[0], 0, img.shape[1]):
+        meta["frame_crop"] = {"box": crop_box,
+            "removed_pct": round(100 * (1 - cropped.shape[0] * cropped.shape[1] /
+                                        (img.shape[0] * img.shape[1])), 1)}
+        meta["stages"].append("frame_crop")
+        img = cropped
+
+    # Stage 2: Table segmentation
+    header_img = None
+    if page_type in ("shipping_table", "mixed"):
+        table_img, header_img, seg_meta = segment_table(img, page_type)
+        if seg_meta.get("x_cropped"):
+            img = table_img
+            meta["segmentation"] = seg_meta
+            meta["stages"].append("table_segment")
+        else:
+            meta["segmentation"] = {"segmented": False, "reason": "no_ad_column_found"}
+            if header_img is not None:
+                meta["segmentation"]["header_height"] = seg_meta.get("header_height")
+
+    # Stage 3: Deskew (before banding)
+    if enable_deskew:
+        deskewed, angle = pp_deskew(img)
+        if angle is not None:
+            img = deskewed
+            meta["deskew"] = round(angle, 3)
+            meta["stages"].append(f"deskew({angle:.2f}deg)")
+
+    # Stage 4: Banding
+    if enable_banding and page_type == "shipping_table" and img.shape[0] > 500:
+        images, band_meta = band_table(img, header_img, n_bands=n_bands)
+        meta["banding"] = band_meta
+        meta["stages"].append(f"band({len(images)})")
+    else:
+        images = [img]
+        meta["banding"] = {"banded": False}
+
+    # Stage 5: Conditional cleanup
+    if enable_cleanup:
+        cleaned_images, any_cleaned = [], False
+        for band_img in images:
+            cl, cl_meta = conditional_cleanup(band_img)
+            cleaned_images.append(cl)
+            if cl_meta.get("cleaned"): any_cleaned = True
+        if any_cleaned:
+            images = cleaned_images
+            meta["stages"].append("cleanup")
+        meta["cleanup"] = cl_meta
+
+    meta["n_outputs"] = len(images)
+    meta["output_sizes"] = [(im.shape[0], im.shape[1]) for im in images]
+    orig_px = meta["original_size"][0] * meta["original_size"][1]
+    out_px = sum(s[0] * s[1] for s in meta["output_sizes"])
+    meta["pixel_ratio"] = round(out_px / orig_px, 3)
+    return images, meta
+
+# ─── Page Classification ──────────────────────────────────────────────────
+
+def classify_page(pdf_path, pg_idx, n_pages):
+    """Classify page type for routing and metadata.
+
+    Returns (page_type, route_reason) where page_type is one of:
+      skip, shipping_table, registry, narrative, mixed, sparse
+    """
+    # Page 1: always skip (masthead/ads) — even on short issues,
+    # page 1 is never the primary data page
+    if pg_idx == 0:
+        return "skip", "front_page"
+
+    try:
+        with pdfium_lock:
+            doc = pdfium.PdfDocument(pdf_path)
+            textpage = doc[pg_idx].get_textpage()
+            text = textpage.get_text_bounded().lower()
+            doc.close()
+    except Exception:
+        text = ""
+
+    ad_kw = sum(1 for w in ["for sale", "advertisement", "wanted",
+                             "insurance", "commission merchant"]
+                if w in text)
+    shipping_kw = sum(1 for w in ["arrived", "sailed", "departed", "spoken",
+                                    "reported", "in port", "capt"]
+                       if w in text)
+    if ad_kw >= 2 and shipping_kw == 0:
+        return "skip", "advertisement"
+
+    if len(text) < 100:
+        if pg_idx in (1, 2) and n_pages >= 3:
+            return "shipping_table", "dense_position"
+        elif pg_idx == 3 and n_pages >= 4:
+            return "mixed", "page4_position"
+        else:
+            return "sparse", "default"
+
+    registry_kw = sum(1 for w in ["list of vessels", "fleet", "whole number",
+                                    "belonging to"] if w in text)
+    if registry_kw >= 1 and shipping_kw < 5:
+        return "registry", "fleet_registry_text"
+
+    if "memoranda" in text or "marine intelligence" in text:
+        if shipping_kw >= 3:
+            return "shipping_table", "memoranda_with_shipping"
+        return "narrative", "memoranda"
+
+    if shipping_kw >= 8:
+        return "shipping_table", "text_keywords_dense"
+    elif shipping_kw >= 3:
+        return "mixed", "text_keywords_mixed"
+    else:
+        return "sparse", "default"
+
+
+# V3 CHANGE #1b: Select prompt and token budget based on page type
+def get_prompt_for_page_type(page_type):
+    """Return the appropriate extraction prompt for this page type."""
+    if page_type == "shipping_table":
+        return PROMPT_TABLE
+    elif page_type == "registry":
+        return PROMPT_REGISTRY
+    else:
+        # narrative, mixed, sparse all use the narrative prompt
+        return PROMPT_NARRATIVE
+
+def get_token_budget(page_type):
+    """Return the max_tokens budget for this page type, capped by server context."""
+    budget = TOKEN_BUDGET.get(page_type, MAX_TOKENS)
+    return min(budget, MAX_OUTPUT_TOKENS)
+
+
+# ─── VLM Interaction ──────────────────────────────────────────────────────
+
+def vllm_request(url, payload, timeout=600):
+    """Send a single request to vLLM.
+    V3: Returns (response_text, status_code, elapsed_s, error_msg, finish_reason).
+    """
+    trace(f"HTTP_POST_START url={url} timeout={timeout}")
+    t0 = time.time()
+    try:
+        r = requests.post(url, json=payload, timeout=timeout)
+        elapsed = time.time() - t0
+        trace(f"HTTP_POST_DONE url={url} status={r.status_code} elapsed={elapsed:.2f}s")
+        if r.status_code != 200:
+            return "", r.status_code, elapsed, r.text[:500], None
+        choice = r.json()["choices"][0]
+        text = choice["message"].get("content") or ""
+        finish = choice.get("finish_reason", "unknown")
+        usage = r.json().get("usage", {})
+        trace(f"HTTP_POST_PARSED finish_reason={finish} content_len={len(text)} "
+              f"prompt_tokens={usage.get('prompt_tokens',0)} "
+              f"completion_tokens={usage.get('completion_tokens',0)}")
+        return text, 200, elapsed, None, finish
+    except requests.exceptions.ReadTimeout:
+        elapsed = time.time() - t0
+        return "", 0, elapsed, f"ReadTimeout after {elapsed:.1f}s", None
+    except requests.exceptions.ConnectionError as e:
+        elapsed = time.time() - t0
+        return "", 0, elapsed, f"ConnectionError: {e}", None
+    except Exception as e:
+        elapsed = time.time() - t0
+        return "", 0, elapsed, f"Exception: {e}", None
+
+
+def vllm_vision(url, img_b64, prompt, max_tokens=MAX_TOKENS):
+    """Call vLLM with image + prompt.
+    V3: Returns (response_text, finish_reason).
+    """
+    payload = {
+        "model": MODEL_ID,
+        "messages": [
+            {"role": "system", "content": "You are an expert reader of historical maritime documents. Output strict JSON only."},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ]},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    img_kb = len(img_b64) * 3 // 4 // 1024
+    trace(f"VLLM_VISION_START url={url} img_kb={img_kb} max_tokens={max_tokens}")
+
+    for attempt in range(3):
+        text, status, elapsed, err, finish = vllm_request(url, payload, timeout=1800)
+        if status == 200 and text:
+            trace(f"VLLM_VISION_OK attempt={attempt} elapsed={elapsed:.2f}s chars={len(text)} finish={finish}")
+            return text, finish
+        log.error(f"vLLM attempt {attempt+1}/3 failed: status={status} elapsed={elapsed:.1f}s err={err}")
+        if attempt < 2:
+            time.sleep(2 ** attempt)
+
+    return "", None
+
+
+# ─── Response Parsing ──────────────────────────────────────────────────────
+
+def parse_result(raw):
+    """Parse LLM output into list of event dicts.
+    V3: Truncated <think> blocks return empty (fail safe).
+    """
+    text = raw.strip()
+    # Strip thinking tags — handle both complete and truncated
+    if "<think>" in text:
+        if "</think>" in text:
+            text = text.split("</think>")[-1].strip()
+        else:
+            # V3: Output truncated mid-thought — no usable JSON exists
+            return []
+    # Strip markdown fences
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1].lstrip("json").strip()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj.get("events", [])
+        if isinstance(obj, list):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    # Fallback: extract individual JSON objects via regex
+    events = []
+    for m in re.finditer(r'\{[^{}]{10,800}\}', text):
+        try:
+            o = json.loads(m.group())
+            if "v" in o:
+                events.append(o)
+        except:
+            pass
+    return events
+
+
+# ─── Normalization ─────────────────────────────────────────────────────────
+
+def normalize(e):
+    """Normalize a compact-key event dict to full field names."""
+    lat = e.get("lat")
+    lon = e.get("lon")
+    if isinstance(lat, str):
+        try: lat = float(lat)
+        except: lat = None
+    if isinstance(lon, str):
+        try: lon = float(lon)
+        except: lon = None
+    if isinstance(lat, (int, float)) and not (-90 <= lat <= 90):
+        lat = None
+    if isinstance(lon, (int, float)) and not (-180 <= lon <= 180):
+        lon = None
+
+    result = {
+        "vessel_name": _str(e.get("v")).strip(),
+        "vessel_type": _str(e.get("t")).strip().lower() or None,
+        "captain": _str(e.get("c")).strip() or None,
+        "event_type": _str(e.get("e")).strip().lower(),
+        "port": _str(e.get("p")).strip() or None,
+        "date": _str(e.get("d")).strip() or None,
+        "home_port": _str(e.get("hp")).strip() or None,
+        "destination": _str(e.get("dest")).strip() or None,
+        "latitude": lat,
+        "longitude": lon,
+        "oil_sperm_bbls": e.get("sp"),
+        "oil_whale_bbls": e.get("wh"),
+        "bone_lbs": e.get("bn"),
+        "days_out": _str(e.get("days")).strip() or None,
+        "agent": _str(e.get("agent")).strip() or None,
+        "reported_by": _str(e.get("by")).strip() or None,
+        "remarks": _str(e.get("remarks")).strip() or None,
+    }
+    result["_raw"] = {k: v for k, v in e.items() if v is not None}
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V3 CHANGE: Strict cargo parser with biophysical limits
+# ═══════════════════════════════════════════════════════════════════════════
+
+def parse_cargo_number(val, max_limit):
+    """Parse a cargo quantity with strict validation.
+
+    V3.1 fixes:
+      - "clean" → 0 (true zero, not None)
+      - Rejects values with alphabetic characters (e.g. "1 whale")
+      - Handles unicode fractions (e.g. "7½" → 7.5)
+      - Strips commas before extraction ("18,000" → 18000)
+      - Extracts first contiguous digit block ("1 1/2" stays "1", not "112")
+      - Applies biophysical ceiling
+    """
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        if val < 0:
+            return None
+        if val > max_limit:
+            return None
+        return int(val) if val == int(val) else val
+
+    s = str(val).strip()
+    if not s:
+        return None
+    s_lower = s.lower()
+
+    # "clean" means 0 whales caught — true zero, not missing
+    if s_lower in ("clean", "cl", "cln"):
+        return 0
+
+    # Genuinely missing data
+    if s_lower in ("not stated", "none", "no report", "ns", "n/s", ""):
+        return None
+
+    # Reject obvious non-quantity text (has letters → not a number)
+    if re.search(r"[a-df-z]", s_lower):
+        return None
+
+    # V3.1 FIX: Strip commas BEFORE digit extraction
+    # "18,000" → "18000" → 18000 (not "18" from first block)
+    s = s.replace(",", "")
+
+    # Handle unicode fractions (e.g., "7½")
+    for ch, frac in FRACTIONS.items():
+        if ch in s:
+            base = re.sub(r"[^\d]", "", s.replace(ch, ""))
+            if base and base.isdigit():
+                result = int(base) + frac
+                return result if result <= max_limit else None
+            return frac if frac <= max_limit else None
+
+    # Extract FIRST contiguous sequence of digits
+    m = re.search(r"\d+", s)
+    if m:
+        extracted = int(m.group())
+        return extracted if extracted <= max_limit else None
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V3 Post-Processing (5-Layer)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def post_process(ev, issue_year=None, page_type=None):
+    """Run 5-layer post-processing on a single normalized event."""
+    for field in ("vessel_name", "captain", "agent", "date", "port", "home_port"):
+        raw_key = f"{field}_raw"
+        if raw_key not in ev:
+            ev[raw_key] = ev.get(field)
+
+    flags = []
+
+    # ── Layer 2: Structural normalization ──
+    vt = ev.get("vessel_type")
+    if vt and vt not in VALID_VESSEL_TYPES:
+        ev["vessel_type"] = VESSEL_TYPE_MAP.get(vt, None)
+
+    # Strip vessel type from name (V3: suffixes sorted by length)
+    name = ev.get("vessel_name", "")
+    if name:
+        name_lower = name.lower()
+        for sfx in VESSEL_TYPE_SUFFIXES:
+            if name_lower.endswith(sfx):
+                ev["vessel_name"] = name[:-len(sfx)].strip()
+                if not ev.get("vessel_type"):
+                    t_str = sfx.strip().lstrip(", ").lower()
+                    ev["vessel_type"] = VESSEL_TYPE_MAP.get(t_str, t_str)
+                break
+
+    # V3: Strict cargo parsing with biophysical limits
+    ev["oil_sperm_bbls"] = parse_cargo_number(ev.get("oil_sperm_bbls"), MAX_OIL_BBLS)
+    ev["oil_whale_bbls"] = parse_cargo_number(ev.get("oil_whale_bbls"), MAX_OIL_BBLS)
+    ev["bone_lbs"] = parse_cargo_number(ev.get("bone_lbs"), MAX_BONE_LBS)
+
+    # ── Layer 3: Semantic cleaning ──
+    captain = ev.get("captain") or ""
+    if captain and COMPANY_RE.search(captain):
+        if not ev.get("agent"):
+            ev["agent"] = captain
+        ev["captain"] = None
+        flags.append("captain_was_company")
+    elif " " in captain:
+        parts = captain.split()
+        if len(parts) == 2 and (len(parts[0]) <= 5 or parts[0].endswith(".")):
+            ev["captain"] = parts[-1]
+
+    for field in ("port", "home_port"):
+        val = ev.get(field)
+        if val:
+            val_lower = val.strip().lower()
+            if val_lower in PORT_CORRECTIONS:
+                ev[field] = PORT_CORRECTIONS[val_lower]
+
+    port = ev.get("port") or ""
+    date = ev.get("date") or ""
+    if port and MONTH_RE.match(port) and not MONTH_RE.match(date):
+        ev["port"], ev["date"] = date or None, port
+        flags.append("port_date_swap_corrected")
+
+    # ── Layer 4: Hard validation ──
+    et = ev.get("event_type", "")
+    if et and et not in VALID_EVENT_TYPES:
+        normalized = EVENT_TYPE_MAP.get(et.lower())
+        if normalized:
+            ev["event_type"] = normalized
+        elif MONTH_RE.match(et):
+            if not ev.get("date"):
+                ev["date"] = et
+            ev["event_type"] = "dep"
+            flags.append("date_in_event_type_corrected")
+        else:
+            flags.append(f"invalid_event_type:{et}")
+
+    vt = ev.get("vessel_type")
+    if vt and vt not in VALID_VESSEL_TYPES and vt != "steamer":
+        flags.append(f"invalid_vessel_type:{vt}")
+        ev["vessel_type"] = None
+
+    lat = ev.get("latitude")
+    if isinstance(lat, (int, float)) and not (-90 <= lat <= 90):
+        ev["latitude"] = None
+        flags.append("invalid_latitude")
+    lon = ev.get("longitude")
+    if isinstance(lon, (int, float)) and not (-180 <= lon <= 180):
+        ev["longitude"] = None
+        flags.append("invalid_longitude")
+
+    if date and issue_year:
+        m = re.search(r"\b(\d{2,4})\b", date)
+        if m:
+            yr = int(m.group(1))
+            if yr < 100:
+                yr += 1800
+            if issue_year - yr > 2:
+                flags.append("likely_registry_not_weekly")
+
+    # ── V3 Layer 5: Column-alignment detection (port stop-list) ──
+    vessel_name = (ev.get("vessel_name") or "").strip().lower()
+    captain_val = (ev.get("captain") or "").strip().lower()
+
+    if vessel_name in KNOWN_PORTS_LOWER:
+        flags.append(f"vessel_is_port_name:{vessel_name}")
+
+    if captain_val in KNOWN_PORTS_LOWER:
+        flags.append(f"captain_is_port_name:{captain_val}")
+        ev["captain"] = None
+
+    # Echo detection: vessel and captain are identical
+    if (vessel_name and captain_val and vessel_name == captain_val
+            and vessel_name != ""):
+        flags.append("vessel_captain_echo")
+
+    # ── Confidence score (V3: penalized by flags) ──
+    score = 1.0
+    if not ev.get("vessel_name"):
+        score -= 0.3
+    if not ev.get("event_type"):
+        score -= 0.2
+    if not ev.get("captain") and not ev.get("agent"):
+        score -= 0.15
+    if not ev.get("date"):
+        score -= 0.1
+    if not ev.get("port"):
+        score -= 0.1
+
+    # V3: Flag-based penalties
+    for f in flags:
+        if f.startswith("vessel_is_port_name"):
+            score -= 0.4
+        elif f.startswith("captain_is_port_name"):
+            score -= 0.15
+        elif f == "vessel_captain_echo":
+            score -= 0.3
+        elif f == "captain_was_company":
+            score -= 0.05
+        elif f.startswith("invalid_event_type"):
+            score -= 0.1
+        elif f == "likely_registry_not_weekly":
+            score -= 0.05
+
+    # Tag page source in the event for downstream filtering
+    if page_type:
+        ev["_page_type"] = page_type
+
+    ev["_flags"] = flags if flags else None
+    ev["_confidence"] = round(max(0.0, score), 2)
+    return ev
+
+
+# ─── Deduplication ─────────────────────────────────────────────────────────
+
+def _norm_dedup(s):
+    if not s:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def dedup_events(events):
+    seen = set()
+    result = []
+    for ev in events:
+        key = (
+            _norm_dedup(ev.get("vessel_name", ""))[:12],
+            _norm_dedup(ev.get("captain", "")),
+            ev.get("event_type", ""),
+            _norm_dedup(ev.get("date", "")),
+            _norm_dedup(ev.get("port", "")),
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(ev)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V3.1 FIX: Page-level manifest — only terminal statuses count as done
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Only these statuses are truly final — everything else is retryable
+FINAL_STATUSES = {"ok", "skip"}
+
+def load_manifest():
+    """Load page-level completion manifest from JSONL.
+
+    V3.1 FIX: Only pages with FINAL statuses (ok, skip) are treated as done.
+    Pages with error, truncated, empty_response, http_error, etc. will be
+    retried on the next run.
+
+    Returns set of page_keys that should NOT be re-processed.
+    """
+    # Track the latest status per page_key (manifest is append-only,
+    # so later entries supersede earlier ones)
+    latest = {}
+
+    if MANIFEST_FILE.exists():
+        with open(MANIFEST_FILE, "r") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    pk = data.get("page_key")
+                    status = data.get("status")
+                    version = data.get("extractor_version")
+                    if pk and status:
+                        # Only trust entries from the current extractor version
+                        if version == EXTRACTOR_VERSION:
+                            latest[pk] = status
+                except:
+                    pass
+
+    # Also scan the JSONL output — but only trust rows with explicit
+    # status field and final status
+    if JSONL_FILE.exists():
+        with open(JSONL_FILE, "r") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    pk = data.get("page_key")
+                    status = data.get("status")
+                    version = data.get("extractor_version")
+                    if pk and status in FINAL_STATUSES:
+                        if version == EXTRACTOR_VERSION:
+                            latest[pk] = status
+                except:
+                    pass
+
+    # Only return page_keys with final statuses
+    return {pk for pk, status in latest.items() if status in FINAL_STATUSES}
+
+manifest_lock = threading.Lock()
+
+def write_manifest_entry(page_key, status, n_events=0, error=None):
+    """Append a page-level manifest entry with version tracking."""
+    entry = {
+        "page_key": page_key,
+        "status": status,
+        "n_events": n_events,
+        "extractor_version": EXTRACTOR_VERSION,
+        "ts": datetime.now().isoformat(),
+    }
+    if error:
+        entry["error"] = str(error)[:200]
+    with manifest_lock:
+        with open(MANIFEST_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+# ─── Pre-flight ────────────────────────────────────────────────────────────
+
+def preflight_text_check(url, idx):
+    log.info(f"PREFLIGHT[{idx}] text check → {url}")
+    payload = {
+        "model": MODEL_ID,
+        "messages": [{"role": "user", "content": "Say OK"}],
+        "max_tokens": 8,
+        "temperature": 0.0,
+    }
+    text, status, elapsed, err, _ = vllm_request(url, payload, timeout=30)
+    if status == 200:
+        log.info(f"PREFLIGHT[{idx}] ✓ text OK in {elapsed:.2f}s")
+        return True
+    log.error(f"PREFLIGHT[{idx}] ✗ text FAILED status={status} err={err}")
+    return False
+
+def preflight_image_check(url, idx):
+    log.info(f"PREFLIGHT[{idx}] image check → {url}")
+    img = Image.new("RGB", (64, 64), (255, 255, 255))
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=50)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    payload = {
+        "model": MODEL_ID,
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": "What is this? Reply in one word."},
+            ]},
+        ],
+        "max_tokens": 16,
+        "temperature": 0.0,
+    }
+    text, status, elapsed, err, _ = vllm_request(url, payload, timeout=120)
+    if status == 200:
+        log.info(f"PREFLIGHT[{idx}] ✓ image OK in {elapsed:.2f}s")
+        return True
+    log.error(f"PREFLIGHT[{idx}] ✗ image FAILED status={status} err={err}")
+    return False
+
+def run_preflight():
+    log.info("=" * 60)
+    log.info("PREFLIGHT DIAGNOSTICS — V4")
+    log.info("=" * 60)
+    log.info(f"Servers: {VLLM_URLS}")
+    log.info(f"Model: {MODEL_ID}")
+    log.info(f"DPI: {RENDER_DPI}, MaxTokens: {MAX_TOKENS}")
+    log.info(f"Worker pool: {NUM_GPUS} × {WORKER_MULTIPLIER} = {NUM_GPUS * WORKER_MULTIPLIER}")
+
+    healthy_urls = []
+    for idx, url in enumerate(VLLM_URLS):
+        if preflight_text_check(url, idx) and preflight_image_check(url, idx):
+            healthy_urls.append(url)
+        else:
+            log.error(f"PREFLIGHT[{idx}] server {url} — SKIPPING")
+
+    log.info(f"PREFLIGHT RESULT: {len(healthy_urls)}/{len(VLLM_URLS)} servers healthy")
+    if not healthy_urls:
+        log.error("FATAL: No healthy servers. Aborting.")
+        sys.exit(1)
+    return healthy_urls
+
+
+# ─── Watchdog ──────────────────────────────────────────────────────────────
+
+worker_state = {}
+worker_state_lock = threading.Lock()
+
+def watchdog_loop(stop_event):
+    while not stop_event.wait(60):
+        with worker_state_lock:
+            if not worker_state:
+                continue
+            now = time.time()
+            log.info("─── WATCHDOG REPORT ───")
+            for tid, state in sorted(worker_state.items()):
+                elapsed = now - state["start"]
+                status = "⚠ SLOW" if elapsed > 120 else "  ok"
+                if elapsed > 300:
+                    status = "🚨 HUNG?"
+                log.info(f"  {status} T-{tid}: {state['page_key']} stage={state['stage']} elapsed={elapsed:.0f}s")
+            log.info("───────────────────────")
+
+def set_worker_state(page_key, stage):
+    tid = threading.current_thread().ident
+    with worker_state_lock:
+        worker_state[tid] = {"page_key": page_key, "stage": stage, "start": time.time()}
+
+def clear_worker_state():
+    tid = threading.current_thread().ident
+    with worker_state_lock:
+        worker_state.pop(tid, None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V3 CHANGE #4: Save full raw response for suspicious pages
+# ═══════════════════════════════════════════════════════════════════════════
+
+def is_suspicious(page_type, n_events, finish_reason, flags_count, confidence_mean):
+    """Determine if a page's raw response should be saved for debugging."""
+    if finish_reason and finish_reason != "stop":
+        return True  # Truncated output
+    if page_type == "shipping_table" and n_events < 5:
+        return True  # Dense page with surprisingly few events
+    if page_type == "shipping_table" and n_events > 120:
+        return True  # Suspiciously many events
+    if flags_count > 5:
+        return True  # High number of quality flags
+    if n_events > 0 and confidence_mean < 0.5:
+        return True  # Low overall confidence
+    return False
+
+def save_raw_sidecar(pdf_name, pg, raw_text):
+    """Save full raw LLM response to a sidecar file for debugging."""
+    raw_path = RAW_SIDECAR_DIR / f"{pdf_name}_p{pg}.txt"
+    try:
+        raw_path.write_text(raw_text, encoding="utf-8")
+    except OSError:
+        pass  # Non-fatal: disk quota or permission errors shouldn't fail extraction
+    return str(raw_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Page processing — V4
+# ═══════════════════════════════════════════════════════════════════════════
+
+def process_page(args):
+    """V4: classify → render → preprocess → band-level VLM → merge → post-process."""
+    pdf_path, pg_idx, gpu_id, n_pages, completed_pages = args
+    pdf_name = os.path.basename(pdf_path)
+    year = os.path.basename(os.path.dirname(pdf_path))
+    pg = pg_idx + 1
+    page_key = f"{pdf_name}:p{pg}"
+    url = VLLM_URLS[gpu_id % len(VLLM_URLS)]
+
+    # Page-level skip if already processed
+    if page_key in completed_pages:
+        return pdf_path, pg, 0, 0, "already_done"
+
+    trace(f"PAGE_START page_key={page_key} gpu_id={gpu_id} url={url}")
+    set_worker_state(page_key, "classify")
+    page_t0 = time.time()
+
+    # ── Page classification ──
+    page_type, route_reason = classify_page(pdf_path, pg_idx, n_pages)
+    trace(f"PAGE_CLASSIFIED page_key={page_key} type={page_type} reason={route_reason}")
+
+    if page_type == "skip":
+        trace(f"PAGE_SKIPPED page_key={page_key} reason={route_reason}")
+        result = {
+            "pdf": pdf_name, "year": int(year), "page": pg,
+            "page_key": page_key,
+            "page_type": page_type,
+            "page_route": route_reason,
+            "extracted_at": datetime.now().isoformat(),
+            "gpu_id": -1, "llm_time_s": 0,
+            "events": [], "n_events": 0,
+            "output_chars": 0, "skipped": route_reason,
+            "finish_reason": None,
+        }
+        with write_lock:
+            with open(JSONL_FILE, "a") as f:
+                f.write(json.dumps(result) + "\n")
+        write_manifest_entry(page_key, "skip", 0)
+        clear_worker_state()
+        return pdf_path, pg, 0, 0, "skip"
+
+    try:
+        # ── PDF render (at 150 DPI for preprocessing) ──
+        set_worker_state(page_key, "pdf_render")
+        t_render = time.time()
+        with pdfium_lock:
+            doc = pdfium.PdfDocument(pdf_path)
+            bmp = doc[pg_idx].render(scale=RENDER_DPI / 72.0)
+            raw_img = bmp.to_numpy()
+            doc.close()
+        render_ms = (time.time() - t_render) * 1000
+
+        # ── V4: Image preprocessing ──
+        set_worker_state(page_key, "preprocess")
+        t_pp = time.time()
+        pp_page_type = page_type if page_type in ("shipping_table", "mixed") else "mixed"
+        band_images, pp_meta = preprocess_page(raw_img, page_type=pp_page_type)
+        pp_ms = (time.time() - t_pp) * 1000
+        n_bands = len(band_images)
+        pp_stages = " → ".join(pp_meta.get("stages", [])) or "(none)"
+        trace(f"PREPROCESS_DONE page_key={page_key} n_bands={n_bands} "
+              f"stages={pp_stages} pp_ms={pp_ms:.0f}")
+
+        # ── Route to correct prompt and token budget ──
+        prompt = get_prompt_for_page_type(page_type)
+        max_tokens = get_token_budget(page_type)
+
+        # ── V4: Band-level VLM inference ──
+        all_raw_texts = []
+        all_events = []
+        all_finish_reasons = []
+        total_llm_time = 0
+        total_jpg_bytes = 0
+        any_truncated = False
+
+        for band_idx, band_img in enumerate(band_images):
+            band_label = f"band{band_idx + 1}/{n_bands}" if n_bands > 1 else "full"
+
+            set_worker_state(page_key, f"encode_{band_label}")
+            b64, jpg_bytes = img_to_base64(band_img)
+            total_jpg_bytes += jpg_bytes
+
+            set_worker_state(page_key, f"vllm_{band_label}")
+            t_llm = time.time()
+            raw, finish_reason = vllm_vision(url, b64, prompt, max_tokens=max_tokens)
+            band_llm_time = time.time() - t_llm
+            total_llm_time += band_llm_time
+            all_finish_reasons.append(finish_reason)
+            trace(f"VLLM_BAND_DONE page_key={page_key} {band_label} "
+                  f"elapsed={band_llm_time:.2f}s chars={len(raw)} finish={finish_reason}")
+
+            if finish_reason and finish_reason != "stop":
+                any_truncated = True
+
+            if raw:
+                all_raw_texts.append(f"--- {band_label} ---\n{raw}")
+                band_events = parse_result(raw)
+                for ev in band_events:
+                    ev["_band"] = band_idx + 1
+                all_events.extend(band_events)
+            else:
+                all_raw_texts.append(f"--- {band_label} ---\n[EMPTY RESPONSE]")
+
+        # ── Handle zero events across all bands ──
+        combined_raw = "\n".join(all_raw_texts)
+        if not all_events and n_bands > 0:
+            # Distinguish: VLM returned valid JSON with 0 events (legitimate
+            # empty page, e.g. ads) vs VLM returned nothing (true failure).
+            # If all bands finished with stop and had some raw text, the VLM
+            # processed the image successfully — just no shipping data.
+            all_finished_ok = (all_finish_reasons
+                               and all(fr == "stop" for fr in all_finish_reasons)
+                               and all(len(t) > 20 for t in all_raw_texts))
+            if all_finished_ok:
+                log.info(f"EMPTY PAGE {page_key} — VLM found no events (legitimate)")
+                write_manifest_entry(page_key, "ok", 0)
+                result = {
+                    "pdf": pdf_name, "year": int(year), "page": pg,
+                    "page_key": page_key, "page_type": page_type,
+                    "page_route": route_reason, "status": "ok",
+                    "extractor_version": EXTRACTOR_VERSION,
+                    "extracted_at": datetime.now().isoformat(),
+                    "gpu_id": gpu_id, "llm_time_s": round(total_llm_time, 2),
+                    "events": [], "n_events": 0,
+                    "output_chars": len(combined_raw),
+                    "finish_reason": "stop", "is_truncated": False,
+                    "panel_include": page_type != "registry",
+                    "preprocessing": {
+                        "stages": pp_meta.get("stages", []),
+                        "n_bands": n_bands,
+                    },
+                }
+                with write_lock:
+                    with open(JSONL_FILE, "a") as f:
+                        f.write(json.dumps(result) + "\n")
+                clear_worker_state()
+                return pdf_path, pg, 0, total_llm_time, "ok"
+            else:
+                log.warning(f"ALL BANDS EMPTY for {page_key} — recording as failure")
+                save_raw_sidecar(pdf_name, pg, combined_raw or "[ALL BANDS EMPTY]")
+                write_manifest_entry(page_key, "empty_response", 0,
+                                     error=f"all {n_bands} bands returned empty")
+                clear_worker_state()
+                return pdf_path, pg, 0, 0, "empty_response"
+
+        # ── Normalize + post-process ──
+        set_worker_state(page_key, "post_process")
+        events = [normalize(e) for e in all_events]
+        issue_year = int(year) if year.isdigit() else None
+        events = [post_process(ev, issue_year=issue_year, page_type=page_type)
+                  for ev in events]
+
+        # ── Deduplicate (critical for overlapping bands) ──
+        n_before = len(events)
+        events = dedup_events(events)
+        n_deduped = n_before - len(events)
+        if n_deduped > 0:
+            trace(f"DEDUP page_key={page_key} before={n_before} after={len(events)} "
+                  f"removed={n_deduped}")
+
+        total_ms = (time.time() - page_t0) * 1000
+
+        # ── Suspicious page check + sidecar ──
+        # Use worst finish_reason across bands
+        worst_finish = None
+        for fr in all_finish_reasons:
+            if fr and fr != "stop":
+                worst_finish = fr; break
+        if worst_finish is None and all_finish_reasons:
+            worst_finish = all_finish_reasons[0]
+
+        flags_count = sum(1 for ev in events if ev.get("_flags"))
+        conf_mean = (np.mean([ev.get("_confidence", 1.0) for ev in events])
+                     if events else 1.0)
+        raw_path = None
+        if is_suspicious(page_type, len(events), worst_finish, flags_count, conf_mean):
+            raw_path = save_raw_sidecar(pdf_name, pg, combined_raw)
+
+        is_truncated = any_truncated
+
+        log.info(f"✓ {page_key} [{page_type}→{route_reason}] "
+                 f"bands={n_bands} pp=[{pp_stages}]: "
+                 f"{len(events)} events ({n_deduped} deduped) "
+                 f"in {total_llm_time:.1f}s finish={worst_finish}"
+                 f"{' ⚠TRUNCATED' if is_truncated else ''}")
+
+        status = "ok" if not is_truncated else "truncated"
+
+        result = {
+            "pdf": pdf_name,
+            "year": int(year),
+            "page": pg,
+            "page_key": page_key,
+            "page_type": page_type,
+            "page_route": route_reason,
+            "status": status,
+            "extractor_version": EXTRACTOR_VERSION,
+            "extracted_at": datetime.now().isoformat(),
+            "gpu_id": gpu_id,
+            "llm_time_s": round(total_llm_time, 2),
+            "events": events,
+            "n_events": len(events),
+            "n_events_pre_dedup": n_before,
+            "output_chars": len(combined_raw),
+            "finish_reason": worst_finish,
+            "is_truncated": is_truncated,
+            "panel_include": page_type != "registry",
+            "raw_llm_response": combined_raw[:800] + f"... [{len(combined_raw)} chars total]"
+                                if len(combined_raw) > 800 else combined_raw,
+            "raw_sidecar": raw_path,
+            # V4: Preprocessing metadata
+            "preprocessing": {
+                "stages": pp_meta.get("stages", []),
+                "n_bands": n_bands,
+                "pixel_ratio": pp_meta.get("pixel_ratio", 1.0),
+                "pp_ms": round(pp_ms, 1),
+                "segmentation": pp_meta.get("segmentation"),
+                "banding": pp_meta.get("banding"),
+            },
+            "timing": {
+                "render_ms": round(render_ms, 1),
+                "preprocess_ms": round(pp_ms, 1),
+                "llm_ms": round(total_llm_time * 1000, 1),
+                "total_ms": round(total_ms, 1),
+            },
+            "image_size": {
+                "raw_width": raw_img.shape[1],
+                "raw_height": raw_img.shape[0],
+                "total_jpg_kb": total_jpg_bytes // 1024,
+                "n_bands": n_bands,
+            },
+        }
+
+        with write_lock:
+            with open(JSONL_FILE, "a") as f:
+                f.write(json.dumps(result) + "\n")
+
+        write_manifest_entry(page_key, status, len(events))
+
+        clear_worker_state()
+        return pdf_path, pg, len(events), total_llm_time, status
+
+    except Exception as e:
+        total_ms = (time.time() - page_t0) * 1000
+        log.error(f"✗ {page_key} (GPU {gpu_id}): {e}")
+        log.error(traceback.format_exc())
+        trace(f"PAGE_ERROR page_key={page_key} error={e} total_ms={total_ms:.0f}")
+        write_manifest_entry(page_key, "error", 0, error=str(e))
+        clear_worker_state()
+        return pdf_path, pg, 0, 0, "error"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    global VLLM_URLS, NUM_GPUS
+    log.info("=" * 60)
+    log.info("WSL EXTRACTION WORKER — V4 (PREPROCESSOR + BANDING)")
+    log.info("=" * 60)
+    log.info(f"Config: DPI={RENDER_DPI} MAX_TOKENS={MAX_TOKENS} NUM_GPUS={NUM_GPUS}")
+    log.info(f"Worker pool: {NUM_GPUS} × {WORKER_MULTIPLIER} = {NUM_GPUS * WORKER_MULTIPLIER}")
+    log.info(f"MAX_NUM_SEQS={MAX_NUM_SEQS}, dynamic multiplier={WORKER_MULTIPLIER}")
+    log.info(f"URLs: {VLLM_URLS}")
+    log.info(f"Output: {JSONL_FILE}")
+    log.info(f"Manifest: {MANIFEST_FILE}")
+    log.info(f"Raw sidecars: {RAW_SIDECAR_DIR}")
+    if TEST_YEAR:
+        log.info(f"Year filter: {TEST_YEAR}")
+
+    # ── Pre-flight ──
+    healthy_urls = run_preflight()
+    VLLM_URLS = healthy_urls
+    NUM_GPUS = len(healthy_urls)
+
+    # ── V3: Load page-level manifest for resume ──
+    completed_pages = load_manifest()
+    log.info(f"Manifest: {len(completed_pages):,} pages already processed")
+
+    # ── Build work queue ──
+    pdf_paths = sorted(glob.glob(str(PDF_DIR / "*/*.pdf")))
+    if TEST_YEAR:
+        pdf_paths = [p for p in pdf_paths
+                     if os.path.basename(os.path.dirname(p)) == TEST_YEAR]
+        log.info(f"YEAR FILTER: {TEST_YEAR} → {len(pdf_paths)} PDFs")
+
+    work_items = []
+    gpu_rr = 0
+    skipped_pages = 0
+    for pdf_path in pdf_paths:
+        try:
+            with pdfium_lock:
+                doc = pdfium.PdfDocument(pdf_path)
+                n_pages = len(doc)
+                doc.close()
+        except Exception as e:
+            log.warning(f"Cannot open {pdf_path}: {e}")
+            continue
+        for pg_idx in range(n_pages):
+            page_key = f"{os.path.basename(pdf_path)}:p{pg_idx+1}"
+            if page_key in completed_pages:
+                skipped_pages += 1
+                continue
+            work_items.append((pdf_path, pg_idx, gpu_rr % NUM_GPUS, n_pages, completed_pages))
+            gpu_rr += 1
+
+    log.info(f"Pages to process: {len(work_items):,} | Already done: {skipped_pages:,}")
+
+    if not work_items:
+        log.info("Nothing to do — all pages already processed.")
+        return
+
+    # ── Start watchdog ──
+    stop_watchdog = threading.Event()
+    watchdog_thread = threading.Thread(target=watchdog_loop, args=(stop_watchdog,), daemon=True)
+    watchdog_thread.start()
+
+    # ── Main extraction loop ──
+    t_start = time.time()
+    total_events = 0
+    total_pages = 0
+    page_times = []
+
+    n_workers = NUM_GPUS * WORKER_MULTIPLIER
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        log.info(f"ThreadPool started with {n_workers} workers")
+        futures = {executor.submit(process_page, item): item for item in work_items}
+        log.info(f"All {len(work_items)} tasks submitted")
+
+        for future in as_completed(futures):
+            try:
+                pdf_path, pg, n_ev, llm_time, status = future.result(timeout=1800)
+            except Exception as e:
+                item = futures[future]
+                log.error(f"Future failed for {os.path.basename(item[0])}:p{item[1]+1}: {e}")
+                continue
+
+            if status == "already_done":
+                continue
+
+            total_events += n_ev
+            total_pages += 1
+            if llm_time > 0:
+                page_times.append(llm_time)
+
+            if total_pages % 10 == 0:
+                elapsed = time.time() - t_start
+                avg_t = np.mean(page_times[-100:]) if page_times else 0
+                tput = total_pages / elapsed * 3600 if elapsed > 0 else 0
+                remaining = len(work_items) - total_pages
+                eta = remaining / (total_pages / elapsed) if total_pages > 0 else 0
+                log.info(
+                    f"[{total_pages:,}/{len(work_items):,}] "
+                    f"{total_events:,} events | "
+                    f"{avg_t:.1f}s/page | {tput:.0f} pages/hr | "
+                    f"ETA: {timedelta(seconds=int(eta))}"
+                )
+
+    # ── Shutdown ──
+    stop_watchdog.set()
+    trace_fh.close()
+
+    elapsed = time.time() - t_start
+    avg = np.mean(page_times) if page_times else 0
+    tput = total_pages / elapsed * 3600 if elapsed > 0 else 0
+    log.info(f"\n{'='*60}")
+    log.info(f"EXTRACTION V4 COMPLETE")
+    log.info(f"{'='*60}")
+    log.info(f"Pages:      {total_pages:,} ({skipped_pages:,} resumed)")
+    log.info(f"Events:     {total_events:,}")
+    log.info(f"Elapsed:    {timedelta(seconds=int(elapsed))}")
+    log.info(f"Throughput: {tput:.0f} pages/hr ({avg:.2f}s avg/page)")
+    log.info(f"Output:     {JSONL_FILE}")
+    log.info(f"Manifest:   {MANIFEST_FILE}")
+    log.info(f"Sidecars:   {RAW_SIDECAR_DIR}")
+
+    # Copy results from scratch to FINAL_DIR
+    log.info("Copying results to final output dir...")
+    import shutil
+    for src, dst in [(JSONL_FILE, FINAL_JSONL), (MANIFEST_FILE, FINAL_MANIFEST)]:
+        if src.exists():
+            try:
+                shutil.copy2(src, dst)
+                log.info(f"  ✓ {src.name} → {dst}")
+            except OSError as e:
+                log.error(f"  ✗ Failed to copy {src.name}: {e}")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+
+# ─── Shutdown vLLM servers ────────────────────────────────────────────────
+echo ""
+echo "Shutting down all vLLM servers..."
+for pid in "${VLLM_PIDS[@]}"; do
+    kill $pid 2>/dev/null
+done
+for pid in "${VLLM_PIDS[@]}"; do
+    wait $pid 2>/dev/null || true
+done
+echo "  All servers stopped."
+
+echo "Results at: ${FINAL_OUTPUT_DIR}"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  Job complete at $(date)"
+echo "║  Output: ${FINAL_OUTPUT_DIR}"
+echo "╚══════════════════════════════════════════════════════════════╝"
+
+scontrol show job "${SLURM_JOB_ID:-}" 2>/dev/null || true
