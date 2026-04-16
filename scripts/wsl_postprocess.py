@@ -84,9 +84,9 @@ KNOWN_PORTS_LOWER = {
     "dartmouth", "holmes hole", "wareham",
 }
 
-# Known OCR port corrections (extend as needed)
-PORT_CORRECTIONS = {
-    # OCR errors
+# V3.2: Safe OCR corrections — unambiguous character-level corruption
+SAFE_PORT_CORRECTIONS = {
+    # OCR character errors
     "antucket": "Nantucket",
     "anticent": "Nantucket",
     "nantkt": "Nantucket",
@@ -97,13 +97,15 @@ PORT_CORRECTIONS = {
     "n b": "New Bedford",
     "n london": "New London",
     "n. london": "New London",
-    # Port abbreviations (from string_normalizer.py)
+    # Abbreviations
     "s harbor": "Sag Harbor",
     "s. harbor": "Sag Harbor",
     "greenpt": "Greenport",
     "p town": "Provincetown",
     "prov town": "Provincetown",
-    # Standard whaling ports (canonical forms)
+    "olmes' hole": "Holmes Hole",
+    "holmes' hole": "Holmes Hole",
+    # Canonical capitalization (same meaning, just case-fix)
     "edgartown": "Edgartown",
     "sag harbor": "Sag Harbor",
     "cold spring": "Cold Spring",
@@ -122,14 +124,21 @@ PORT_CORRECTIONS = {
     "newport": "Newport",
     "mattapoisett": "Mattapoisett",
     "holmes hole": "Holmes Hole",
-    "holmes' hole": "Holmes Hole",
-    "olmes' hole": "Holmes Hole",
-    "london": "New London",
-    "dover": "Edgartown",
     "sandwich": "Sandwich",
     "marion": "Marion",
     "fall river": "Fall River",
 }
+
+# V3.2: Ambiguous rewrites — these are interpretive, not OCR corrections.
+# Applied only when home_port context confirms a New England vessel.
+# "london" could be London, England; "dover" could be Dover, England.
+AMBIGUOUS_PORT_CORRECTIONS = {
+    "london": "New London",
+    "dover": "Edgartown",
+}
+
+# Combined for backward compat — but fix_port_ocr only uses SAFE by default
+PORT_CORRECTIONS = {**SAFE_PORT_CORRECTIONS, **AMBIGUOUS_PORT_CORRECTIONS}
 
 MONTH_PATTERN = re.compile(
     r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Mch)\b", re.IGNORECASE
@@ -140,6 +149,19 @@ COMPANY_INDICATORS = re.compile(
 )
 
 YEAR_PATTERN = re.compile(r"\b(\d{2,4})\b")
+
+# V3.2: Coordinate / status detection helpers for detect_field_swap
+# Note: [NSEW] must follow a digit to avoid matching month names like "Jan", "June"
+COORD_HINT_RE = re.compile(r"\b(lat|lon)\b|\d\s*[°']?\s*[NSEW]\b", re.IGNORECASE)
+STATUS_HINTS = {"in port", "at sea", "not stated"}
+
+def _looks_coordish(s):
+    """Return True if string looks like coordinates."""
+    return bool(s and COORD_HINT_RE.search(s))
+
+def _looks_status(s):
+    """Return True if string is a status phrase, not a location."""
+    return (s or "").strip().lower() in STATUS_HINTS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -311,35 +333,53 @@ def extract_surname(ev):
 
 
 def fix_port_ocr(ev):
-    """Correct known OCR errors in port and home_port fields."""
+    """Correct known OCR errors in port and home_port fields.
+
+    V3.2: Only applies SAFE corrections by default. Ambiguous rewrites
+    (e.g., 'london' → 'New London') are only applied when home_port context
+    confirms a New England vessel.
+    """
+    home = (ev.get("home_port") or "").strip().lower()
+    home_is_new_england = home in KNOWN_PORTS_LOWER
+
     for field in ("port", "home_port"):
         val = ev.get(field)
         if not val:
             continue
         val_lower = val.strip().lower()
-        if val_lower in PORT_CORRECTIONS:
-            ev[field] = PORT_CORRECTIONS[val_lower]
+        if val_lower in SAFE_PORT_CORRECTIONS:
+            ev[field] = SAFE_PORT_CORRECTIONS[val_lower]
+        elif val_lower in AMBIGUOUS_PORT_CORRECTIONS and home_is_new_england:
+            ev[field] = AMBIGUOUS_PORT_CORRECTIONS[val_lower]
     return ev
 
 
 def detect_field_swap(ev):
-    """Detect and correct when port and date fields are swapped."""
-    port = ev.get("port") or ""
-    date = ev.get("date") or ""
+    """Detect and correct when port and date fields are swapped.
 
-    # If port looks like a date (starts with month name)
-    if port and MONTH_PATTERN.match(port):
-        # And date doesn't look like a date (or looks like coordinates/port)
-        if not date or not MONTH_PATTERN.match(date):
-            ev["port"], ev["date"] = date or None, port
+    V3.2 FIX: Re-reads from ev after mutation to avoid stale-variable bug.
+    Previous version used local `date`/`port` variables after the swap,
+    which caused the good date to be destroyed when the original date
+    contained coordinates.
+    """
+    port = (ev.get("port") or "").strip()
+    date = (ev.get("date") or "").strip()
 
-    # If date contains coordinates but port doesn't
-    if date and ("lat" in date.lower() or "lon" in date.lower()):
-        if port and not ("lat" in port.lower() or "lon" in port.lower()):
-            # Move coordinates to remarks, keep whatever port we have
-            remarks = ev.get("remarks") or ""
-            ev["remarks"] = f"{remarks}; coords={date}".lstrip("; ")
-            ev["date"] = None
+    port_is_date = bool(port and MONTH_PATTERN.match(port))
+    date_is_date = bool(date and MONTH_PATTERN.match(date))
+    date_is_coordish = _looks_coordish(date)
+
+    if port_is_date and (not date_is_date or date_is_coordish):
+        ev["date"] = port
+        # Don't move coordinates or status text into port — they're not locations
+        ev["port"] = None if (date_is_coordish or _looks_status(date)) else (date or None)
+
+    # V3.2 FIX: Re-read from the mutated event, not stale locals
+    date = (ev.get("date") or "").strip()
+    if _looks_coordish(date):
+        remarks = ev.get("remarks") or ""
+        ev["remarks"] = f"{remarks}; coords={date}".lstrip("; ")
+        ev["date"] = None
 
     return ev
 
@@ -583,10 +623,43 @@ def deduplicate_events(events):
 # Full Pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def post_process_event(ev, issue_year=None):
-    """Run all 5 layers on a single event. Returns (event, flags, confidence).
+def assign_validation_status(ev):
+    """V3.2: Assign a decisive validation status based on flags and confidence.
 
-    V3: Added alignment validation layer and flag-based confidence scoring.
+    Returns one of: 'valid', 'suspicious', 'invalid'
+    This is more actionable than a float confidence score for downstream filtering.
+    """
+    flags = set(ev.get("_flags") or [])
+    conf = ev.get("_confidence", 1.0)
+
+    # Hard invalid conditions
+    if conf < 0.5:
+        return "invalid"
+    if any(f.startswith("invalid_event_type") for f in flags):
+        return "invalid"
+    if "vessel_captain_echo" in flags and not ev.get("vessel_name"):
+        return "invalid"
+
+    # Suspicious conditions
+    if any(f.startswith("vessel_is_port_name") for f in flags):
+        return "suspicious"
+    if any(f.startswith("captain_is_port_name") for f in flags):
+        return "suspicious"
+    if "vessel_captain_echo" in flags:
+        return "suspicious"
+    if "status_in_port_field" in flags:
+        return "suspicious"
+    if "likely_registry_not_weekly" in flags:
+        return "suspicious"
+
+    return "valid"
+
+
+def post_process_event(ev, issue_year=None, page_type=None, page_key=None):
+    """Run all 6 layers on a single event.
+
+    V3.2: Accepts page_type and page_key for downstream context.
+    Adds validation_status and panel_include fields.
     """
     # Layer 1: Raw preservation
     ev = preserve_raw(ev)
@@ -607,28 +680,48 @@ def post_process_event(ev, issue_year=None):
     ev, hard_flags = validate_hard(ev)
     ev, section_flags = validate_section(ev, issue_year)
 
-    # V3 Layer 5: Column-alignment detection (port stop-list)
+    # Layer 5: Column-alignment detection (port stop-list)
     ev, alignment_flags = validate_alignment(ev)
 
     all_flags = hard_flags + section_flags + alignment_flags
 
-    # V3: Confidence now reflects flags
+    # Layer 6: Confidence + validation status
     ev, confidence, soft_penalties = validate_soft(ev, all_flags=all_flags)
 
     ev["_flags"] = all_flags if all_flags else None
     ev["_confidence"] = confidence
 
+    # V3.2: Stamp page context for downstream filtering
+    if page_type:
+        ev["_page_type"] = page_type
+    if page_key:
+        ev["page_key"] = page_key
+
+    # V3.2: Decisive validation status + panel inclusion
+    ev["validation_status"] = assign_validation_status(ev)
+    ev["panel_include"] = (
+        ev["validation_status"] == "valid"
+        and ev.get("_page_type") != "registry"
+    )
+
     return ev
 
 
 def post_process_page(page_record):
-    """Post-process all events in a page record."""
+    """Post-process all events in a page record.
+
+    V3.2: Passes page_type and page_key to each event for downstream context.
+    """
     events = page_record.get("events", [])
     year = page_record.get("year")
+    page_type = page_record.get("page_type")
+    page_key = page_record.get("page_key")
 
     processed = []
     for ev in events:
-        ev = post_process_event(ev, issue_year=year)
+        ev = post_process_event(
+            ev, issue_year=year, page_type=page_type, page_key=page_key
+        )
         processed.append(ev)
 
     # Deduplicate
