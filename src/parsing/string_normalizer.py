@@ -101,8 +101,9 @@ def normalize_vessel_name(name: Optional[str]) -> Optional[str]:
     """
     Normalize a vessel name.
     
-    Similar to person name normalization but without title removal
-    and abbreviation expansion (vessels have different naming conventions).
+    Similar to person name normalization but without title removal.
+    Expands common abbreviations since many vessels are named after people
+    (e.g., WM HENRY → WILLIAM HENRY, BENJ MORGAN → BENJAMIN MORGAN).
     
     Args:
         name: Raw vessel name string
@@ -127,6 +128,16 @@ def normalize_vessel_name(name: Optional[str]) -> Optional[str]:
     tokens = text.split()
     if tokens and tokens[0] in prefixes_to_remove:
         tokens = tokens[1:]
+
+    # Expand common abbreviations (vessels named after people)
+    tokens = [
+        STRING_NORM_CONFIG.expand_abbreviations.get(t, t)
+        for t in tokens
+    ]
+
+    # Normalize ordinal suffixes: 2D→2ND, 3D→3RD
+    _ordinal_map = {"2D": "2ND", "3D": "3RD", "1ST": "1ST"}
+    tokens = [_ordinal_map.get(t, t) for t in tokens]
     
     result = " ".join(tokens)
     

@@ -39,7 +39,7 @@ The pipeline turns extracted WSL pages into uncertainty-aware ML objects that ca
 4. Policy layer
    Scores local on-support observational targeting rules for scarce organizational support at departure and after a first bad-state signal.
 
-## Important Design Choices
+## Important Design Choices`
 
 - Weekly event-flow pages and registry-stock pages are treated as different data-generating processes.
 - `issue_date` is the information-availability clock throughout the stack.

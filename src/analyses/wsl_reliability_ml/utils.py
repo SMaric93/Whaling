@@ -579,22 +579,31 @@ def classify_page_process(page_record: Mapping[str, Any], config: WSLReliability
     panel_valid = sum(1 for event in events if event.get("panel_include") is True)
     registry_share = registry_hits / n_events
     panel_share = panel_valid / n_events
+
+    # V4 detection: if no event has panel_include set, panel_share is meaningless;
+    # classify based on registry_share threshold and extraction router page_type only.
+    has_panel_include = any(event.get("panel_include") is not None for event in events)
+
     if registry_share >= config.page_registry_share_threshold:
         confidence = min(0.65 + 0.35 * registry_share, 0.99)
         reason = f"registry_flag_share={registry_share:.2f}"
         return ("fleet_registry_stock", confidence, reason, registry_share, panel_share)
-    if raw_page_type == "sparse" and panel_share < config.page_panel_share_threshold:
-        confidence = 0.72
-        reason = f"sparse_low_panel_share={panel_share:.2f}"
-        return ("fleet_registry_stock", confidence, reason, registry_share, panel_share)
-    if panel_share <= 0.05 and raw_page_type in {"shipping_table", "mixed"}:
-        return (
-            "fleet_registry_stock",
-            0.68,
-            f"near_zero_panel_share={panel_share:.2f}",
-            registry_share,
-            panel_share,
-        )
+
+    # Panel-share checks only apply when panel_include is populated (V3 data)
+    if has_panel_include:
+        if raw_page_type == "sparse" and panel_share < config.page_panel_share_threshold:
+            confidence = 0.72
+            reason = f"sparse_low_panel_share={panel_share:.2f}"
+            return ("fleet_registry_stock", confidence, reason, registry_share, panel_share)
+        if panel_share <= 0.05 and raw_page_type in {"shipping_table", "mixed"}:
+            return (
+                "fleet_registry_stock",
+                0.68,
+                f"near_zero_panel_share={panel_share:.2f}",
+                registry_share,
+                panel_share,
+            )
+
     confidence = 0.80
     if raw_page_type == "shipping_table":
         confidence = 0.90
@@ -848,7 +857,11 @@ def load_wsl_cleaned_events(config: WSLReliabilityConfig) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     with config.cleaned_events_path.open("r", encoding="utf-8") as handle:
         for page_num, line in enumerate(handle, start=1):
-            page_record = json.loads(line)
+            try:
+                page_record = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Skipping corrupt JSONL line at page_num=%d", page_num)
+                continue
             page_key = page_record.get("page_key")
             pdf_name = page_record.get("pdf")
             issue_id = (
@@ -993,6 +1006,19 @@ def load_wsl_cleaned_events(config: WSLReliabilityConfig) -> pd.DataFrame:
 
 
 def build_voyage_linkage(events_df: pd.DataFrame, voyages_df: pd.DataFrame, config: WSLReliabilityConfig) -> pd.DataFrame:
+    # Known whaling port names — events with these as vessel_name are section headers
+    _PORT_NAMES = frozenset({
+        "NEW BEDFORD", "NANTUCKET", "MATTAPOISETT", "FAIRHAVEN",
+        "EDGARTOWN", "PROVINCETOWN", "SIPPICAN", "WESTPORT",
+        "DARTMOUTH", "HOLMES HOLE", "WARREN", "BRISTOL",
+        "NEWPORT", "SAG HARBOR", "GREENPORT", "COLD SPRING",
+        "MYSTIC", "STONINGTON", "NEW LONDON", "SALEM",
+        "SANDWICH", "WAREHAM", "MARION", "TISBURY",
+        "FALL RIVER", "DORCHESTER", "LYNN", "PLYMOUTH",
+        "SAN FRANCISCO", "HONOLULU", "HUDSON", "POUGHKEEPSIE",
+        "GAY HEAD",
+    })
+
     vessel_index: dict[str, list[dict[str, Any]]] = {}
     base_columns = [
         "voyage_id",
@@ -1014,14 +1040,70 @@ def build_voyage_linkage(events_df: pd.DataFrame, voyages_df: pd.DataFrame, conf
     ]
     available_columns = [column for column in base_columns if column in voyages_df.columns]
     optional_columns = {"captain_id", "agent_id", "vessel_id", "basin", "theater", "major_ground", "ground_or_route"}
+
+    # Re-normalize panel vessel names with the updated normalizer (abbreviation expansion)
     for record in voyages_df[available_columns].dropna(subset=["voyage_id", "vessel_name_norm"]).to_dict("records"):
         for column in optional_columns:
             record.setdefault(column, pd.NA)
-        vessel_index.setdefault(str(record["vessel_name_norm"]), []).append(record)
+        raw_norm = str(record["vessel_name_norm"])
+        re_normed = normalize_vessel_name(raw_norm) or raw_norm
+        record["vessel_name_norm_original"] = raw_norm
+        record["vessel_name_norm"] = re_normed
+        vessel_index.setdefault(re_normed, []).append(record)
+        # Also index under original name if different (backward compat)
+        if raw_norm != re_normed:
+            vessel_index.setdefault(raw_norm, []).append(record)
+
+    # Build a secondary index mapping "first N tokens" → full names for substring matching
+    _token_index: dict[str, set[str]] = {}
+    for full_name in vessel_index:
+        tokens = full_name.split()
+        for n in range(1, len(tokens) + 1):
+            prefix = " ".join(tokens[:n])
+            _token_index.setdefault(prefix, set()).add(full_name)
 
     linkage_rows: list[dict[str, Any]] = []
     for event in events_df.itertuples(index=False):
-        candidate_records = vessel_index.get(str(event.vessel_name_norm), []) if pd.notna(event.vessel_name_norm) else []
+        raw_vessel = str(event.vessel_name_norm) if pd.notna(event.vessel_name_norm) else None
+
+        # Port-name contamination: skip linkage for section headers
+        if raw_vessel and raw_vessel in _PORT_NAMES:
+            fallback_episode = stable_hash(
+                [event.vessel_name_norm, event.home_port_norm,
+                 event.issue_date.year if pd.notna(event.issue_date) else ""],
+                prefix="episode_",
+            )
+            linkage_rows.append({
+                "event_row_id": event.event_row_id,
+                "voyage_id": pd.NA,
+                "linkage_method": "port_name_contamination",
+                "linkage_confidence": 0.0,
+                "episode_fallback_key": fallback_episode,
+                "top_candidates": "[]",
+                "captain_id": pd.NA, "agent_id": pd.NA, "vessel_id": pd.NA,
+                "voyage_basin": pd.NA, "voyage_theater": pd.NA, "voyage_major_ground": pd.NA,
+            })
+            continue
+
+        # Re-normalize the event vessel name with abbreviation expansion
+        re_normed_vessel = normalize_vessel_name(raw_vessel) if raw_vessel else None
+
+        # Look up candidates: try exact match first, then substring
+        candidate_records = []
+        if re_normed_vessel and pd.notna(event.vessel_name_norm):
+            candidate_records = vessel_index.get(re_normed_vessel, [])
+            # Fallback: if no exact match, try substring (e.g., "GAY HEAD" → "GAY HEAD I")
+            if not candidate_records and re_normed_vessel in _token_index:
+                for full_name in _token_index[re_normed_vessel]:
+                    if full_name != re_normed_vessel:
+                        candidate_records.extend(vessel_index.get(full_name, []))
+            # Also try: panel name is a prefix of WSL name (e.g., "GOSNOLD" matches "BART GOSNOLD")
+            if not candidate_records:
+                for token_start in [re_normed_vessel.split()[-1]]:
+                    if len(token_start) >= 4 and token_start in _token_index:
+                        for full_name in _token_index[token_start]:
+                            candidate_records.extend(vessel_index.get(full_name, []))
+
         match_date = _coerce_match_date(
             event.parsed_event_date_if_available if pd.notna(event.parsed_event_date_if_available) else event.issue_date
         )
@@ -1078,6 +1160,8 @@ def build_voyage_linkage(events_df: pd.DataFrame, voyages_df: pd.DataFrame, conf
             voyage_id = best_record["voyage_id"]
         elif best_record is not None and best_score >= config.linkage_low_conf_threshold:
             method = "exact_vessel_low_confidence"
+        elif best_record is not None:
+            method = "below_threshold"
 
         fallback_episode = stable_hash(
             [
