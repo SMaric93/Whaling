@@ -1,8 +1,16 @@
-"""Explicit state space, transition grammar, and duration priors for the HSMM.
+"""5-state voyage state space for the explicit-duration HSMM.
 
-Keeps the existing 9-state design from ``utils.py`` but adds the structured
-metadata needed by the explicit-duration HSMM: duration families, support
-windows, prior parameters, and a boolean transition mask.
+Reduced from 9 to 5 states based on the information boundary of the WSL.
+The newspaper can distinguish: departures, active reporting, trouble,
+terminal loss, and completed arrival. It cannot reliably differentiate
+mid-voyage productivity substates from text alone.
+
+States:
+    O — outbound_transit:    Recently departed, pre-whaling phase
+    A — active_voyage:       At sea, being actively reported on
+    T — in_trouble:          Distress, repair, or extended silence
+    F — terminal_loss:       Absorbing: wrecked, condemned, lost
+    C — completed_arrival:   Absorbing: returned to home port
 
 Usage::
 
@@ -39,75 +47,30 @@ class StateDef:
 STATE_DEFS: list[StateDef] = [
     StateDef(
         id="O",
-        name="outbound_initial_transit",
-        description="Recently departed; outbound to initial theater.",
+        name="outbound_transit",
+        description="Recently departed; outbound to whaling grounds.",
         absorbing=False,
         duration_family="shifted_poisson",
         support_weeks=(1, 26),
         prior_mean_weeks=4.0,
     ),
     StateDef(
-        id="N",
-        name="active_search_neutral",
-        description="Ordinary search; neither clearly productive nor barren.",
+        id="A",
+        name="active_voyage",
+        description="At sea, being actively reported (spoken, in port, oil accumulating).",
         absorbing=False,
         duration_family="discrete_lognormal",
-        support_weeks=(1, 104),
-        prior_mean_weeks=16.0,
-    ),
-    StateDef(
-        id="S",
-        name="productive_search",
-        description="Productive search with positive catch signals.",
-        absorbing=False,
-        duration_family="discrete_lognormal",
-        support_weeks=(1, 104),
+        support_weeks=(1, 156),
         prior_mean_weeks=20.0,
     ),
     StateDef(
-        id="L",
-        name="low_yield_or_stalled_search",
-        description="Search continues but looks barren or stagnant.",
-        absorbing=False,
-        duration_family="discrete_lognormal",
-        support_weeks=(1, 78),
-        prior_mean_weeks=12.0,
-    ),
-    StateDef(
-        id="D",
-        name="distress_at_sea",
-        description="Serious hazard, damage, illness, or high-risk disruption.",
-        absorbing=False,
-        duration_family="discrete_lognormal",
-        support_weeks=(1, 26),
-        prior_mean_weeks=4.0,
-    ),
-    StateDef(
-        id="I",
-        name="in_port_interruption_or_repair",
-        description="In port, repairing, provisioning, or otherwise interrupted.",
+        id="T",
+        name="in_trouble",
+        description="Distress, extensive repair, or extended reporting silence.",
         absorbing=False,
         duration_family="discrete_lognormal",
         support_weeks=(1, 52),
         prior_mean_weeks=6.0,
-    ),
-    StateDef(
-        id="H",
-        name="homebound_or_terminated",
-        description="Homebound or on a premature termination path.",
-        absorbing=False,
-        duration_family="discrete_lognormal",
-        support_weeks=(1, 52),
-        prior_mean_weeks=8.0,
-    ),
-    StateDef(
-        id="C",
-        name="completed_arrival",
-        description="Voyage completed; successful or ordinary completion.",
-        absorbing=True,
-        duration_family="absorbing",
-        support_weeks=(1, 260),
-        prior_mean_weeks=None,
     ),
     StateDef(
         id="F",
@@ -118,84 +81,57 @@ STATE_DEFS: list[StateDef] = [
         support_weeks=(1, 260),
         prior_mean_weeks=None,
     ),
+    StateDef(
+        id="C",
+        name="completed_arrival",
+        description="Voyage completed; ship returned to home port.",
+        absorbing=True,
+        duration_family="absorbing",
+        support_weeks=(1, 260),
+        prior_mean_weeks=None,
+    ),
 ]
 
-# Ordered state names (matches existing STATE_SPACE in utils.py)
+# Ordered state names
 STATE_NAMES: list[str] = [s.name for s in STATE_DEFS]
 STATE_IDS: list[str] = [s.id for s in STATE_DEFS]
 NUM_STATES: int = len(STATE_DEFS)
 STATE_INDEX: dict[str, int] = {s.name: i for i, s in enumerate(STATE_DEFS)}
 STATE_ID_INDEX: dict[str, int] = {s.id: i for i, s in enumerate(STATE_DEFS)}
 
-# Allowed transitions — mirrors existing DEFAULT_ALLOWED_TRANSITIONS in utils.py
+# Allowed transitions
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "outbound_initial_transit": {
-        "outbound_initial_transit",
-        "active_search_neutral",
-        "productive_search",
-        "low_yield_or_stalled_search",
-        "in_port_interruption_or_repair",
-        "terminal_loss",
+    "outbound_transit": {
+        "outbound_transit",
+        "active_voyage",
+        "in_trouble",        # early trouble
+        "terminal_loss",     # immediate loss
     },
-    "active_search_neutral": {
-        "active_search_neutral",
-        "productive_search",
-        "low_yield_or_stalled_search",
-        "distress_at_sea",
-        "homebound_or_terminated",
-        "completed_arrival",
+    "active_voyage": {
+        "active_voyage",
+        "in_trouble",        # trouble mid-voyage
+        "terminal_loss",     # sudden loss
+        "completed_arrival", # homeward
     },
-    "productive_search": {
-        "productive_search",
-        "active_search_neutral",
-        "low_yield_or_stalled_search",
-        "distress_at_sea",
-        "homebound_or_terminated",
-        "completed_arrival",
+    "in_trouble": {
+        "in_trouble",
+        "active_voyage",     # recovery
+        "terminal_loss",     # loss after trouble
+        "completed_arrival", # limped home
     },
-    "low_yield_or_stalled_search": {
-        "low_yield_or_stalled_search",
-        "active_search_neutral",
-        "productive_search",
-        "distress_at_sea",
-        "in_port_interruption_or_repair",
-        "homebound_or_terminated",
-    },
-    "distress_at_sea": {
-        "distress_at_sea",
-        "in_port_interruption_or_repair",
-        "homebound_or_terminated",
-        "terminal_loss",
-        "active_search_neutral",
-    },
-    "in_port_interruption_or_repair": {
-        "in_port_interruption_or_repair",
-        "active_search_neutral",
-        "low_yield_or_stalled_search",
-        "homebound_or_terminated",
-        "distress_at_sea",
-        "completed_arrival",
-        "terminal_loss",
-    },
-    "homebound_or_terminated": {
-        "homebound_or_terminated",
-        "completed_arrival",
-        "terminal_loss",
-    },
-    "completed_arrival": {"completed_arrival"},
     "terminal_loss": {"terminal_loss"},
+    "completed_arrival": {"completed_arrival"},
 }
 
 # Initial state priors
 INITIAL_STATE_PRIORS: np.ndarray = np.array(
-    [0.45, 0.18, 0.10, 0.10, 0.05, 0.05, 0.04, 0.015, 0.015],
+    [0.55, 0.25, 0.08, 0.02, 0.10],
     dtype=np.float64,
 )
 INITIAL_STATE_PRIORS /= INITIAL_STATE_PRIORS.sum()
 
 BAD_STATES: frozenset[str] = frozenset({
-    "distress_at_sea",
-    "in_port_interruption_or_repair",
+    "in_trouble",
     "terminal_loss",
 })
 
@@ -246,18 +182,7 @@ def _shifted_poisson_pmf(support: np.ndarray, mean: float) -> np.ndarray:
 
 
 def build_duration_prior(state_def: StateDef, max_duration: int | None = None) -> torch.Tensor:
-    """Build a duration prior PMF as a 1-D tensor of length ``U_max``.
-
-    For absorbing states, returns a flat (uniform) distribution over the
-    support — the state persists indefinitely once entered.
-
-    Parameters
-    ----------
-    state_def : StateDef
-        State metadata including family and prior parameters.
-    max_duration : int, optional
-        Override the state's ``support_weeks[1]`` cap.
-    """
+    """Build a duration prior PMF as a 1-D tensor of length ``U_max``."""
     lo, hi = state_def.support_weeks
     if max_duration is not None:
         hi = min(hi, max_duration)

@@ -1,16 +1,12 @@
-"""Anchor posterior generation for the latent state model.
+"""Data-driven anchor posteriors for the 5-state HSMM.
 
-Converts event types, remarks scores, and obvious end states into soft
-anchor posteriors over the 9 latent states.  This replaces the discrete
-``create_state_anchor_labels()`` in ``voyage_state_model.py`` with the
-spec's logit-space combination + posterior regularization targets.
+Uses oil quantities, remarks taxonomy probabilities, event type counts,
+and temporal position to generate strong soft anchors over the 5 latent
+states.  Every feature in the weekly panel that carries state-discriminative
+signal is directly incorporated.
 
-Design principle: generate *soft*, not hard, labels.  Combine multiple
-anchor sources in logit space, renormalize, and cap certainty unless a
-truly terminal anchor (C/F) is present.
-
-**Performance note**: Uses vectorized numpy operations on the whole DataFrame
-rather than row-by-row Python loops.
+Design: accumulate logit scores per state from multiple evidence sources,
+then softmax-normalize with certainty caps.
 """
 
 from __future__ import annotations
@@ -31,16 +27,13 @@ from .state_space import (
 
 logger = logging.getLogger(__name__)
 
-# Uniform logit baseline
-_UNIFORM_LOGITS = np.zeros(NUM_STATES, dtype=np.float64)
-
-# Maximum certainty cap for non-terminal anchors
+# Certainty caps
 _MAX_CERTAINTY_NONTERMINAL = 0.92
 _MAX_CERTAINTY_TERMINAL = 0.99
 
 
 # ---------------------------------------------------------------------------
-# Vectorized anchor computation
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -63,127 +56,245 @@ def _parse_event_counts(series: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(cols, index=series.index)
 
 
+def _safe_col(df: pd.DataFrame, col: str, default: float = 0.0) -> np.ndarray:
+    """Extract a column as numpy array, filling missing values."""
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(default).values
+    return np.full(len(df), default, dtype=np.float64)
+
+
 def build_anchor_posteriors(
     weekly_df: pd.DataFrame,
     config: Any = None,
 ) -> pd.DataFrame:
-    """Generate soft anchor posteriors for each voyage-week (vectorized).
+    """Generate soft anchor posteriors for each voyage-week.
+
+    Uses ALL available panel features: oil quantities, remarks taxonomy
+    probabilities, event types, temporal position, reporting gaps, and
+    distress severity.
 
     Parameters
     ----------
     weekly_df : pd.DataFrame
-        Weekly observation panel.
-    config : WSLReliabilityConfig, optional
-        Reserved for future tuning.
+        Weekly observation panel (output of ``build_weekly_observation_panel``).
 
     Returns
     -------
     pd.DataFrame
         One row per voyage-week with columns ``state_prior_<name>``,
-        ``anchor_strength``, ``anchor_sources``, ``is_terminal_anchor``,
-        ``n_anchor_rules_fired``.
+        ``anchor_strength``, ``anchor_sources``, etc.
     """
     N = len(weekly_df)
     index = weekly_df.index
 
-    # ---- Parse inputs ----
-    weeks = weekly_df.get("weeks_since_departure", pd.Series(0, index=index)).fillna(0).astype(int)
-    flow_frac = weekly_df.get("source_mode_flow_fraction", pd.Series(0.5, index=index)).fillna(0.5)
-    distress = weekly_df.get("distress_severity_max", pd.Series(0.0, index=index)).fillna(0.0)
-    productivity = weekly_df.get("productivity_polarity_mean", pd.Series(0.0, index=index)).fillna(0.0)
-    oil_delta = weekly_df.get("oil_delta_per_elapsed_week", pd.Series(0.0, index=index)).fillna(0.0)
-    primary_class = weekly_df.get("primary_class_mode", pd.Series("", index=index)).fillna("").astype(str)
+    # ---- Extract all features ----
+    weeks = _safe_col(weekly_df, "weeks_since_departure")
+    weeks_since_obs = _safe_col(weekly_df, "weeks_since_last_observation")
+    flow_frac = _safe_col(weekly_df, "source_mode_flow_fraction", 0.5)
+    distress_sev = _safe_col(weekly_df, "distress_severity_max")
+    productivity = _safe_col(weekly_df, "productivity_polarity_mean")
+    oil_delta = _safe_col(weekly_df, "oil_delta_per_elapsed_week")
+    oil_total = _safe_col(weekly_df, "oil_total")
+    oil_sperm = _safe_col(weekly_df, "oil_sperm_bbls")
+    oil_whale = _safe_col(weekly_df, "oil_whale_bbls")
+    n_events = _safe_col(weekly_df, "n_events")
+    confidence = _safe_col(weekly_df, "mean_confidence", 0.5)
 
-    evt_df = _parse_event_counts(weekly_df.get("event_type_counts_json", pd.Series({}, index=index)))
+    # Remarks taxonomy probabilities
+    p_distress = _safe_col(weekly_df, "p_primary__distress_hazard")
+    p_terminal = _safe_col(weekly_df, "p_primary__terminal_loss")
+    p_productive = _safe_col(weekly_df, "p_primary__positive_productivity")
+    p_weak = _safe_col(weekly_df, "p_primary__weak_or_empty_productivity")
+    p_repair = _safe_col(weekly_df, "p_primary__interruption_repair")
+    p_homebound = _safe_col(weekly_df, "p_primary__homebound_or_termination")
+    p_routine = _safe_col(weekly_df, "p_primary__routine_info")
+    p_commercial = _safe_col(weekly_df, "p_primary__commercial_admin_status")
+    p_assistance = _safe_col(weekly_df, "p_primary__assistance_transfer_coordination")
 
-    dep_count = evt_df.get("dep", pd.Series(0.0, index=index)).values
-    arr_count = evt_df.get("arr", pd.Series(0.0, index=index)).values
-    wrk_count = evt_df.get("wrk", pd.Series(0.0, index=index)).values
-    inp_count = evt_df.get("inp", pd.Series(0.0, index=index)).values
+    # Tag probabilities
+    p_bound_home = _safe_col(weekly_df, "p_tag__bound_home")
+    p_in_port = _safe_col(weekly_df, "p_tag__in_port")
+    p_no_whales = _safe_col(weekly_df, "p_tag__no_whales_or_clean")
+    p_spoken = _safe_col(weekly_df, "p_tag__spoken_or_seen")
+    p_whales = _safe_col(weekly_df, "p_tag__whales_sighted")
+
+    primary_class = weekly_df.get(
+        "primary_class_mode", pd.Series("", index=index)
+    ).fillna("").astype(str).values
+
+    evt_df = _parse_event_counts(
+        weekly_df.get("event_type_counts_json", pd.Series({}, index=index))
+    )
+    dep_count = evt_df["dep"].values
+    arr_count = evt_df["arr"].values
+    inp_count = evt_df["inp"].values
+    wrk_count = evt_df["wrk"].values
     spk_count = evt_df.get("spk", pd.Series(0.0, index=index)).values
     rpt_count = evt_df.get("rpt", pd.Series(0.0, index=index)).values
 
-    weeks_arr = weeks.values
-    flow_arr = flow_frac.values
-    distress_arr = distress.values
-    productivity_arr = productivity.values
-    oil_delta_arr = oil_delta.values
-    pc_arr = primary_class.values
+    # Per-voyage last observed week (for terminal anchor)
+    voyage_ids = weekly_df["voyage_id"].values
+    week_idx = weekly_df["week_idx"].values.astype(int)
+    # Compute max week per voyage
+    vmax = weekly_df.groupby("voyage_id")["week_idx"].transform("max").values.astype(int)
 
     # ---- Build logit matrix [N, K] ----
     logits = np.zeros((N, NUM_STATES), dtype=np.float64)
     sources = [[] for _ in range(N)]
     is_terminal = np.zeros(N, dtype=bool)
 
-    # Rule 1: departure → outbound (early weeks only)
-    is_dep = (dep_count > 0) & (flow_arr > 0.5) & (weeks_arr <= 4)
-    logits[is_dep, STATE_INDEX["outbound_initial_transit"]] += 3.0
+    IDX_O = STATE_INDEX["outbound_transit"]
+    IDX_A = STATE_INDEX["active_voyage"]
+    IDX_T = STATE_INDEX["in_trouble"]
+    IDX_F = STATE_INDEX["terminal_loss"]
+    IDX_C = STATE_INDEX["completed_arrival"]
+
+    # ================================================================
+    # RULE 1: OUTBOUND TRANSIT — early weeks, departure events
+    # ================================================================
+    is_dep = (dep_count > 0) & (flow_frac > 0.4) & (weeks <= 6)
+    logits[is_dep, IDX_O] += 3.5
     for i in np.where(is_dep)[0]:
         sources[i].append("departure")
 
-    # Rule 2: wreck or terminal_loss class → terminal failure
-    is_wrk = (wrk_count > 0) | (pc_arr == "terminal_loss")
-    logits[is_wrk, STATE_INDEX["terminal_loss"]] += 5.0
+    # Early weeks without other strong signals → outbound
+    is_early = (weeks <= 4) & (arr_count == 0) & (wrk_count == 0) & (oil_total <= 0)
+    logits[is_early, IDX_O] += 1.5
+    for i in np.where(is_early & ~is_dep)[0]:
+        sources[i].append("early_week")
+
+    # ================================================================
+    # RULE 2: TERMINAL LOSS — wreck events, loss remarks
+    # ================================================================
+    is_wrk = (wrk_count > 0) | (primary_class == "terminal_loss")
+    logits[is_wrk, IDX_F] += 6.0
     is_terminal[is_wrk] = True
     for i in np.where(is_wrk)[0]:
-        sources[i].append("terminal_wreck")
+        sources[i].append("wreck_event")
 
-    # Rule 3: arrival without severe distress → completed
-    is_arr = (arr_count > 0) & (distress_arr < 2) & (pc_arr != "terminal_loss")
-    logits[is_arr, STATE_INDEX["completed_arrival"]] += 3.5
-    is_terminal[is_arr] = True
-    for i in np.where(is_arr)[0]:
-        sources[i].append("arrival")
+    # High terminal-loss taxonomy probability
+    is_loss_remarks = (p_terminal > 0.3) & ~is_wrk
+    logits[is_loss_remarks, IDX_F] += 3.0 * p_terminal[is_loss_remarks]
+    for i in np.where(is_loss_remarks)[0]:
+        sources[i].append("loss_remarks")
 
-    # Rule 4: in-port or repair class → interrupted
-    is_inp = (inp_count > 0) | (pc_arr == "interruption_repair")
-    logits[is_inp, STATE_INDEX["in_port_interruption_or_repair"]] += 2.0
-    for i in np.where(is_inp)[0]:
-        sources[i].append("inport_repair")
+    # ================================================================
+    # RULE 3: COMPLETED ARRIVAL — arrival at end of record
+    # ================================================================
+    # Arrival events near the end of the voyage's observed record
+    is_final_arr = (arr_count > 0) & (week_idx >= vmax - 2) & (distress_sev < 2)
+    logits[is_final_arr, IDX_C] += 5.0
+    is_terminal[is_final_arr] = True
+    for i in np.where(is_final_arr)[0]:
+        sources[i].append("final_arrival")
 
-    # Rule 5: homebound class
-    is_home = pc_arr == "homebound_or_termination"
-    logits[is_home, STATE_INDEX["homebound_or_terminated"]] += 2.2
-    for i in np.where(is_home)[0]:
-        sources[i].append("homebound")
+    # Mid-voyage arrivals (at whaling ports) — weaker signal, still active
+    is_mid_arr = (arr_count > 0) & (week_idx < vmax - 2) & ~is_wrk
+    logits[is_mid_arr, IDX_A] += 1.0
+    for i in np.where(is_mid_arr)[0]:
+        sources[i].append("mid_voyage_arr")
 
-    # Rule 6: high distress severity
-    is_distress = (distress_arr >= 2) | (pc_arr == "distress_hazard")
-    logits[is_distress, STATE_INDEX["distress_at_sea"]] += 2.2
+    # Homebound remarks near end → completed
+    is_homebound_end = (p_bound_home > 0.3) & (week_idx >= vmax - 4)
+    logits[is_homebound_end, IDX_C] += 2.5 * p_bound_home[is_homebound_end]
+    for i in np.where(is_homebound_end)[0]:
+        sources[i].append("homebound_end")
+
+    # ================================================================
+    # RULE 4: IN TROUBLE — distress, repair, extended silence
+    # ================================================================
+    # High distress severity
+    is_distress = (distress_sev >= 2) | (primary_class == "distress_hazard")
+    logits[is_distress, IDX_T] += 3.5
     for i in np.where(is_distress)[0]:
         sources[i].append("distress")
 
-    # Rule 7: low yield (mid-voyage, weak/empty productivity class)
-    is_low_yield = (pc_arr == "weak_or_empty_productivity") & (weeks_arr >= 8)
-    logits[is_low_yield, STATE_INDEX["low_yield_or_stalled_search"]] += 1.5
-    for i in np.where(is_low_yield)[0]:
-        sources[i].append("low_yield")
+    # Distress taxonomy probability
+    has_distress_prob = (p_distress > 0.25) & ~is_distress
+    logits[has_distress_prob, IDX_T] += 2.5 * p_distress[has_distress_prob]
+    for i in np.where(has_distress_prob)[0]:
+        sources[i].append("distress_prob")
 
-    # Rule 8: strong positive productivity (mid-voyage)
-    is_productive = (
-        (pc_arr == "positive_productivity") |
-        ((productivity_arr > 0.5) & (oil_delta_arr > 0))
-    ) & (weeks_arr >= 4)
-    logits[is_productive, STATE_INDEX["productive_search"]] += 1.5
-    for i in np.where(is_productive)[0]:
-        sources[i].append("productive")
+    # In-port repair events with repair taxonomy
+    is_repair = (inp_count > 0) & ((p_repair > 0.2) | (primary_class == "interruption_repair"))
+    logits[is_repair, IDX_T] += 2.5
+    for i in np.where(is_repair)[0]:
+        sources[i].append("repair")
 
-    # Rule 9: neutral search (spoken/reported mid-voyage without other signals)
-    is_neutral = (
+    # Assistance/transfer (often signals trouble)
+    is_assist = p_assistance > 0.3
+    logits[is_assist, IDX_T] += 1.5 * p_assistance[is_assist]
+    for i in np.where(is_assist)[0]:
+        sources[i].append("assistance")
+
+    # Extended reporting gap (>= 8 weeks since last observation) — silence as signal
+    is_gap = weeks_since_obs >= 8
+    logits[is_gap, IDX_T] += np.minimum(weeks_since_obs[is_gap] / 8.0, 3.0)
+    for i in np.where(is_gap)[0]:
+        sources[i].append("silence_gap")
+
+    # ================================================================
+    # RULE 5: ACTIVE VOYAGE — the core mid-voyage state
+    # ================================================================
+    # Spoken/reported events with oil data → strong active signal
+    has_oil_report = (
         ((spk_count > 0) | (rpt_count > 0)) &
-        (distress_arr < 1.5) &
-        (weeks_arr >= 4) &
-        ~np.isin(pc_arr, [
-            "terminal_loss", "distress_hazard", "interruption_repair",
-            "homebound_or_termination", "positive_productivity",
-        ])
+        (oil_total > 0) &
+        (weeks > 4)
     )
-    logits[is_neutral, STATE_INDEX["active_search_neutral"]] += 1.2
-    for i in np.where(is_neutral)[0]:
-        sources[i].append("neutral_search")
+    logits[has_oil_report, IDX_A] += 3.0
+    for i in np.where(has_oil_report)[0]:
+        sources[i].append("oil_report")
+
+    # Positive oil delta → actively accumulating catch
+    is_gaining = (oil_delta > 0) & (weeks > 4)
+    logits[is_gaining, IDX_A] += 2.0 * np.minimum(oil_delta[is_gaining] / 50.0, 1.5)
+    for i in np.where(is_gaining)[0]:
+        sources[i].append("oil_gain")
+
+    # Productive remarks
+    is_prod = (p_productive > 0.2) & (weeks > 3)
+    logits[is_prod, IDX_A] += 2.0 * p_productive[is_prod]
+    for i in np.where(is_prod)[0]:
+        sources[i].append("productive_remarks")
+
+    # Whales sighted tag
+    is_whales = (p_whales > 0.2) & (weeks > 3)
+    logits[is_whales, IDX_A] += 1.5 * p_whales[is_whales]
+    for i in np.where(is_whales)[0]:
+        sources[i].append("whales_sighted")
+
+    # Routine info mid-voyage (coordinates, "heard from") → active
+    is_routine = (p_routine > 0.3) & (weeks > 4) & (distress_sev < 1.5)
+    logits[is_routine, IDX_A] += 1.5
+    for i in np.where(is_routine)[0]:
+        sources[i].append("routine_info")
+
+    # In-port without repair → resupply, still active
+    is_port_active = (inp_count > 0) & (p_repair < 0.15) & ~is_repair
+    logits[is_port_active, IDX_A] += 1.5
+    for i in np.where(is_port_active)[0]:
+        sources[i].append("port_resupply")
+
+    # Spoken/reported mid-voyage without other signals
+    is_spoken = (
+        ((spk_count > 0) | (rpt_count > 0)) &
+        (distress_sev < 1.5) &
+        (weeks > 4) &
+        ~has_oil_report &
+        ~is_wrk
+    )
+    logits[is_spoken, IDX_A] += 1.5
+    for i in np.where(is_spoken)[0]:
+        sources[i].append("spoken")
+
+    # Commercial/admin status → active
+    is_commercial = (p_commercial > 0.3) & (weeks > 3) & ~is_wrk
+    logits[is_commercial, IDX_A] += 1.0
+    for i in np.where(is_commercial)[0]:
+        sources[i].append("commercial")
 
     # ---- Softmax and certainty cap ----
-    # log-sum-exp normalize
     shifted = logits - logits.max(axis=1, keepdims=True)
     probs = np.exp(shifted)
     probs /= probs.sum(axis=1, keepdims=True) + 1e-30

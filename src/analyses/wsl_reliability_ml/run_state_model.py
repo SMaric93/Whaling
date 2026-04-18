@@ -329,7 +329,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         logger.info("=" * 60)
         logger.info("Stage 9: Summarizing state features")
         logger.info("=" * 60)
-        summary_df = summarize_state_features(viterbi_df)
+        summary_df = summarize_state_features(viterbi_df, anchor_df=anchor_df)
         _save_parquet(summary_df, states_dir / "state_summary.parquet")
         tracer.set_metadata(n_summaries=len(summary_df))
         logger.info("Summaries: %d voyages", len(summary_df))

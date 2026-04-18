@@ -1,0 +1,336 @@
+#!/bin/bash --login
+###############################################################################
+# WSL Price Backfill — MSU ICER HPCC
+#
+# Re-processes only the pages that should contain commodity-price quotes
+# (classified as market_prices / mixed_prices / narrative) from the already-
+# extracted V4 corpus, using the new PROMPT_PRICES. Writes sidecar JSONL
+# (wsl_prices_YYYY.jsonl) alongside the existing wsl_events_YYYY.jsonl —
+# does NOT overwrite event data.
+#
+# Prerequisites:
+#   - hpcc_extract_v4.sb has been patched per
+#     scripts/context/hpcc_price_extraction_patch.md
+#   - OR: the classifier change is sufficient, this script uses the patch's
+#     PROMPT_PRICES inline
+#   - Existing wsl_manifest_YYYY.jsonl files in FINAL_OUTPUT_DIR
+#
+# Usage:
+#   sbatch scripts/hpcc_price_backfill.sb                     # all years
+#   sbatch scripts/hpcc_price_backfill.sb --year 1850         # single year
+#   sbatch --array=1843-1914 scripts/hpcc_price_backfill.sb   # year per job
+###############################################################################
+
+#SBATCH --job-name=wsl_price_bf
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=2:00:00
+#SBATCH --partition=general-short
+#SBATCH --constraint="a100|h200|l40s"
+#SBATCH --output=/mnt/research/CEO_Complementarities/maricste/data/extracted/logs/%x-%j_%a.out
+#SBATCH --error=/mnt/research/CEO_Complementarities/maricste/data/extracted/logs/%x-%j_%a.err
+#SBATCH --mail-type=END,FAIL
+
+set -euo pipefail
+
+cleanup() {
+    echo "Cleaning up vLLM server..."
+    [ -n "${VLLM_PID:-}" ] && kill ${VLLM_PID} 2>/dev/null
+    wait 2>/dev/null || true
+    exit 1
+}
+trap cleanup SIGTERM SIGINT SIGHUP
+
+TARGET_YEAR=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --year) TARGET_YEAR="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+ARRAY_YEAR="${SLURM_ARRAY_TASK_ID:-}"
+if [ -n "${ARRAY_YEAR}" ]; then
+    TARGET_YEAR="${ARRAY_YEAR}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Configuration (mirror hpcc_extract_v4.sb)
+# ═══════════════════════════════════════════════════════════════════════════
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+CONDA_ENV_NAME="wsl_extract"
+MODEL_ID="Qwen/Qwen3-VL-32B-Instruct-FP8"
+HF_CACHE="/mnt/research/CEO_Complementarities/maricste/hf_cache"
+FINAL_OUTPUT_DIR="/mnt/research/CEO_Complementarities/maricste/data/extracted"
+SCRATCH_BASE="/mnt/scratch/maricste/wsl_price_bf_${SLURM_JOB_ID:-local}"
+PDF_DIR="/mnt/home/maricste/PDFs"
+BASE_PORT=$((8100 + (${SLURM_JOB_ID:-$$} % 1900)))
+
+export HF_HOME="${HF_CACHE}"
+export HF_HUB_CACHE="${HF_CACHE}/hub"
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
+export TMPDIR="${SCRATCH_BASE}/tmp"
+export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
+export HF_HUB_DISABLE_XET=1
+mkdir -p "${SCRATCH_BASE}" "${TMPDIR}"
+
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  WSL Price Backfill — PROMPT_PRICES pass                    ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+echo "║  Job:    ${SLURM_JOB_ID:-local} (array=${ARRAY_YEAR:-none})"
+echo "║  Year:   ${TARGET_YEAR:-ALL}"
+echo "║  Node:   $(hostname)"
+echo "╚══════════════════════════════════════════════════════════════╝"
+
+# ─── Environment ───────────────────────────────────────────────────────────
+module purge
+module load Conda/3
+module load CUDA/12.4.0
+conda activate "${CONDA_ENV_NAME}"
+
+pip install --quiet --cache-dir "${SCRATCH_BASE}/.pip" \
+    "vllm>=0.11.0" "transformers>=4.57.0" "qwen-vl-utils" \
+    "pypdfium2" "Pillow" "numpy" "requests"
+
+# ─── vLLM server ───────────────────────────────────────────────────────────
+MODEL_LOCAL_DIR="${HF_CACHE}/models/Qwen3-VL-32B-Instruct-FP8"
+PORT=${BASE_PORT}
+
+GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+if [ "${GPU_MEM_MB}" -lt 50000 ]; then
+    MAX_MODEL_LEN=8192; MAX_NUM_SEQS=4
+else
+    MAX_MODEL_LEN=16384; MAX_NUM_SEQS=8
+fi
+
+echo "Launching vLLM on port ${PORT} (max_model_len=${MAX_MODEL_LEN})..."
+OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=0 python3 -m vllm.entrypoints.openai.api_server \
+    --model "${MODEL_LOCAL_DIR}" \
+    --dtype auto --generation-config vllm \
+    --max-model-len ${MAX_MODEL_LEN} --max-num-seqs ${MAX_NUM_SEQS} \
+    --gpu-memory-utilization 0.90 \
+    --port ${PORT} --trust-remote-code \
+    --served-model-name "${MODEL_ID}" \
+    --limit-mm-per-prompt.image 1 --limit-mm-per-prompt.video 0 \
+    > "${SCRATCH_BASE}/vllm_${SLURM_JOB_ID:-local}.log" 2>&1 &
+VLLM_PID=$!
+
+for i in $(seq 1 420); do
+    if curl -s "http://localhost:${PORT}/v1/models" 2>/dev/null | grep -q "Qwen"; then
+        echo "✓ server ready (${i}s)"; break
+    fi
+    kill -0 ${VLLM_PID} 2>/dev/null || { echo "✗ server died"; exit 1; }
+    sleep 1
+done
+
+export PORT MODEL_ID FINAL_OUTPUT_DIR PDF_DIR TARGET_YEAR SCRATCH_BASE
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Python worker: read manifests, re-extract price pages only
+# ═══════════════════════════════════════════════════════════════════════════
+python3 - << 'PYEOF'
+import os, sys, json, base64, logging, threading, time
+from pathlib import Path
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import numpy as np
+import pypdfium2 as pdfium
+from PIL import Image
+import requests
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("backfill")
+
+PORT = int(os.environ["PORT"])
+MODEL_ID = os.environ["MODEL_ID"]
+FINAL_DIR = Path(os.environ["FINAL_OUTPUT_DIR"])
+PDF_DIR = Path(os.environ["PDF_DIR"])
+TARGET_YEAR = os.environ.get("TARGET_YEAR") or ""
+URL = f"http://localhost:{PORT}/v1/chat/completions"
+
+PRICE_PAGE_TYPES = {"mixed", "sparse"}
+SKIP_STATUSES = {"error", "empty_response", "truncated"}
+RENDER_DPI = 150
+
+PROMPT_PRICES = """Extract the current commodity prices from this Whalemen's Shipping List page.
+These pages contain "Marine Markets", "Prices Current", or "Oil Market" sections
+quoting sperm oil, whale oil, and whalebone prices in USD.
+
+For each commodity-price line, extract:
+- "c": commodity — one of: sperm_oil, whale_oil, whalebone
+- "lo": lower bound of quoted price range (float, USD)
+- "hi": upper bound of quoted price range (float, USD). If single value, lo=hi.
+- "u": unit — one of: gal (per gallon), lb (per pound), bbl (per barrel)
+- "cur": currency, default "USD"; "GBP" only if £/stg explicit
+- "raw": the raw text snippet as it appears
+
+Rules:
+1. Only commodity prices. Ignore freight, insurance, exchange rates.
+2. Dollars and cents ($1.15) or cents-per-gallon (115c → 1.15).
+3. If no price quotes, return: {"prices": []}
+
+Return: {"prices": [...]}
+Return ONLY valid JSON. No explanation. No markdown."""
+
+pdfium_lock = threading.Lock()
+write_lock = threading.Lock()
+
+
+def enumerate_candidates(year: int):
+    """Read wsl_events_YYYY.jsonl and yield (pdf_path, pg_idx, page_key) for
+    pages the V4 classifier labeled 'mixed' or 'sparse' — the places prices
+    can still hide in the existing event-extraction output."""
+    events = FINAL_DIR / f"wsl_events_{year}.jsonl"
+    if not events.exists():
+        log.warning("no events JSONL for %s", year)
+        return
+    with open(events) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("page_type") not in PRICE_PAGE_TYPES:
+                continue
+            if rec.get("status") in SKIP_STATUSES:
+                continue
+            pdf_name = rec.get("pdf")
+            page_key = rec.get("page_key")
+            pg_idx = rec.get("page")
+            if not (pdf_name and pg_idx is not None and page_key):
+                continue
+            pdf_path = PDF_DIR / str(year) / pdf_name
+            if not pdf_path.exists():
+                continue
+            yield pdf_path, int(pg_idx), page_key
+
+
+def render_page(pdf_path: Path, pg_idx: int) -> str:
+    with pdfium_lock:
+        doc = pdfium.PdfDocument(str(pdf_path))
+        page = doc[pg_idx]
+        pil = page.render(scale=RENDER_DPI / 72).to_pil()
+        doc.close()
+    buf = BytesIO()
+    pil.save(buf, format="JPEG", quality=92)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def vllm_price_call(img_b64: str, timeout: int = 300) -> dict:
+    payload = {
+        "model": MODEL_ID,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                {"type": "text", "text": PROMPT_PRICES},
+            ],
+        }],
+        "max_tokens": 1024,
+        "temperature": 0.0,
+    }
+    r = requests.post(URL, json=payload, timeout=timeout)
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+    # strip accidental code fences
+    content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {"prices": [], "_parse_error": True, "_raw": content[:500]}
+
+
+def _valid_price(p):
+    if not isinstance(p, dict):
+        return False
+    if p.get("c") not in {"sperm_oil", "whale_oil", "whalebone"}:
+        return False
+    try:
+        float(p.get("lo", p.get("hi", 0)))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def process_one(pdf_path: Path, pg_idx: int, page_key: str, year: int) -> dict:
+    t0 = time.time()
+    try:
+        img_b64 = render_page(pdf_path, pg_idx)
+        parsed = vllm_price_call(img_b64)
+    except Exception as e:
+        return {"page_key": page_key, "pdf": pdf_path.name, "page": pg_idx,
+                "year": year, "status": "error", "error": str(e)[:300],
+                "prices": []}
+
+    raw = parsed.get("prices") or []
+    prices = [p for p in raw if _valid_price(p)]
+    return {
+        "page_key": page_key, "pdf": pdf_path.name, "page": pg_idx,
+        "year": year, "status": "ok" if prices else "empty",
+        "n_prices": len(prices), "prices": prices,
+        "llm_time_s": round(time.time() - t0, 2),
+        "prompt_tag": "PROMPT_PRICES_v1",
+    }
+
+
+def backfill_year(year: int) -> dict:
+    out_path = FINAL_DIR / f"wsl_prices_{year}.jsonl"
+    already = set()
+    if out_path.exists():
+        with open(out_path) as f:
+            for line in f:
+                try:
+                    already.add(json.loads(line)["page_key"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
+
+    candidates = [
+        (pdf, idx, key) for (pdf, idx, key) in enumerate_candidates(year)
+        if key not in already
+    ]
+    log.info("year=%s  candidates=%d  already=%d", year, len(candidates), len(already))
+    if not candidates:
+        return {"year": year, "processed": 0, "prices": 0}
+
+    total_prices = 0
+    with ThreadPoolExecutor(max_workers=4) as pool, open(out_path, "a") as fout:
+        futs = {pool.submit(process_one, pdf, idx, key, year): key
+                for pdf, idx, key in candidates}
+        for fut in as_completed(futs):
+            rec = fut.result()
+            with write_lock:
+                fout.write(json.dumps(rec) + "\n")
+                fout.flush()
+            total_prices += rec.get("n_prices", 0)
+
+    return {"year": year, "processed": len(candidates), "prices": total_prices}
+
+
+# ─── Run ──────────────────────────────────────────────────────────────────
+if TARGET_YEAR:
+    years = [int(TARGET_YEAR)]
+else:
+    years = sorted({int(p.stem.replace("wsl_manifest_", ""))
+                    for p in FINAL_DIR.glob("wsl_manifest_*.jsonl")})
+
+log.info("backfilling %d year(s)", len(years))
+for yr in years:
+    summary = backfill_year(yr)
+    log.info("DONE %s", summary)
+
+PYEOF
+
+# ─── Teardown ──────────────────────────────────────────────────────────────
+echo "Shutting down vLLM..."
+kill ${VLLM_PID} 2>/dev/null || true
+wait 2>/dev/null || true
+echo "Backfill complete."

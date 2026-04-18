@@ -1,12 +1,15 @@
-"""Convert decoded state paths into econometric features.
+"""Convert decoded state paths into econometric features (5-state model).
 
-Produces the spec's ``state_summary_table``: per-voyage features for
-bad-state entry, duration, recovery, and terminal outcomes.
+Terminal outcome classification uses a hybrid approach:
+- Mid-voyage states come from the HSMM Viterbi path
+- Terminal classification (completed vs. lost) is determined by anchor
+  evidence at the voyage boundary, since the HSMM absorbing states
+  are difficult to enter with only 1-2 weeks of terminal evidence.
 
 Usage::
 
     from .summarize_paths import summarize_state_features
-    summary_df = summarize_state_features(decoded_df, config)
+    summary_df = summarize_state_features(decoded_df, anchor_df=anchor_df)
 """
 
 from __future__ import annotations
@@ -21,17 +24,60 @@ from .state_space import BAD_STATES, STATE_INDEX, STATE_NAMES
 
 logger = logging.getLogger(__name__)
 
-# Recovery states: any search state is considered "recovered"
+# Recovery states: returning to active or outbound is recovery
 _RECOVERY_STATES = {
-    "outbound_initial_transit",
-    "active_search_neutral",
-    "productive_search",
-    "low_yield_or_stalled_search",
+    "outbound_transit",
+    "active_voyage",
 }
+
+
+def _classify_terminal_from_anchors(
+    voyage_id: Any,
+    anchor_group: pd.DataFrame | None,
+) -> str:
+    """Determine terminal outcome from anchor evidence at voyage boundary.
+
+    Looks at the last 3 weeks of anchor posteriors to classify:
+    - 'completed_arrival' if strong arrival evidence
+    - 'terminal_loss' if strong loss evidence
+    - 'active_voyage' if no terminal evidence (censored/unknown)
+    """
+    if anchor_group is None or anchor_group.empty:
+        return "active_voyage"
+
+    # Last 3 weeks of the voyage
+    tail = anchor_group.sort_values("week_idx").tail(3)
+
+    # Check for terminal_loss evidence
+    loss_col = "state_prior_terminal_loss"
+    arrival_col = "state_prior_completed_arrival"
+
+    if loss_col in tail.columns:
+        max_loss = tail[loss_col].max()
+        if max_loss > 0.5:
+            return "terminal_loss"
+
+    if arrival_col in tail.columns:
+        max_arrival = tail[arrival_col].max()
+        if max_arrival > 0.5:
+            return "completed_arrival"
+
+    # Check if terminal anchor was flagged
+    if "is_terminal_anchor" in tail.columns and tail["is_terminal_anchor"].any():
+        # Which terminal state is stronger?
+        mean_loss = tail[loss_col].mean() if loss_col in tail.columns else 0
+        mean_arr = tail[arrival_col].mean() if arrival_col in tail.columns else 0
+        if mean_loss > mean_arr:
+            return "terminal_loss"
+        elif mean_arr > 0.3:
+            return "completed_arrival"
+
+    return "active_voyage"  # censored — no terminal evidence
 
 
 def _summarize_one_voyage(
     group: pd.DataFrame,
+    anchor_group: pd.DataFrame | None,
     state_col: str = "viterbi_state",
 ) -> dict[str, Any]:
     """Compute state summary features for one voyage's decoded path."""
@@ -47,57 +93,53 @@ def _summarize_one_voyage(
 
     # Bad state detection
     bad_mask = [s in BAD_STATES for s in states]
-    ever_distress = any(s == "distress_at_sea" for s in states)
-    ever_interrupted = any(s == "in_port_interruption_or_repair" for s in states)
+    ever_trouble = any(s == "in_trouble" for s in states)
     ever_bad = any(bad_mask)
 
-    # First occurrence of each concerning state
-    first_distress_week = np.nan
-    first_interruption_week = np.nan
-    first_low_yield_week = np.nan
+    # First occurrence of trouble state
+    first_trouble_week = np.nan
     first_bad_week = np.nan
 
     for i, s in enumerate(states):
         w = int(weeks[i])
-        if s == "distress_at_sea" and np.isnan(first_distress_week):
-            first_distress_week = w
-        if s == "in_port_interruption_or_repair" and np.isnan(first_interruption_week):
-            first_interruption_week = w
-        if s == "low_yield_or_stalled_search" and np.isnan(first_low_yield_week):
-            first_low_yield_week = w
+        if s == "in_trouble" and np.isnan(first_trouble_week):
+            first_trouble_week = w
         if bad_mask[i] and np.isnan(first_bad_week):
             first_bad_week = w
 
-    # State durations (in weeks)
-    distress_duration = sum(1 for s in states if s == "distress_at_sea")
-    interruption_duration = sum(1 for s in states if s == "in_port_interruption_or_repair")
+    # State durations (in decoded weeks)
+    trouble_duration = sum(1 for s in states if s == "in_trouble")
     bad_state_duration = sum(bad_mask)
+    outbound_duration = sum(1 for s in states if s == "outbound_transit")
+    active_duration = sum(1 for s in states if s == "active_voyage")
 
-    # Recovery detection: did the voyage return to a search state after being in a bad state?
-    recovered_from_distress = False
+    # Recovery detection: did the voyage return to active after trouble?
+    recovered_from_trouble = False
     recovery_week = np.nan
-    if ever_bad:
-        first_bad_idx = next(i for i, b in enumerate(bad_mask) if b)
-        for i in range(first_bad_idx + 1, T):
+    if ever_trouble:
+        first_trouble_idx = next(i for i, s in enumerate(states) if s == "in_trouble")
+        for i in range(first_trouble_idx + 1, T):
             if states[i] in _RECOVERY_STATES:
-                recovered_from_distress = True
+                recovered_from_trouble = True
                 recovery_week = int(weeks[i])
                 break
 
-    # Homebound early: entered homebound before typical voyage completion
-    entered_homebound_early = False
-    for i, s in enumerate(states):
-        if s == "homebound_or_terminated" and int(weeks[i]) < total_weeks * 0.7:
-            entered_homebound_early = True
-            break
+    # Terminal outcomes — hybrid: Viterbi path + anchor evidence
+    viterbi_terminal = states[-1] if T > 0 else None
+    if viterbi_terminal in ("terminal_loss", "completed_arrival"):
+        # Viterbi already picked a terminal state — trust it
+        terminal_state = viterbi_terminal
+    else:
+        # Viterbi didn't pick a terminal state — use anchor evidence
+        terminal_state = _classify_terminal_from_anchors(voyage_id, anchor_group)
 
-    # Terminal outcomes
-    terminal_failure = states[-1] == "terminal_loss" if T > 0 else False
-    completed_successfully = states[-1] == "completed_arrival" if T > 0 else False
+    terminal_failure = terminal_state == "terminal_loss"
+    completed_successfully = terminal_state == "completed_arrival"
 
-    # Productive share
-    productive_weeks = sum(1 for s in states if s == "productive_search")
-    productive_share = productive_weeks / max(T, 1)
+    # Shares
+    active_share = active_duration / max(T, 1)
+    outbound_share = outbound_duration / max(T, 1)
+    trouble_share = trouble_duration / max(T, 1)
 
     # State entropy (diversity of states visited)
     state_counts = {}
@@ -113,37 +155,35 @@ def _summarize_one_voyage(
         "first_week": first_week,
         "last_week": last_week,
         "total_span_weeks": total_weeks,
-        # Low yield
-        "first_low_yield_week": first_low_yield_week,
-        # Distress
-        "first_distress_week": first_distress_week,
-        "ever_distress": ever_distress,
-        "distress_duration_weeks": distress_duration,
-        # Interruption
-        "first_interruption_week": first_interruption_week,
-        "ever_interrupted": ever_interrupted,
-        "interruption_duration_weeks": interruption_duration,
-        # Bad state (composite)
+        # Outbound
+        "outbound_duration_weeks": outbound_duration,
+        "outbound_share": outbound_share,
+        # Active voyage
+        "active_duration_weeks": active_duration,
+        "active_share": active_share,
+        # Trouble
+        "first_trouble_week": first_trouble_week,
+        "ever_trouble": ever_trouble,
+        "trouble_duration_weeks": trouble_duration,
+        "trouble_share": trouble_share,
+        # Bad state (composite: in_trouble + terminal_loss)
         "first_bad_state_week": first_bad_week,
         "ever_bad_state": ever_bad,
         "bad_state_duration_weeks": bad_state_duration,
         # Recovery
-        "recovered_from_distress": recovered_from_distress,
+        "recovered_from_trouble": recovered_from_trouble,
         "recovery_week": recovery_week,
-        "recovery_time_weeks": float(recovery_week - first_bad_week)
-        if not np.isnan(recovery_week) and not np.isnan(first_bad_week)
+        "recovery_time_weeks": float(recovery_week - first_trouble_week)
+        if not np.isnan(recovery_week) and not np.isnan(first_trouble_week)
         else np.nan,
-        # Homebound
-        "entered_homebound_early": entered_homebound_early,
-        # Terminal
+        # Terminal (hybrid Viterbi + anchor)
         "terminal_failure": terminal_failure,
         "completed_successfully": completed_successfully,
-        # Productivity
-        "productive_share": productive_share,
+        "terminal_state": terminal_state,
+        # Viterbi terminal (raw, before anchor override)
+        "viterbi_terminal_state": viterbi_terminal,
         # Entropy
         "state_entropy_mean": state_entropy,
-        # Terminal state
-        "terminal_state": states[-1] if T > 0 else None,
     }
 
 
@@ -152,6 +192,7 @@ def summarize_state_features(
     config: dict[str, Any] | None = None,
     *,
     state_col: str = "viterbi_state",
+    anchor_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Convert decoded paths into econometric features keyed by ``voyage_id``.
 
@@ -163,33 +204,48 @@ def summarize_state_features(
         Configuration overrides.
     state_col : str
         Name of the decoded state column.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per voyage with summary features.
+    anchor_df : pd.DataFrame, optional
+        Anchor posteriors for hybrid terminal classification.
     """
     if decoded_df.empty:
         logger.warning("[summarize] Empty decoded paths; returning empty summary")
         return pd.DataFrame()
 
-    # Ensure sorted
     decoded_df = decoded_df.sort_values(["voyage_id", "week_idx"])
+
+    # Pre-group anchors by voyage for O(1) lookup
+    anchor_groups: dict[Any, pd.DataFrame] = {}
+    if anchor_df is not None:
+        for vid, grp in anchor_df.groupby("voyage_id"):
+            anchor_groups[vid] = grp
 
     summaries: list[dict[str, Any]] = []
     for voyage_id, group in decoded_df.groupby("voyage_id"):
-        summary = _summarize_one_voyage(group, state_col=state_col)
+        ag = anchor_groups.get(voyage_id)
+        summary = _summarize_one_voyage(group, ag, state_col=state_col)
         summaries.append(summary)
 
     summary_df = pd.DataFrame(summaries)
 
-    logger.info(
-        "[summarize] %d voyage summaries: ever_bad=%.1f%%, terminal_failure=%.1f%%, completed=%.1f%%",
-        len(summary_df),
-        100.0 * summary_df["ever_bad_state"].mean() if len(summary_df) > 0 else 0,
-        100.0 * summary_df["terminal_failure"].mean() if len(summary_df) > 0 else 0,
-        100.0 * summary_df["completed_successfully"].mean() if len(summary_df) > 0 else 0,
-    )
+    # Log stats
+    n = len(summary_df)
+    if n > 0:
+        n_trouble = summary_df["ever_trouble"].sum()
+        n_fail = summary_df["terminal_failure"].sum()
+        n_complete = summary_df["completed_successfully"].sum()
+        n_censored = n - n_fail - n_complete
+        n_overridden = (summary_df["terminal_state"] != summary_df["viterbi_terminal_state"]).sum()
+
+        logger.info(
+            "[summarize] %d voyages: completed=%d (%.1f%%), terminal_loss=%d (%.1f%%), "
+            "censored=%d (%.1f%%), ever_trouble=%d (%.1f%%), anchor_overrides=%d",
+            n,
+            n_complete, 100.0 * n_complete / n,
+            n_fail, 100.0 * n_fail / n,
+            n_censored, 100.0 * n_censored / n,
+            n_trouble, 100.0 * n_trouble / n,
+            n_overridden,
+        )
 
     return summary_df
 
@@ -203,10 +259,10 @@ def compute_recovery_metrics(summary_df: pd.DataFrame) -> pd.DataFrame:
     """Extract recovery metrics for econometric analysis."""
     cols = [
         "voyage_id",
-        "ever_bad_state",
-        "recovered_from_distress",
+        "ever_trouble",
+        "recovered_from_trouble",
         "recovery_time_weeks",
-        "first_bad_state_week",
+        "first_trouble_week",
         "recovery_week",
     ]
     return summary_df[[c for c in cols if c in summary_df.columns]].copy()

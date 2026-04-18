@@ -73,15 +73,15 @@ def check_duration_plausibility(
         passed = True
         reason = "ok"
 
-        if name == "outbound_initial_transit" and mean_dur > 20:
+        if name == "outbound_transit" and mean_dur > 20:
             passed = False
             reason = f"outbound mean too long: {mean_dur:.1f}"
-        elif name in ("active_search_neutral", "productive_search") and mean_dur < 2:
+        elif name == "active_voyage" and mean_dur < 2:
             passed = False
-            reason = f"search mean too short: {mean_dur:.1f}"
-        elif name == "distress_at_sea" and mean_dur > 30:
+            reason = f"active mean too short: {mean_dur:.1f}"
+        elif name == "in_trouble" and mean_dur > 30:
             passed = False
-            reason = f"distress mean too long: {mean_dur:.1f}"
+            reason = f"trouble mean too long: {mean_dur:.1f}"
 
         if not passed:
             all_pass = False
