@@ -155,9 +155,14 @@ def run_single_stage(stage: int, **kwargs) -> dict:
         raise ValueError(f"Invalid stage number: {stage}. Must be 1-5.")
 
 
-if __name__ == "__main__":
+def main() -> dict:
+    """Entry point for the ``whaling`` console script (see pyproject.toml)."""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    run_full_pipeline()
+    return run_full_pipeline()
+
+
+if __name__ == "__main__":
+    main()

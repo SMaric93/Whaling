@@ -52,7 +52,6 @@ pip install -e .                    # Core dependencies
 pip install -e ".[dev]"             # + pytest
 pip install -e ".[wsl]"            # + WSL document processing
 pip install -e ".[all]"            # Everything
-pip install -r requirements.txt    # Alternative flat install
 ```
 
 ## Code Architecture

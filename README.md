@@ -881,7 +881,8 @@ Whaling/
 ├── tests/                     # Test suite
 ├── run_pipeline.py            # Main runner (CLI)
 ├── manifest.jsonl             # Download provenance
-└── requirements.txt           # Python dependencies
+├── pyproject.toml             # Package metadata + dependencies
+└── setup.sh                   # Venv bootstrap (pip install -e ".[all]")
 ```
 
 ---

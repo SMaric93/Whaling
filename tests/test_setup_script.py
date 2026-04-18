@@ -20,4 +20,4 @@ def test_setup_script_help():
     )
 
     assert "Creates ./venv" in result.stdout
-    assert "requirements.txt" in result.stdout
+    assert ".[all]" in result.stdout
