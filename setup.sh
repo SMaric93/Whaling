@@ -13,7 +13,7 @@ What it does:
   1. Creates ./venv if it does not exist
   2. Activates the virtual environment for this shell
   3. Upgrades pip tooling
-  4. Installs dependencies from requirements.txt
+  4. Installs the package in editable mode with all optional extras (pip install -e ".[all]")
 
 Notes:
   - If you run './setup.sh', the virtualenv is created and populated, but the
@@ -76,7 +76,7 @@ fi
 . "$VENV_DIR/bin/activate"
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r "$SCRIPT_DIR/requirements.txt"
+python -m pip install -e "$SCRIPT_DIR[all]"
 
 echo
 echo "Virtualenv is ready."
